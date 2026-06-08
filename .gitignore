@@ -1,0 +1,6 @@
+.env
+.gocache/
+bin/
+coverage.out
+*.test
+k8s/**/*.local.yaml
