@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+.git
+.gocache
+bin/
+coverage.out
+*.test
+k8s/**/*.local.yaml
