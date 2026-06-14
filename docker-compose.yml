@@ -1,0 +1,68 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    image: seo-auditor-postgres:local
+    container_name: seo_auditor_postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:?DB_USER is required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME is required}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.50
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - seo-network
+
+  parser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: seo-auditor:local
+    container_name: seo_auditor_parser
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      WORKERS: ${WORKERS:-3}
+      HTTP_REQUEST_TIMEOUT: ${HTTP_REQUEST_TIMEOUT:-5s}
+      ROBOTS_TIMEOUT: ${ROBOTS_TIMEOUT:-3s}
+      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-5s}
+      DB_FETCH_TIMEOUT: ${DB_FETCH_TIMEOUT:-5s}
+      DB_WRITE_TIMEOUT: ${DB_WRITE_TIMEOUT:-3s}
+      MAX_HTML_BODY_BYTES: ${MAX_HTML_BODY_BYTES:-5242880}
+      RATE_LIMIT_INTERVAL: ${RATE_LIMIT_INTERVAL:-500ms}
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "on-failure:5"
+    read_only: true
+    mem_limit: 256m
+    cpus: 0.50
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    networks:
+      - seo-network
+
+volumes:
+  pgdata:
+
+networks:
+  seo-network:
+    driver: bridge
