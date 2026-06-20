@@ -38,6 +38,40 @@ const (
 	MaxRobotsBodyBytes      = int64(512 * 1024)
 )
 
+const (
+	exitOK       = 0
+	exitCritical = 1
+	exitPartial  = 2
+)
+
+var blockedTargetIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:2::/48"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
+
 type Config struct {
 	Workers             int
 	DatabaseURL         string
@@ -89,6 +123,12 @@ type Result struct {
 	Error error
 }
 
+type ResultSummary struct {
+	Received int
+	Saved    int
+	Failed   int
+}
+
 type robotsRule struct {
 	allow       bool
 	pattern     string
@@ -101,6 +141,10 @@ type robotsGroup struct {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(logger)
 
@@ -123,7 +167,7 @@ func main() {
 	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("Не вдалося розібрати рядок підключення до PostgreSQL", "error", err)
-		return
+		return exitCritical
 	}
 
 	poolConfig.MaxConns = int32(cfg.Workers + 2)
@@ -139,14 +183,14 @@ func main() {
 	if err != nil {
 		dbCancel()
 		slog.Error("Не вдалося ініціалізувати пул підключень PostgreSQL", "error", err)
-		return
+		return exitCritical
 	}
 
 	if err := dbPool.Ping(dbInitCtx); err != nil {
 		dbCancel()
 		dbPool.Close()
 		slog.Error("PostgreSQL недоступний під час перевірки підключення", "error", err)
-		return
+		return exitCritical
 	}
 	dbCancel()
 	slog.Info("Підключення до PostgreSQL підтверджено", "max_conns", poolConfig.MaxConns)
@@ -156,33 +200,26 @@ func main() {
 		dbPool.Close()
 	}()
 
-	urls, err := fetchTargetURLs(rootCtx, dbPool, cfg)
+	urls, skippedURLs, err := fetchTargetURLs(rootCtx, dbPool, cfg)
 	if err != nil {
 		slog.Error("Не вдалося отримати чергу URL", "error", err)
-		return
+		return exitCritical
 	}
 	if len(urls) == 0 {
-		slog.Warn("Черга URL порожня")
-		return
+		slog.Warn("Черга URL порожня", "skipped_urls", skippedURLs)
+		if skippedURLs > 0 {
+			return exitPartial
+		}
+		return exitOK
 	}
-	slog.Info("Чергу URL сформовано", "total_urls", len(urls))
+	slog.Info("Чергу URL сформовано", "total_urls", len(urls), "skipped_urls", skippedURLs)
 
 	limiter := rate.NewLimiter(rate.Every(cfg.RateLimitInterval), cfg.Workers)
 
 	jobs := make(chan string, len(urls))
 	results := make(chan Result, len(urls))
 
-	customTransport := &http.Transport{
-		MaxIdleConns:           100,
-		MaxIdleConnsPerHost:    cfg.Workers,
-		MaxConnsPerHost:        cfg.Workers * 2,
-		IdleConnTimeout:        30 * time.Second,
-		TLSHandshakeTimeout:    5 * time.Second,
-		ResponseHeaderTimeout:  cfg.HTTPRequestTimeout,
-		ExpectContinueTimeout:  1 * time.Second,
-		MaxResponseHeaderBytes: 64 << 10,
-		ForceAttemptHTTP2:      true,
-	}
+	customTransport := newHTTPTransport(cfg)
 
 	httpClient := &http.Client{
 		Transport: customTransport,
@@ -217,8 +254,22 @@ func main() {
 	}()
 
 	slog.Info("Починається паралельна обробка URL та збереження результатів")
-	saveResults(rootCtx, dbPool, results, cfg)
-	slog.Info("Роботу парсера завершено")
+	summary := saveResults(rootCtx, dbPool, results, cfg)
+	if skippedURLs > 0 || summary.Failed > 0 {
+		slog.Error(
+			"Роботу парсера завершено з частковими помилками",
+			"skipped_urls",
+			skippedURLs,
+			"failed_results",
+			summary.Failed,
+			"saved_results",
+			summary.Saved,
+		)
+		return exitPartial
+	}
+
+	slog.Info("Роботу парсера завершено", "saved_results", summary.Saved)
+	return exitOK
 }
 
 func loadConfig() Config {
@@ -244,6 +295,122 @@ func loadConfig() Config {
 		AllowPrivateTargets: boolFromEnv("ALLOW_PRIVATE_TARGETS", false),
 		RateLimitInterval:   durationFromEnv("RATE_LIMIT_INTERVAL", 500*time.Millisecond),
 	}
+}
+
+func newHTTPTransport(cfg Config) *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   cfg.HTTPRequestTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+
+	return &http.Transport{
+		DialContext:           safeDialContext(dialer, cfg.AllowPrivateTargets),
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   cfg.Workers,
+		MaxConnsPerHost:       cfg.Workers * 2,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: cfg.HTTPRequestTimeout,
+		ExpectContinueTimeout: 1 * time.Second,
+
+		MaxResponseHeaderBytes: 64 << 10,
+		ForceAttemptHTTP2:      true,
+	}
+}
+
+func safeDialContext(dialer *net.Dialer, allowPrivateTargets bool) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("split dial address %q: %w", address, err)
+		}
+
+		ips, err := resolveDialIPs(ctx, network, host)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateResolvedTargetIPs(host, ips, allowPrivateTargets); err != nil {
+			return nil, err
+		}
+
+		var lastErr error
+		for _, ip := range ips {
+			if !ipMatchesNetwork(ip, network) {
+				continue
+			}
+
+			dialAddress := net.JoinHostPort(ip.String(), port)
+			conn, err := dialer.DialContext(ctx, network, dialAddress)
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+
+		if lastErr != nil {
+			return nil, fmt.Errorf("dial %s: %w", address, lastErr)
+		}
+		return nil, fmt.Errorf("no resolved IP address for %s matches network %s", address, network)
+	}
+}
+
+func resolveDialIPs(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	normalizedHost := strings.Trim(strings.TrimSpace(strings.TrimSuffix(host, ".")), "[]")
+	if normalizedHost == "" {
+		return nil, fmt.Errorf("empty dial host")
+	}
+
+	if ip, err := netip.ParseAddr(normalizedHost); err == nil {
+		return []netip.Addr{ip.Unmap()}, nil
+	}
+
+	lookupNetwork := "ip"
+	if strings.HasSuffix(network, "4") {
+		lookupNetwork = "ip4"
+	} else if strings.HasSuffix(network, "6") {
+		lookupNetwork = "ip6"
+	}
+
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, lookupNetwork, normalizedHost)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", normalizedHost, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %s: no IP addresses returned", normalizedHost)
+	}
+
+	for i := range ips {
+		ips[i] = ips[i].Unmap()
+	}
+	return ips, nil
+}
+
+func validateResolvedTargetIPs(host string, ips []netip.Addr, allowPrivateTargets bool) error {
+	if len(ips) == 0 {
+		return fmt.Errorf("resolve %s: no IP addresses returned", host)
+	}
+	if allowPrivateTargets {
+		return nil
+	}
+
+	for _, ip := range ips {
+		if isBlockedTargetIP(ip) {
+			return fmt.Errorf("private or local network target is disabled: %s resolved to %s", host, ip)
+		}
+	}
+
+	return nil
+}
+
+func ipMatchesNetwork(ip netip.Addr, network string) bool {
+	ip = ip.Unmap()
+	if strings.HasSuffix(network, "4") {
+		return ip.Is4()
+	}
+	if strings.HasSuffix(network, "6") {
+		return ip.Is6()
+	}
+	return true
 }
 
 func intFromEnv(name string, fallback, minValue, maxValue int) int {
@@ -338,7 +505,7 @@ func boolFromEnv(name string, fallback bool) bool {
 	return value
 }
 
-func fetchTargetURLs(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) ([]string, error) {
+func fetchTargetURLs(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) ([]string, int, error) {
 	slog.Info("Завантажується черга URL з PostgreSQL")
 
 	dbFetchCtx, fetchCancel := context.WithTimeout(ctx, cfg.DBFetchTimeout)
@@ -346,34 +513,37 @@ func fetchTargetURLs(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) ([]s
 
 	rows, err := dbPool.Query(dbFetchCtx, "SELECT url FROM pages_to_scan WHERE is_active = TRUE")
 	if err != nil {
-		return nil, fmt.Errorf("query active pages: %w", err)
+		return nil, 0, fmt.Errorf("query active pages: %w", err)
 	}
 	defer rows.Close()
 
 	var urls []string
+	skipped := 0
 	for rows.Next() {
 		var rawURL string
 		if err := rows.Scan(&rawURL); err != nil {
 			slog.Error("Не вдалося прочитати URL з рядка PostgreSQL", "error", err)
+			skipped++
 			continue
 		}
 
 		normalizedURL, err := normalizeTargetURL(rawURL, cfg.AllowPrivateTargets)
 		if err != nil {
 			slog.Warn("URL пропущено через помилку валідації", "url", rawURL, "error", err)
+			skipped++
 			continue
 		}
 		urls = append(urls, normalizedURL)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate active pages: %w", err)
+		return nil, skipped, fmt.Errorf("iterate active pages: %w", err)
 	}
 
-	return urls, nil
+	return urls, skipped, nil
 }
 
-func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config) {
+func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config) ResultSummary {
 	query := `
 		INSERT INTO seo_results (
 			url, status_code, is_redirect, redirect_url, title, title_status, description, description_status,
@@ -413,9 +583,12 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			duration_ms = EXCLUDED.duration_ms,
 			created_at = CURRENT_TIMESTAMP;`
 
+	summary := ResultSummary{}
 	for res := range results {
+		summary.Received++
 		if res.Error != nil {
 			slog.Error("Задача завершилася помилкою", "error", res.Error)
+			summary.Failed++
 			continue
 		}
 
@@ -458,11 +631,15 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 
 		if err != nil {
 			slog.Error("Не вдалося зберегти результат SEO-аудиту", "url", d.URL, "error", err)
+			summary.Failed++
 			continue
 		}
 
+		summary.Saved++
 		slog.Debug("Результат SEO-аудиту збережено", "url", d.URL)
 	}
+
+	return summary
 }
 
 func worker(
@@ -540,6 +717,21 @@ func worker(
 				RobotsAllowed: true,
 				Duration:      time.Since(start),
 			}}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			data := SEOData{
+				URL:           targetURL,
+				StatusCode:    resp.StatusCode,
+				XRobotsTag:    strings.TrimSpace(resp.Header.Get("X-Robots-Tag")),
+				RobotsAllowed: true,
+				Duration:      time.Since(start),
+			}
+			resp.Body.Close()
+			reqCancel()
+			workerLogger.Info("Збережено HTTP-статус без HTML-парсингу", "url", targetURL, "status", resp.StatusCode)
+			results <- Result{Data: data}
 			continue
 		}
 
@@ -624,11 +816,25 @@ func isPrivateHost(host string) bool {
 		return false
 	}
 
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified()
+	return isBlockedTargetIP(ip)
+}
+
+func isBlockedTargetIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	if !ip.IsValid() {
+		return true
+	}
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return true
+	}
+
+	for _, prefix := range blockedTargetIPPrefixes {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func isAllowedByRobots(ctx context.Context, client *http.Client, targetURL string, timeout time.Duration) bool {
@@ -833,7 +1039,7 @@ func parsePage(resp *http.Response, targetURL string, maxBodyBytes int64) (SEODa
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return data, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return data, nil
 	}
 
 	body, err := readLimited(resp.Body, maxBodyBytes)

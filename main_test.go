@@ -3,8 +3,10 @@ package main
 import (
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParsePageExtractsSEOMetrics(t *testing.T) {
@@ -97,6 +99,27 @@ func TestParsePageRejectsOversizedHTML(t *testing.T) {
 	}
 }
 
+func TestParsePagePreservesNonOKStatus(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header: http.Header{
+			"X-Robots-Tag": []string{"noindex"},
+		},
+		Body: io.NopCloser(strings.NewReader("not found")),
+	}
+
+	data, err := parsePage(resp, "https://example.com/missing", DefaultMaxHTMLBodyBytes)
+	if err != nil {
+		t.Fatalf("parsePage returned error for non-200 status: %v", err)
+	}
+	if data.StatusCode != http.StatusNotFound {
+		t.Fatalf("unexpected status code: got %d want %d", data.StatusCode, http.StatusNotFound)
+	}
+	if data.XRobotsTag != "noindex" {
+		t.Fatalf("unexpected X-Robots-Tag: %q", data.XRobotsTag)
+	}
+}
+
 func TestIsSelfCanonical(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -144,6 +167,52 @@ Allow: /audit$
 	}
 	if !isPathAllowedByRobots(specific, UserAgentStr, "/other") {
 		t.Fatalf("expected unmatched path in selected group to be allowed")
+	}
+}
+
+func TestValidateResolvedTargetIPsBlocksPrivateAndSpecialRanges(t *testing.T) {
+	tests := []struct {
+		name                string
+		ips                 []netip.Addr
+		allowPrivateTargets bool
+		wantErr             bool
+	}{
+		{name: "public IPv4", ips: []netip.Addr{netip.MustParseAddr("93.184.216.34")}},
+		{name: "loopback", ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, wantErr: true},
+		{name: "private IPv4", ips: []netip.Addr{netip.MustParseAddr("10.0.0.5")}, wantErr: true},
+		{name: "cgnat IPv4", ips: []netip.Addr{netip.MustParseAddr("100.64.0.10")}, wantErr: true},
+		{name: "documentation IPv6", ips: []netip.Addr{netip.MustParseAddr("2001:db8::1")}, wantErr: true},
+		{
+			name:    "mixed DNS response",
+			ips:     []netip.Addr{netip.MustParseAddr("93.184.216.34"), netip.MustParseAddr("127.0.0.1")},
+			wantErr: true,
+		},
+		{
+			name:                "private allowed by config",
+			ips:                 []netip.Addr{netip.MustParseAddr("127.0.0.1")},
+			allowPrivateTargets: true,
+			wantErr:             false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateResolvedTargetIPs("example.test", tt.ips, tt.allowPrivateTargets)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateResolvedTargetIPs() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewHTTPTransportUsesSafeDialer(t *testing.T) {
+	transport := newHTTPTransport(Config{
+		Workers:             1,
+		HTTPRequestTimeout:  time.Second,
+		AllowPrivateTargets: false,
+	})
+	if transport.DialContext == nil {
+		t.Fatalf("expected custom DialContext for transport-level SSRF protection")
 	}
 }
 
