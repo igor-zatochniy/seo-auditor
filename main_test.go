@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -113,10 +117,51 @@ func TestParsePagePreservesNonOKStatus(t *testing.T) {
 		t.Fatalf("parsePage returned error for non-200 status: %v", err)
 	}
 	if data.StatusCode != http.StatusNotFound {
-		t.Fatalf("unexpected status code: got %d want %d", data.StatusCode, http.StatusNotFound)
+		t.Fatalf("unexpected status code: got %v want %d", data.StatusCode, http.StatusNotFound)
 	}
 	if data.XRobotsTag != "noindex" {
 		t.Fatalf("unexpected X-Robots-Tag: %q", data.XRobotsTag)
+	}
+}
+
+func TestParsePageDecodesDeclaredCharset(t *testing.T) {
+	body := []byte("<html><head><title>caf\xe9 audit</title></head><body><h1>caf\xe9</h1></body></html>")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/html; charset=iso-8859-1"},
+		},
+		Body: io.NopCloser(strings.NewReader(string(body))),
+	}
+
+	data, err := parsePage(resp, "https://example.com", DefaultMaxHTMLBodyBytes)
+	if err != nil {
+		t.Fatalf("parsePage returned error: %v", err)
+	}
+	if data.Title != "caf\u00e9 audit" || data.H1 != "caf\u00e9" {
+		t.Fatalf("charset was not decoded: title=%q h1=%q", data.Title, data.H1)
+	}
+}
+
+func TestValidateHTMLContentTypeUsesParsedMediaType(t *testing.T) {
+	valid := []string{
+		"text/html; charset=utf-8",
+		"application/xhtml+xml",
+	}
+	for _, contentType := range valid {
+		if err := validateHTMLContentType(contentType); err != nil {
+			t.Fatalf("expected %q to be accepted: %v", contentType, err)
+		}
+	}
+
+	invalid := []string{
+		"application/json; profile=text/html",
+		"text/html garbage",
+	}
+	for _, contentType := range invalid {
+		if err := validateHTMLContentType(contentType); err == nil {
+			t.Fatalf("expected %q to be rejected", contentType)
+		}
 	}
 }
 
@@ -127,7 +172,7 @@ func TestIsSelfCanonical(t *testing.T) {
 		target    string
 		want      bool
 	}{
-		{name: "empty canonical is self", canonical: "", target: "https://example.com/page", want: true},
+		{name: "missing canonical is not self", canonical: "", target: "https://example.com/page", want: false},
 		{name: "relative canonical", canonical: "/page", target: "https://example.com/page", want: true},
 		{name: "different host", canonical: "https://other.test/page", target: "https://example.com/page", want: false},
 		{name: "different path", canonical: "/other", target: "https://example.com/page", want: false},
@@ -167,6 +212,239 @@ Allow: /audit$
 	}
 	if !isPathAllowedByRobots(specific, UserAgentStr, "/other") {
 		t.Fatalf("expected unmatched path in selected group to be allowed")
+	}
+}
+
+func TestRobotsHTTPClientFollowsFiveRedirects(t *testing.T) {
+	redirects := map[string]string{
+		"/robots.txt": "/redirect-1",
+		"/redirect-1": "/redirect-2",
+		"/redirect-2": "/redirect-3",
+		"/redirect-3": "/redirect-4",
+		"/redirect-4": "/rules",
+	}
+	var rulesFetched atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if location, ok := redirects[r.URL.Path]; ok {
+			http.Redirect(w, r, location, http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/rules" {
+			rulesFetched.Store(true)
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, "User-agent: *\nDisallow: /blocked\n")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := newRobotsHTTPClient(server.Client().Transport)
+	allowed, err := isAllowedByRobots(context.Background(), client, server.URL+"/blocked", time.Second)
+	if err != nil {
+		t.Fatalf("isAllowedByRobots returned error: %v", err)
+	}
+	if allowed {
+		t.Fatal("expected redirected robots.txt rule to disallow /blocked")
+	}
+	if !rulesFetched.Load() {
+		t.Fatal("robots client did not follow five redirects to the rules")
+	}
+}
+
+func TestRobotsHTTPClientStopsAfterFiveRedirects(t *testing.T) {
+	redirects := map[string]string{
+		"/robots.txt": "/redirect-1",
+		"/redirect-1": "/redirect-2",
+		"/redirect-2": "/redirect-3",
+		"/redirect-3": "/redirect-4",
+		"/redirect-4": "/redirect-5",
+		"/redirect-5": "/rules",
+	}
+	var rulesFetched atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if location, ok := redirects[r.URL.Path]; ok {
+			http.Redirect(w, r, location, http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/rules" {
+			rulesFetched.Store(true)
+			_, _ = io.WriteString(w, "User-agent: *\nAllow: /\n")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := newRobotsHTTPClient(server.Client().Transport)
+	allowed, err := isAllowedByRobots(context.Background(), client, server.URL+"/page", time.Second)
+	if err == nil {
+		t.Fatal("expected redirect limit error")
+	}
+	if allowed {
+		t.Fatal("unresolved robots.txt redirect chain must fail closed")
+	}
+	if rulesFetched.Load() {
+		t.Fatal("robots client followed more than five redirects")
+	}
+}
+
+func TestRobotsAccessStatusHandling(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		wantAllowed bool
+		wantErr     bool
+	}{
+		{name: "404 is unavailable", status: http.StatusNotFound, wantAllowed: true},
+		{name: "503 is unreachable", status: http.StatusServiceUnavailable, wantAllowed: false, wantErr: true},
+		{name: "unresolved redirect fails closed", status: http.StatusFound, wantAllowed: false, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+
+			client := newRobotsHTTPClient(server.Client().Transport)
+			allowed, err := isAllowedByRobots(context.Background(), client, server.URL+"/page", time.Second)
+			if allowed != tt.wantAllowed {
+				t.Fatalf("isAllowedByRobots allowed=%t, want %t", allowed, tt.wantAllowed)
+			}
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("isAllowedByRobots error=%v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRobotsNetworkErrorFailsClosed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	client := newRobotsHTTPClient(server.Client().Transport)
+	targetURL := server.URL + "/page"
+	server.Close()
+
+	allowed, err := isAllowedByRobots(context.Background(), client, targetURL, time.Second)
+	if err == nil {
+		t.Fatal("expected robots.txt network error")
+	}
+	if allowed {
+		t.Fatal("network error must not allow page scanning")
+	}
+}
+
+func TestWorkerDoesNotFetchPageWhenRobotsIsUnreachable(t *testing.T) {
+	var pageRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		pageRequests.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html><body><h1>Must not be fetched</h1></body></html>")
+	}))
+	defer server.Close()
+
+	jobs := make(chan string, 1)
+	jobs <- server.URL + "/page"
+	close(jobs)
+	results := make(chan Result, 1)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go worker(
+		context.Background(),
+		context.Background(),
+		1,
+		jobs,
+		results,
+		server.Client(),
+		newRobotsHTTPClient(server.Client().Transport),
+		newRobotsPolicyCache(time.Minute, 16),
+		Config{
+			HTTPRequestTimeout: time.Second,
+			RobotsTimeout:      time.Second,
+			MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+		},
+		&wg,
+	)
+	wg.Wait()
+	close(results)
+
+	result, ok := <-results
+	if !ok {
+		t.Fatal("worker did not report robots.txt failure")
+	}
+	if result.Error == nil {
+		t.Fatal("expected robots.txt 503 to become a task error")
+	}
+	if result.Data.URL != server.URL+"/page" {
+		t.Fatalf("unexpected result URL: %q", result.Data.URL)
+	}
+	if result.Data.StatusCode != 0 {
+		t.Fatalf("page status must be null when robots.txt is unreachable: %v", result.Data.StatusCode)
+	}
+	if pageRequests.Load() != 0 {
+		t.Fatalf("page was fetched despite unreachable robots.txt: requests=%d", pageRequests.Load())
+	}
+}
+
+func TestWorkerReportsRobotsDisallowWithoutPageStatus(t *testing.T) {
+	var pageRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, "User-agent: *\nDisallow: /page\n")
+			return
+		}
+		pageRequests.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html><body><h1>Must not be fetched</h1></body></html>")
+	}))
+	defer server.Close()
+
+	jobs := make(chan string, 1)
+	jobs <- server.URL + "/page"
+	close(jobs)
+	results := make(chan Result, 1)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go worker(
+		context.Background(),
+		context.Background(),
+		1,
+		jobs,
+		results,
+		server.Client(),
+		newRobotsHTTPClient(server.Client().Transport),
+		newRobotsPolicyCache(time.Minute, 16),
+		Config{
+			HTTPRequestTimeout: time.Second,
+			RobotsTimeout:      time.Second,
+			MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+		},
+		&wg,
+	)
+	wg.Wait()
+	close(results)
+
+	result := <-results
+	if result.Error != nil {
+		t.Fatalf("robots disallow must be a normal outcome: %v", result.Error)
+	}
+	if result.Data.StatusCode != 0 {
+		t.Fatalf("blocked page must not have an HTTP status: %v", result.Data.StatusCode)
+	}
+	if pageRequests.Load() != 0 {
+		t.Fatalf("robots-disallowed page was fetched: requests=%d", pageRequests.Load())
 	}
 }
 
@@ -238,5 +516,182 @@ func TestNormalizeTargetURL(t *testing.T) {
 				t.Fatalf("normalizeTargetURL() error = %v, wantErr %t", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestStreamTargetURLsUsesKeysetBatches(t *testing.T) {
+	records := []targetURLRecord{
+		{ID: 1, URL: "https://example.com/one"},
+		{ID: 2, URL: "ftp://example.com/unsupported"},
+		{ID: 3, URL: "https://example.com/three"},
+		{ID: 4, URL: "http://127.0.0.1/private"},
+	}
+
+	var afterIDs []int64
+	fetchBatch := func(_ context.Context, afterID, highWatermark int64, limit int) ([]targetURLRecord, error) {
+		if highWatermark != 4 {
+			t.Fatalf("unexpected high watermark: %d", highWatermark)
+		}
+		if limit != 2 {
+			t.Fatalf("unexpected batch limit: %d", limit)
+		}
+		afterIDs = append(afterIDs, afterID)
+
+		batch := make([]targetURLRecord, 0, limit)
+		for _, record := range records {
+			if record.ID <= afterID || record.ID > highWatermark {
+				continue
+			}
+			batch = append(batch, record)
+			if len(batch) == limit {
+				break
+			}
+		}
+		return batch, nil
+	}
+
+	jobs := make(chan string, 1)
+	collected := make(chan []string, 1)
+	go func() {
+		var urls []string
+		for targetURL := range jobs {
+			urls = append(urls, targetURL)
+		}
+		collected <- urls
+	}()
+
+	summary := streamTargetURLs(context.Background(), 4, 2, false, jobs, fetchBatch)
+	close(jobs)
+	urls := <-collected
+
+	if summary.Error != nil {
+		t.Fatalf("streamTargetURLs returned error: %v", summary.Error)
+	}
+	if summary.Queued != 2 || summary.Skipped != 2 {
+		t.Fatalf("unexpected stream summary: queued=%d skipped=%d", summary.Queued, summary.Skipped)
+	}
+	if len(urls) != 2 || urls[0] != "https://example.com/one" || urls[1] != "https://example.com/three" {
+		t.Fatalf("unexpected queued URLs: %#v", urls)
+	}
+	if len(afterIDs) != 2 || afterIDs[0] != 0 || afterIDs[1] != 2 {
+		t.Fatalf("unexpected keyset positions: %#v", afterIDs)
+	}
+}
+
+func TestWorkerFinishesInFlightTaskAndStopsBeforeNextTask(t *testing.T) {
+	pageStarted := make(chan struct{}, 1)
+	releasePage := make(chan struct{})
+	var releaseOnce sync.Once
+	var pageRequests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, "User-agent: *\nAllow: /\n")
+			return
+		}
+
+		pageRequests.Add(1)
+		select {
+		case pageStarted <- struct{}{}:
+		default:
+		}
+		<-releasePage
+
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html><head><title>Graceful shutdown test page</title></head><body><h1>Ready</h1></body></html>")
+	}))
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releasePage) })
+		server.Close()
+	})
+
+	schedulingCtx, stopScheduling := context.WithCancel(context.Background())
+	operationCtx, cancelOperations := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancelOperations)
+
+	jobs := make(chan string, 2)
+	jobs <- server.URL
+	jobs <- server.URL
+	close(jobs)
+	results := make(chan Result, 2)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go worker(
+		schedulingCtx,
+		operationCtx,
+		1,
+		jobs,
+		results,
+		server.Client(),
+		server.Client(),
+		newRobotsPolicyCache(time.Minute, 16),
+		Config{
+			HTTPRequestTimeout: 2 * time.Second,
+			RobotsTimeout:      time.Second,
+			MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+		},
+		&wg,
+	)
+
+	select {
+	case <-pageStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first page request did not start")
+	}
+
+	stopScheduling()
+	releaseOnce.Do(func() { close(releasePage) })
+
+	workerDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workerDone)
+	}()
+	select {
+	case <-workerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not finish the in-flight task")
+	}
+	close(results)
+
+	resultCount := 0
+	for result := range results {
+		resultCount++
+		if result.Error != nil {
+			t.Fatalf("in-flight task returned error: %v", result.Error)
+		}
+	}
+
+	if resultCount != 1 {
+		t.Fatalf("unexpected result count: got %d want 1", resultCount)
+	}
+	if pageRequests.Load() != 1 {
+		t.Fatalf("worker started a new task after shutdown: requests=%d", pageRequests.Load())
+	}
+}
+
+func TestGracefulShutdownGuardCancelsOperationsAfterTimeout(t *testing.T) {
+	schedulingCtx, stopScheduling := context.WithCancel(context.Background())
+	operationCtx, cancelOperations := context.WithCancel(context.Background())
+	t.Cleanup(cancelOperations)
+
+	processingDone := make(chan struct{})
+	guardDone := guardGracefulShutdown(
+		schedulingCtx,
+		processingDone,
+		20*time.Millisecond,
+		cancelOperations,
+	)
+	stopScheduling()
+
+	select {
+	case <-guardDone:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown guard did not enforce its timeout")
+	}
+	if operationCtx.Err() == nil {
+		t.Fatal("operation context was not canceled after shutdown timeout")
 	}
 }

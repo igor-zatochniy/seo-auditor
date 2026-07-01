@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -13,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,7 +23,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/time/rate"
+	"golang.org/x/net/html/charset"
 )
 
 const (
@@ -33,9 +34,14 @@ const (
 	UserAgentStr      = "Go-SEOParser-Bot/1.0"
 
 	DefaultWorkers          = 3
+	DefaultURLBatchSize     = 100
+	DefaultShutdownTimeout  = 25 * time.Second
+	MaxURLBatchSize         = 10_000
 	MaxWorkers              = 32
+	QueueBufferPerWorker    = 2
 	DefaultMaxHTMLBodyBytes = int64(5 * 1024 * 1024)
 	MaxRobotsBodyBytes      = int64(512 * 1024)
+	MaxRobotsRedirects      = 5
 )
 
 const (
@@ -43,6 +49,7 @@ const (
 	exitCritical = 1
 	exitPartial  = 2
 )
+
 
 var blockedTargetIPPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -70,19 +77,6 @@ var blockedTargetIPPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fc00::/7"),
 	netip.MustParsePrefix("fe80::/10"),
 	netip.MustParsePrefix("ff00::/8"),
-}
-
-type Config struct {
-	Workers             int
-	DatabaseURL         string
-	HTTPRequestTimeout  time.Duration
-	RobotsTimeout       time.Duration
-	DBConnectTimeout    time.Duration
-	DBFetchTimeout      time.Duration
-	DBWriteTimeout      time.Duration
-	MaxHTMLBodyBytes    int64
-	AllowPrivateTargets bool
-	RateLimitInterval   time.Duration
 }
 
 // SEOData contains the full set of metrics collected by the parser.
@@ -129,6 +123,24 @@ type ResultSummary struct {
 	Failed   int
 }
 
+type targetURLRecord struct {
+	ID  int64
+	URL string
+}
+
+type targetURLSnapshot struct {
+	HighWatermark int64
+	Total         int64
+}
+
+type urlStreamSummary struct {
+	Queued  int
+	Skipped int
+	Error   error
+}
+
+type targetURLBatchFetcher func(ctx context.Context, afterID, highWatermark int64, limit int) ([]targetURLRecord, error)
+
 type robotsRule struct {
 	allow       bool
 	pattern     string
@@ -145,13 +157,19 @@ func main() {
 }
 
 func run() int {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	bootstrapLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(bootstrapLogger)
+	cfg, err := loadConfig()
+	if err != nil {
+		slog.Error("Некоректна конфігурація рантайму", "error", err)
+		return exitCritical
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})).With("run_id", cfg.RunID)
 	slog.SetDefault(logger)
 
 	slog.Info("Запускається етичний SEO-аудитор")
-	cfg := loadConfig()
 
-	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	slog.Info(
@@ -160,6 +178,14 @@ func run() int {
 		cfg.Workers,
 		"request_timeout",
 		cfg.HTTPRequestTimeout.String(),
+		"shutdown_timeout",
+		cfg.ShutdownTimeout.String(),
+		"per_host_interval",
+		cfg.RateLimitInterval.String(),
+		"max_concurrent_per_host",
+		cfg.MaxConcurrentPerHost,
+		"robots_cache_ttl",
+		cfg.RobotsCacheTTL.String(),
 		"max_html_body_bytes",
 		cfg.MaxHTMLBodyBytes,
 	)
@@ -178,7 +204,7 @@ func run() int {
 	poolConfig.MaxConnIdleTime = 15 * time.Minute
 	poolConfig.MaxConnLifetime = 1 * time.Hour
 
-	dbInitCtx, dbCancel := context.WithTimeout(rootCtx, cfg.DBConnectTimeout)
+	dbInitCtx, dbCancel := context.WithTimeout(signalCtx, cfg.DBConnectTimeout)
 	dbPool, err := pgxpool.NewWithConfig(dbInitCtx, poolConfig)
 	if err != nil {
 		dbCancel()
@@ -186,7 +212,10 @@ func run() int {
 		return exitCritical
 	}
 
-	if err := dbPool.Ping(dbInitCtx); err != nil {
+	dbRetryPolicy := retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay}
+	if err := retryDBOperation(dbInitCtx, "ping", dbRetryPolicy, func() error {
+		return dbPool.Ping(dbInitCtx)
+	}); err != nil {
 		dbCancel()
 		dbPool.Close()
 		slog.Error("PostgreSQL недоступний під час перевірки підключення", "error", err)
@@ -200,52 +229,95 @@ func run() int {
 		dbPool.Close()
 	}()
 
-	urls, skippedURLs, err := fetchTargetURLs(rootCtx, dbPool, cfg)
+	queueSnapshot, err := fetchTargetURLSnapshot(signalCtx, dbPool, cfg)
 	if err != nil {
-		slog.Error("Не вдалося отримати чергу URL", "error", err)
+		if signalCtx.Err() != nil {
+			slog.Warn("Запуск перервано до формування черги URL", "error", signalCtx.Err())
+			return exitPartial
+		}
+		slog.Error("Не вдалося зафіксувати верхню межу черги URL", "error", err)
 		return exitCritical
 	}
-	if len(urls) == 0 {
-		slog.Warn("Черга URL порожня", "skipped_urls", skippedURLs)
-		if skippedURLs > 0 {
+	if queueSnapshot.Total == 0 {
+		slog.Warn("Черга URL порожня")
+		if signalCtx.Err() != nil {
 			return exitPartial
 		}
 		return exitOK
 	}
-	slog.Info("Чергу URL сформовано", "total_urls", len(urls), "skipped_urls", skippedURLs)
+	slog.Info(
+		"Зафіксовано знімок черги URL",
+		"high_watermark",
+		queueSnapshot.HighWatermark,
+		"total_urls",
+		queueSnapshot.Total,
+		"batch_size",
+		cfg.URLBatchSize,
+	)
 
-	limiter := rate.NewLimiter(rate.Every(cfg.RateLimitInterval), cfg.Workers)
-
-	jobs := make(chan string, len(urls))
-	results := make(chan Result, len(urls))
+	queueCapacity := cfg.Workers * QueueBufferPerWorker
+	jobs := make(chan string, queueCapacity)
+	results := make(chan Result, queueCapacity)
 
 	customTransport := newHTTPTransport(cfg)
+	hostPolicies := newHostPolicyManager(
+		cfg.RateLimitInterval,
+		cfg.MaxConcurrentPerHost,
+		DefaultHostStateCacheSize,
+		MaxRetryAfterDelay,
+	)
+	politeTransport := &politeRoundTripper{
+		base:     customTransport,
+		policies: hostPolicies,
+	}
+	retryingTransport := &retryRoundTripper{
+		base: politeTransport,
+		policy: retryPolicy{
+			maxRetries: cfg.HTTPMaxRetries,
+			baseDelay:  cfg.RetryBaseDelay,
+			maxDelay:   cfg.RetryMaxDelay,
+		},
+	}
+	robotsCache := newRobotsPolicyCache(cfg.RobotsCacheTTL, DefaultRobotsCacheMaxEntries)
 
-	httpClient := &http.Client{
-		Transport: customTransport,
+	pageHTTPClient := &http.Client{
+		Transport: retryingTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+	robotsHTTPClient := newRobotsHTTPClient(retryingTransport)
 	defer customTransport.CloseIdleConnections()
+
+	operationCtx, cancelOperations := context.WithCancel(context.WithoutCancel(signalCtx))
+	defer cancelOperations()
+	processingDone := make(chan struct{})
+	shutdownGuardDone := guardGracefulShutdown(
+		signalCtx,
+		processingDone,
+		cfg.ShutdownTimeout,
+		cancelOperations,
+	)
 
 	var wg sync.WaitGroup
 	for w := 1; w <= cfg.Workers; w++ {
 		wg.Add(1)
-		go worker(rootCtx, w, jobs, results, limiter, httpClient, cfg, &wg)
+		go worker(signalCtx, operationCtx, w, jobs, results, pageHTTPClient, robotsHTTPClient, robotsCache, cfg, &wg)
 	}
 
+	streamDone := make(chan urlStreamSummary, 1)
 	go func() {
-	sendLoop:
-		for _, targetURL := range urls {
-			select {
-			case <-rootCtx.Done():
-				slog.Warn("Отримано сигнал зупинки, нові задачі більше не плануються")
-				break sendLoop
-			case jobs <- targetURL:
-			}
-		}
-		close(jobs)
+		defer close(jobs)
+		streamDone <- streamTargetURLs(
+			signalCtx,
+			queueSnapshot.HighWatermark,
+			cfg.URLBatchSize,
+			cfg.AllowPrivateTargets,
+			jobs,
+			func(ctx context.Context, afterID, highWatermark int64, limit int) ([]targetURLRecord, error) {
+				return fetchTargetURLBatch(ctx, dbPool, cfg, afterID, highWatermark, limit)
+			},
+		)
 	}()
 
 	go func() {
@@ -254,47 +326,100 @@ func run() int {
 	}()
 
 	slog.Info("Починається паралельна обробка URL та збереження результатів")
-	summary := saveResults(rootCtx, dbPool, results, cfg)
-	if skippedURLs > 0 || summary.Failed > 0 {
+	summary := saveResults(operationCtx, dbPool, results, cfg)
+	streamSummary := <-streamDone
+	close(processingDone)
+	<-shutdownGuardDone
+
+	shutdownRequested := signalCtx.Err() != nil
+	streamCanceledByShutdown := shutdownRequested && errors.Is(streamSummary.Error, context.Canceled)
+	if streamSummary.Error != nil && !streamCanceledByShutdown {
+		slog.Error(
+			"Потокове читання черги URL завершилося помилкою",
+			"error",
+			streamSummary.Error,
+			"queued_urls",
+			streamSummary.Queued,
+			"saved_results",
+			summary.Saved,
+		)
+		return exitCritical
+	}
+
+	deferredURLs := queueSnapshot.Total - int64(streamSummary.Queued+streamSummary.Skipped)
+	if deferredURLs < 0 {
+		deferredURLs = 0
+	}
+	missingResults := streamSummary.Queued - summary.Received
+	if missingResults < 0 {
+		missingResults = 0
+	}
+	if streamSummary.Queued == 0 {
+		slog.Warn("Черга URL не містить валідних цілей", "skipped_urls", streamSummary.Skipped)
+	}
+	if shutdownRequested || deferredURLs > 0 || streamSummary.Skipped > 0 || summary.Failed > 0 || missingResults > 0 {
 		slog.Error(
 			"Роботу парсера завершено з частковими помилками",
+			"shutdown_requested",
+			shutdownRequested,
+			"deferred_urls",
+			deferredURLs,
 			"skipped_urls",
-			skippedURLs,
+			streamSummary.Skipped,
 			"failed_results",
 			summary.Failed,
+			"missing_results",
+			missingResults,
 			"saved_results",
 			summary.Saved,
 		)
 		return exitPartial
 	}
 
-	slog.Info("Роботу парсера завершено", "saved_results", summary.Saved)
+	slog.Info(
+		"Роботу парсера завершено",
+		"queued_urls",
+		streamSummary.Queued,
+		"saved_results",
+		summary.Saved,
+	)
 	return exitOK
 }
 
-func loadConfig() Config {
-	workers := intFromEnv("WORKERS", DefaultWorkers, 1, MaxWorkers)
-	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if databaseURL == "" {
-		databaseURL = fmt.Sprintf(
-			"postgres://localhost:5432/seo_db?sslmode=disable&pool_max_conns=%d",
-			workers+2,
-		)
-		slog.Warn("DATABASE_URL не задано, використовується локальне значення за замовчуванням")
-	}
+func guardGracefulShutdown(
+	signalCtx context.Context,
+	processingDone <-chan struct{},
+	timeout time.Duration,
+	cancelOperations context.CancelFunc,
+) <-chan struct{} {
+	guardDone := make(chan struct{})
+	go func() {
+		defer close(guardDone)
 
-	return Config{
-		Workers:             workers,
-		DatabaseURL:         databaseURL,
-		HTTPRequestTimeout:  durationFromEnv("HTTP_REQUEST_TIMEOUT", 5*time.Second),
-		RobotsTimeout:       durationFromEnv("ROBOTS_TIMEOUT", 3*time.Second),
-		DBConnectTimeout:    durationFromEnv("DB_CONNECT_TIMEOUT", 5*time.Second),
-		DBFetchTimeout:      durationFromEnv("DB_FETCH_TIMEOUT", 5*time.Second),
-		DBWriteTimeout:      durationFromEnv("DB_WRITE_TIMEOUT", 3*time.Second),
-		MaxHTMLBodyBytes:    int64FromEnv("MAX_HTML_BODY_BYTES", DefaultMaxHTMLBodyBytes, 1024, 50*1024*1024),
-		AllowPrivateTargets: boolFromEnv("ALLOW_PRIVATE_TARGETS", false),
-		RateLimitInterval:   durationFromEnv("RATE_LIMIT_INTERVAL", 500*time.Millisecond),
-	}
+		select {
+		case <-processingDone:
+			return
+		case <-signalCtx.Done():
+			slog.Warn(
+				"Отримано сигнал зупинки: нові URL більше не плануються",
+				"shutdown_timeout",
+				timeout.String(),
+			)
+		}
+
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+
+		select {
+		case <-processingDone:
+			slog.Info("Поточні задачі та збереження результатів завершено в межах shutdown timeout")
+		case <-timer.C:
+			slog.Error("Вичерпано shutdown timeout, активні операції примусово скасовуються")
+			cancelOperations()
+		}
+	}()
+
+	return guardDone
 }
 
 func newHTTPTransport(cfg Config) *http.Transport {
@@ -315,6 +440,18 @@ func newHTTPTransport(cfg Config) *http.Transport {
 
 		MaxResponseHeaderBytes: 64 << 10,
 		ForceAttemptHTTP2:      true,
+	}
+}
+
+func newRobotsHTTPClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			if len(via) > MaxRobotsRedirects {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
 	}
 }
 
@@ -413,134 +550,138 @@ func ipMatchesNetwork(ip netip.Addr, network string) bool {
 	return true
 }
 
-func intFromEnv(name string, fallback, minValue, maxValue int) int {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback
-	}
-
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < minValue || value > maxValue {
-		slog.Warn(
-			"Значення змінної середовища некоректне, використовується значення за замовчуванням",
-			"name",
-			name,
-			"value",
-			raw,
-			"default",
-			fallback,
-		)
-		return fallback
-	}
-
-	return value
-}
-
-func int64FromEnv(name string, fallback, minValue, maxValue int64) int64 {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback
-	}
-
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || value < minValue || value > maxValue {
-		slog.Warn(
-			"Значення змінної середовища некоректне, використовується значення за замовчуванням",
-			"name",
-			name,
-			"value",
-			raw,
-			"default",
-			fallback,
-		)
-		return fallback
-	}
-
-	return value
-}
-
-func durationFromEnv(name string, fallback time.Duration) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback
-	}
-
-	value, err := time.ParseDuration(raw)
-	if err != nil || value <= 0 {
-		slog.Warn(
-			"Тривалість у змінній середовища некоректна, використовується значення за замовчуванням",
-			"name",
-			name,
-			"value",
-			raw,
-			"default",
-			fallback.String(),
-		)
-		return fallback
-	}
-
-	return value
-}
-
-func boolFromEnv(name string, fallback bool) bool {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback
-	}
-
-	value, err := strconv.ParseBool(raw)
-	if err != nil {
-		slog.Warn(
-			"Булеве значення змінної середовища некоректне, використовується значення за замовчуванням",
-			"name",
-			name,
-			"value",
-			raw,
-			"default",
-			fallback,
-		)
-		return fallback
-	}
-
-	return value
-}
-
-func fetchTargetURLs(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) ([]string, int, error) {
-	slog.Info("Завантажується черга URL з PostgreSQL")
-
+func fetchTargetURLSnapshot(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) (targetURLSnapshot, error) {
 	dbFetchCtx, fetchCancel := context.WithTimeout(ctx, cfg.DBFetchTimeout)
 	defer fetchCancel()
 
-	rows, err := dbPool.Query(dbFetchCtx, "SELECT url FROM pages_to_scan WHERE is_active = TRUE")
+	var snapshot targetURLSnapshot
+	err := retryDBOperation(
+		dbFetchCtx,
+		"fetch_target_url_snapshot",
+		retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay},
+		func() error {
+			return dbPool.QueryRow(
+				dbFetchCtx,
+				"SELECT COALESCE(MAX(id), 0), COUNT(*) FROM pages_to_scan WHERE is_active = TRUE",
+			).Scan(&snapshot.HighWatermark, &snapshot.Total)
+		},
+	)
 	if err != nil {
-		return nil, 0, fmt.Errorf("query active pages: %w", err)
+		return targetURLSnapshot{}, fmt.Errorf("query target URL snapshot: %w", err)
 	}
-	defer rows.Close()
 
-	var urls []string
-	skipped := 0
-	for rows.Next() {
-		var rawURL string
-		if err := rows.Scan(&rawURL); err != nil {
-			slog.Error("Не вдалося прочитати URL з рядка PostgreSQL", "error", err)
-			skipped++
-			continue
-		}
+	return snapshot, nil
+}
 
-		normalizedURL, err := normalizeTargetURL(rawURL, cfg.AllowPrivateTargets)
+func fetchTargetURLBatch(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	cfg Config,
+	afterID int64,
+	highWatermark int64,
+	limit int,
+) ([]targetURLRecord, error) {
+	dbFetchCtx, fetchCancel := context.WithTimeout(ctx, cfg.DBFetchTimeout)
+	defer fetchCancel()
+
+	var records []targetURLRecord
+	err := retryDBOperation(
+		dbFetchCtx,
+		"fetch_target_url_batch",
+		retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay},
+		func() error {
+			rows, err := dbPool.Query(
+				dbFetchCtx,
+				`SELECT id, url
+				 FROM pages_to_scan
+				 WHERE is_active = TRUE AND id > $1 AND id <= $2
+				 ORDER BY id
+				 LIMIT $3`,
+				afterID,
+				highWatermark,
+				limit,
+			)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+
+			attemptRecords := make([]targetURLRecord, 0, limit)
+			for rows.Next() {
+				var record targetURLRecord
+				if err := rows.Scan(&record.ID, &record.URL); err != nil {
+					return fmt.Errorf("scan target URL batch: %w", err)
+				}
+				attemptRecords = append(attemptRecords, record)
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			records = attemptRecords
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query target URL batch after id %d: %w", afterID, err)
+	}
+
+	return records, nil
+}
+
+func streamTargetURLs(
+	ctx context.Context,
+	highWatermark int64,
+	batchSize int,
+	allowPrivateTargets bool,
+	jobs chan<- string,
+	fetchBatch targetURLBatchFetcher,
+) urlStreamSummary {
+	summary := urlStreamSummary{}
+	if batchSize <= 0 {
+		summary.Error = fmt.Errorf("target URL batch size must be positive")
+		return summary
+	}
+	var afterID int64
+
+	for afterID < highWatermark {
+		batch, err := fetchBatch(ctx, afterID, highWatermark, batchSize)
 		if err != nil {
-			slog.Warn("URL пропущено через помилку валідації", "url", rawURL, "error", err)
-			skipped++
-			continue
+			summary.Error = err
+			return summary
 		}
-		urls = append(urls, normalizedURL)
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, record := range batch {
+			if record.ID <= afterID {
+				summary.Error = fmt.Errorf(
+					"target URL batch returned non-increasing id %d after %d",
+					record.ID,
+					afterID,
+				)
+				return summary
+			}
+			afterID = record.ID
+
+			normalizedURL, err := normalizeTargetURL(record.URL, allowPrivateTargets)
+			if err != nil {
+				slog.Warn("URL пропущено через помилку валідації", "url", record.URL, "error", err)
+				summary.Skipped++
+				continue
+			}
+
+			select {
+			case <-ctx.Done():
+				summary.Error = ctx.Err()
+				return summary
+			case jobs <- normalizedURL:
+				summary.Queued++
+			}
+		}
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, skipped, fmt.Errorf("iterate active pages: %w", err)
-	}
-
-	return urls, skipped, nil
+	return summary
 }
 
 func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config) ResultSummary {
@@ -643,54 +784,77 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 }
 
 func worker(
-	ctx context.Context,
+	schedulingCtx context.Context,
+	operationCtx context.Context,
 	id int,
 	jobs <-chan string,
 	results chan<- Result,
-	limiter *rate.Limiter,
-	client *http.Client,
+	pageClient *http.Client,
+	robotsClient *http.Client,
+	robotsCache *robotsPolicyCache,
 	cfg Config,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
 	workerLogger := slog.With("worker_id", id)
 
-	for targetURL := range jobs {
+	for {
+		var targetURL string
 		select {
-		case <-ctx.Done():
-			workerLogger.Debug("Worker зупиняється за сигналом контексту")
+		case <-schedulingCtx.Done():
+			workerLogger.Debug("Worker не приймає нові задачі після сигналу зупинки")
 			return
-		default:
+		case queuedURL, ok := <-jobs:
+			if !ok {
+				return
+			}
+			targetURL = queuedURL
 		}
-
-		if err := limiter.Wait(ctx); err != nil {
-			workerLogger.Debug("Лімітер швидкості зупинено", "error", err)
+		if schedulingCtx.Err() != nil {
+			workerLogger.Debug("Worker залишає заплановану задачу для наступного запуску")
 			return
 		}
 
 		start := time.Now()
 
-		allowed := isAllowedByRobots(ctx, client, targetURL, cfg.RobotsTimeout)
-		if !allowed {
-			workerLogger.Warn("Сканування URL заборонено правилами robots.txt", "url", targetURL)
-			results <- Result{Data: SEOData{URL: targetURL, RobotsAllowed: false, StatusCode: http.StatusForbidden, Duration: time.Since(start)}}
+		allowed, err := robotsCache.isAllowedByRobots(operationCtx, robotsClient, targetURL, cfg.RobotsTimeout)
+		if err != nil {
+			wrappedErr := fmt.Errorf("worker %d cannot verify robots.txt for %s: %w", id, targetURL, err)
+			results <- Result{Data: SEOData{URL: targetURL, RobotsAllowed: false, Duration: time.Since(start)}, Error: wrappedErr}
 			continue
 		}
+		if !allowed {
+			workerLogger.Warn("Сканування URL заборонено правилами robots.txt", "url", targetURL)
+			results <- Result{Data: SEOData{
+				URL:           targetURL,
+				RobotsAllowed: false,
+				Duration:      time.Since(start),
+			}}
+			continue
+		}
+		baseData := SEOData{
+			URL:           targetURL,
+			RobotsAllowed: true,
+		}
 
-		reqCtx, reqCancel := context.WithTimeout(ctx, cfg.HTTPRequestTimeout)
+		reqCtx, reqCancel := context.WithTimeout(operationCtx, cfg.HTTPRequestTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			reqCancel()
-			results <- Result{Error: fmt.Errorf("worker %d cannot create request for %s: %w", id, targetURL, err)}
+			baseData.Duration = time.Since(start)
+			wrappedErr := fmt.Errorf("worker %d cannot create request for %s: %w", id, targetURL, err)
+			results <- Result{Data: baseData, Error: wrappedErr}
 			continue
 		}
 		req.Header.Set("User-Agent", UserAgentStr)
 		req.Header.Set("Accept", "text/html,application/xhtml+xml")
 
-		resp, err := client.Do(req)
+		resp, err := pageClient.Do(req)
 		if err != nil {
 			reqCancel()
-			results <- Result{Error: fmt.Errorf("worker %d network request failed for %s: %w", id, targetURL, err)}
+			baseData.Duration = time.Since(start)
+			wrappedErr := fmt.Errorf("worker %d network request failed for %s: %w", id, targetURL, err)
+			results <- Result{Data: baseData, Error: wrappedErr}
 			continue
 		}
 
@@ -735,21 +899,25 @@ func worker(
 			continue
 		}
 
+		baseData.StatusCode = resp.StatusCode
+		baseData.XRobotsTag = strings.TrimSpace(resp.Header.Get("X-Robots-Tag"))
 		contentType := resp.Header.Get("Content-Type")
 		if contentType == "" {
 			resp.Body.Close()
 			reqCancel()
-			results <- Result{Error: fmt.Errorf("worker %d rejected %s: missing Content-Type header", id, targetURL)}
+			baseData.Duration = time.Since(start)
+			wrappedErr := fmt.Errorf("worker %d rejected %s: missing Content-Type header", id, targetURL)
+			results <- Result{Data: baseData, Error: wrappedErr}
 			continue
 		}
 
-		contentTypeLower := strings.ToLower(contentType)
-		if !strings.Contains(contentTypeLower, "text/html") &&
-			!strings.Contains(contentTypeLower, "application/xhtml+xml") {
+		if err := validateHTMLContentType(contentType); err != nil {
 			resp.Body.Close()
 			reqCancel()
 			workerLogger.Warn("Пропущено непідтримуваний тип контенту", "url", targetURL, "content_type", contentType)
-			results <- Result{Error: fmt.Errorf("worker %d skipped unsupported content type %q for %s", id, contentType, targetURL)}
+			baseData.Duration = time.Since(start)
+			wrappedErr := fmt.Errorf("worker %d skipped unsupported content type %q for %s: %w", id, contentType, targetURL, err)
+			results <- Result{Data: baseData, Error: wrappedErr}
 			continue
 		}
 
@@ -758,16 +926,18 @@ func worker(
 		reqCancel()
 
 		if err != nil {
-			results <- Result{Error: fmt.Errorf("worker %d cannot parse HTML for %s: %w", id, targetURL, err)}
+			data.RobotsAllowed = true
+			data.Duration = time.Since(start)
+			wrappedErr := fmt.Errorf("worker %d cannot parse HTML for %s: %w", id, targetURL, err)
+			results <- Result{Data: data, Error: wrappedErr}
 			continue
 		}
-
 		data.RobotsAllowed = true
 		data.Duration = time.Since(start)
 
 		select {
-		case <-ctx.Done():
-			workerLogger.Warn("Відправлення результату скасовано через зупинку", "url", targetURL)
+		case <-operationCtx.Done():
+			workerLogger.Warn("Відправлення результату скасовано після вичерпання shutdown timeout", "url", targetURL)
 			return
 		case results <- Result{Data: data}:
 		}
@@ -835,43 +1005,6 @@ func isBlockedTargetIP(ip netip.Addr) bool {
 	}
 
 	return false
-}
-
-func isAllowedByRobots(ctx context.Context, client *http.Client, targetURL string, timeout time.Duration) bool {
-	parsed, err := url.Parse(targetURL)
-	if err != nil {
-		return false
-	}
-
-	robotsURL := fmt.Sprintf("%s://%s/robots.txt", parsed.Scheme, parsed.Host)
-
-	robotsCtx, robotsCancel := context.WithTimeout(ctx, timeout)
-	defer robotsCancel()
-
-	req, err := http.NewRequestWithContext(robotsCtx, http.MethodGet, robotsURL, nil)
-	if err != nil {
-		return true
-	}
-	req.Header.Set("User-Agent", UserAgentStr)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		slog.Warn("Не вдалося прочитати robots.txt, хост вважається дозволеним", "url", robotsURL, "error", err)
-		return true
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return true
-	}
-
-	body, err := readLimited(resp.Body, MaxRobotsBodyBytes)
-	if err != nil {
-		slog.Warn("robots.txt перевищує дозволений розмір або не може бути прочитаний", "url", robotsURL, "error", err)
-		return true
-	}
-
-	return isPathAllowedByRobots(string(body), UserAgentStr, robotsRequestPath(parsed))
 }
 
 func robotsRequestPath(parsed *url.URL) string {
@@ -1047,7 +1180,11 @@ func parsePage(resp *http.Response, targetURL string, maxBodyBytes int64) (SEODa
 		return data, err
 	}
 
-	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+	decodedBody, err := charset.NewReader(bytes.NewReader(body), resp.Header.Get("Content-Type"))
+	if err != nil {
+		return data, fmt.Errorf("decode HTML charset: %w", err)
+	}
+	doc, err := goquery.NewDocumentFromReader(decodedBody)
 	if err != nil {
 		return data, fmt.Errorf("parse HTML: %w", err)
 	}
@@ -1150,6 +1287,19 @@ func parsePage(resp *http.Response, targetURL string, maxBodyBytes int64) (SEODa
 	return data, nil
 }
 
+func validateHTMLContentType(raw string) error {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return fmt.Errorf("parse Content-Type: %w", err)
+	}
+	switch strings.ToLower(mediaType) {
+	case "text/html", "application/xhtml+xml":
+		return nil
+	default:
+		return fmt.Errorf("media type %q is not HTML", mediaType)
+	}
+}
+
 func readLimited(reader io.Reader, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, fmt.Errorf("maxBytes must be positive")
@@ -1168,7 +1318,7 @@ func readLimited(reader io.Reader, maxBytes int64) ([]byte, error) {
 
 func isSelfCanonical(canonicalURL, targetURL string) bool {
 	if strings.TrimSpace(canonicalURL) == "" {
-		return true
+		return false
 	}
 
 	targetParsed, err := url.Parse(targetURL)

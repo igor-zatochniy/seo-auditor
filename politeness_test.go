@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -8,6 +9,35 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRobotsCacheSharesPolicyAcrossPaths(t *testing.T) {
+	var robotsRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/robots.txt" {
+			http.NotFound(w, r)
+			return
+		}
+		robotsRequests.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("User-agent: *\nDisallow: /private\n"))
+	}))
+	defer server.Close()
+
+	cache := newRobotsPolicyCache(time.Hour, 16)
+	client := newRobotsHTTPClient(server.Client().Transport)
+
+	allowed, err := cache.isAllowedByRobots(context.Background(), client, server.URL+"/public", time.Second)
+	if err != nil || !allowed {
+		t.Fatalf("unexpected public path decision: allowed=%t error=%v", allowed, err)
+	}
+	allowed, err = cache.isAllowedByRobots(context.Background(), client, server.URL+"/private/page", time.Second)
+	if err != nil || allowed {
+		t.Fatalf("unexpected private path decision: allowed=%t error=%v", allowed, err)
+	}
+	if robotsRequests.Load() != 1 {
+		t.Fatalf("robots.txt fetched %d times, want 1", robotsRequests.Load())
+	}
+}
 
 func TestPoliteTransportLimitsConcurrencyPerHost(t *testing.T) {
 	firstStarted := make(chan struct{})
@@ -129,5 +159,90 @@ func TestPoliteTransportAppliesRateLimitPerHost(t *testing.T) {
 	_ = resp.Body.Close()
 	if elapsed := time.Since(started); elapsed < 35*time.Millisecond {
 		t.Fatalf("per-host rate limit was not applied: elapsed=%s", elapsed)
+	}
+}
+
+func TestWorkersShareRobotsCacheAndHostConcurrency(t *testing.T) {
+	var robotsRequests atomic.Int32
+	var activePageRequests atomic.Int32
+	var maxActivePageRequests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			robotsRequests.Add(1)
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("User-agent: *\nAllow: /\n"))
+			return
+		}
+
+		active := activePageRequests.Add(1)
+		defer activePageRequests.Add(-1)
+		for {
+			currentMax := maxActivePageRequests.Load()
+			if active <= currentMax || maxActivePageRequests.CompareAndSwap(currentMax, active) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><head><title>Shared host audit page title</title></head><body><h1>Page</h1></body></html>"))
+	}))
+	defer server.Close()
+
+	manager := newHostPolicyManager(time.Millisecond, 1, 16, time.Second)
+	transport := &politeRoundTripper{base: server.Client().Transport, policies: manager}
+	pageClient := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	robotsClient := newRobotsHTTPClient(transport)
+	robotsCache := newRobotsPolicyCache(time.Hour, 16)
+
+	jobs := make(chan string, 2)
+	jobs <- server.URL + "/page/1"
+	jobs <- server.URL + "/page/2"
+	close(jobs)
+	results := make(chan Result, 2)
+
+	var wg sync.WaitGroup
+	for workerID := 1; workerID <= 2; workerID++ {
+		wg.Add(1)
+		go worker(
+			context.Background(),
+			context.Background(),
+			workerID,
+			jobs,
+			results,
+			pageClient,
+			robotsClient,
+			robotsCache,
+			Config{
+				HTTPRequestTimeout: time.Second,
+				RobotsTimeout:      time.Second,
+				MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+			},
+			&wg,
+		)
+	}
+	wg.Wait()
+	close(results)
+
+	resultCount := 0
+	for result := range results {
+		resultCount++
+		if result.Error != nil {
+			t.Fatalf("worker returned error: %v", result.Error)
+		}
+	}
+	if resultCount != 2 {
+		t.Fatalf("unexpected result count: %d", resultCount)
+	}
+	if robotsRequests.Load() != 1 {
+		t.Fatalf("robots.txt fetched %d times, want 1", robotsRequests.Load())
+	}
+	if maxActivePageRequests.Load() != 1 {
+		t.Fatalf("per-host concurrency reached %d, want 1", maxActivePageRequests.Load())
 	}
 }

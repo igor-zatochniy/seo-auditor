@@ -18,6 +18,9 @@ const (
 	DefaultMaxConcurrentPerHost  = 1
 	MaxPerHostConcurrency        = 16
 	DefaultHostStateCacheSize    = 4096
+	DefaultRobotsCacheTTL        = time.Hour
+	MaxRobotsCacheTTL            = 24 * time.Hour
+	DefaultRobotsCacheMaxEntries = 4096
 	MaxRetryAfterDelay           = 5 * time.Minute
 )
 
