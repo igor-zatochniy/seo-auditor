@@ -116,7 +116,7 @@ func TestParsePagePreservesNonOKStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsePage returned error for non-200 status: %v", err)
 	}
-	if data.StatusCode != http.StatusNotFound {
+	if data.StatusCode == nil || *data.StatusCode != http.StatusNotFound {
 		t.Fatalf("unexpected status code: got %v want %d", data.StatusCode, http.StatusNotFound)
 	}
 	if data.XRobotsTag != "noindex" {
@@ -388,8 +388,14 @@ func TestWorkerDoesNotFetchPageWhenRobotsIsUnreachable(t *testing.T) {
 	if result.Data.URL != server.URL+"/page" {
 		t.Fatalf("unexpected result URL: %q", result.Data.URL)
 	}
-	if result.Data.StatusCode != 0 {
+	if result.Data.StatusCode != nil {
 		t.Fatalf("page status must be null when robots.txt is unreachable: %v", result.Data.StatusCode)
+	}
+	if result.Data.ScanStatus != scanStatusFailed || result.Data.ErrorCode != errorCodeRobotsUnavailable {
+		t.Fatalf("unexpected scan failure outcome: status=%q code=%q", result.Data.ScanStatus, result.Data.ErrorCode)
+	}
+	if result.Data.RobotsOutcome != robotsOutcomeUnavailable {
+		t.Fatalf("unexpected robots outcome: %q", result.Data.RobotsOutcome)
 	}
 	if pageRequests.Load() != 0 {
 		t.Fatalf("page was fetched despite unreachable robots.txt: requests=%d", pageRequests.Load())
@@ -440,8 +446,14 @@ func TestWorkerReportsRobotsDisallowWithoutPageStatus(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("robots disallow must be a normal outcome: %v", result.Error)
 	}
-	if result.Data.StatusCode != 0 {
+	if result.Data.StatusCode != nil {
 		t.Fatalf("blocked page must not have an HTTP status: %v", result.Data.StatusCode)
+	}
+	if result.Data.ScanStatus != scanStatusBlockedByRobots {
+		t.Fatalf("unexpected scan status: %q", result.Data.ScanStatus)
+	}
+	if result.Data.RobotsOutcome != robotsOutcomeDisallowed || result.Data.RobotsAllowed {
+		t.Fatalf("unexpected robots decision: outcome=%q allowed=%t", result.Data.RobotsOutcome, result.Data.RobotsAllowed)
 	}
 	if pageRequests.Load() != 0 {
 		t.Fatalf("robots-disallowed page was fetched: requests=%d", pageRequests.Load())

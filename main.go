@@ -50,6 +50,25 @@ const (
 	exitPartial  = 2
 )
 
+const (
+	scanStatusCompleted       = "completed"
+	scanStatusRedirect        = "redirect"
+	scanStatusBlockedByRobots = "blocked_by_robots"
+	scanStatusFailed          = "failed"
+
+	robotsOutcomeAllowed     = "allowed"
+	robotsOutcomeDisallowed  = "disallowed"
+	robotsOutcomeUnavailable = "unavailable"
+	robotsOutcomeNotChecked  = "not_checked"
+
+	errorCodeRobotsUnavailable      = "robots_unavailable"
+	errorCodeRequestCreationFailed  = "request_creation_failed"
+	errorCodeRequestFailed          = "request_failed"
+	errorCodeMissingContentType     = "missing_content_type"
+	errorCodeUnsupportedContentType = "unsupported_content_type"
+	errorCodeResponseParseFailed    = "response_parse_failed"
+	errorCodeInternal               = "internal_error"
+)
 
 var blockedTargetIPPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -82,7 +101,10 @@ var blockedTargetIPPrefixes = []netip.Prefix{
 // SEOData contains the full set of metrics collected by the parser.
 type SEOData struct {
 	URL                string
-	StatusCode         int
+	StatusCode         *int
+	ScanStatus         string
+	ErrorCode          string
+	ErrorMessage       string
 	IsRedirect         bool
 	RedirectURL        string
 	Title              string
@@ -104,6 +126,7 @@ type SEOData struct {
 	MetaRobots         string
 	XRobotsTag         string
 	RobotsAllowed      bool
+	RobotsOutcome      string
 	HasJsonLd          bool
 	HasViewport        bool
 	TotalImages        int
@@ -121,6 +144,17 @@ type ResultSummary struct {
 	Received int
 	Saved    int
 	Failed   int
+}
+
+func httpStatus(code int) *int {
+	return &code
+}
+
+func failedScanResult(data SEOData, code string, err error) Result {
+	data.ScanStatus = scanStatusFailed
+	data.ErrorCode = code
+	data.ErrorMessage = err.Error()
+	return Result{Data: data, Error: err}
 }
 
 type targetURLRecord struct {
@@ -687,14 +721,18 @@ func streamTargetURLs(
 func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config) ResultSummary {
 	query := `
 		INSERT INTO seo_results (
-			url, status_code, is_redirect, redirect_url, title, title_status, description, description_status,
+			url, status_code, scan_status, error_code, error_message,
+			is_redirect, redirect_url, title, title_status, description, description_status,
 			h1, h1_count, h2_to_h6_status, og_title, og_description, og_image, twitter_card,
 			internal_links_count, external_links_count, links_count, canonical_url, is_self_canonical,
-			meta_robots, x_robots_tag, robots_allowed, has_json_ld, has_viewport,
-			total_images, images_missing_alt, word_count, duration_ms
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+			meta_robots, x_robots_tag, robots_allowed, robots_outcome, has_json_ld, has_viewport,
+			total_images, images_missing_alt, word_count, duration_ms, run_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)
 		ON CONFLICT (url) DO UPDATE SET
 			status_code = EXCLUDED.status_code,
+			scan_status = EXCLUDED.scan_status,
+			error_code = EXCLUDED.error_code,
+			error_message = EXCLUDED.error_message,
 			is_redirect = EXCLUDED.is_redirect,
 			redirect_url = EXCLUDED.redirect_url,
 			title = EXCLUDED.title,
@@ -716,63 +754,103 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			meta_robots = EXCLUDED.meta_robots,
 			x_robots_tag = EXCLUDED.x_robots_tag,
 			robots_allowed = EXCLUDED.robots_allowed,
+			robots_outcome = EXCLUDED.robots_outcome,
 			has_json_ld = EXCLUDED.has_json_ld,
 			has_viewport = EXCLUDED.has_viewport,
 			total_images = EXCLUDED.total_images,
 			images_missing_alt = EXCLUDED.images_missing_alt,
 			word_count = EXCLUDED.word_count,
 			duration_ms = EXCLUDED.duration_ms,
+			run_id = EXCLUDED.run_id,
 			created_at = CURRENT_TIMESTAMP;`
 
 	summary := ResultSummary{}
 	for res := range results {
 		summary.Received++
+		d := res.Data
+		resultFailed := res.Error != nil
 		if res.Error != nil {
-			slog.Error("Задача завершилася помилкою", "error", res.Error)
+			if d.ScanStatus == "" {
+				d.ScanStatus = scanStatusFailed
+			}
+			if d.ErrorCode == "" {
+				d.ErrorCode = errorCodeInternal
+			}
+			if d.ErrorMessage == "" {
+				d.ErrorMessage = res.Error.Error()
+			}
+			slog.Error(
+				"Задача завершилася помилкою",
+				"url",
+				d.URL,
+				"error_code",
+				d.ErrorCode,
+				"error",
+				res.Error,
+			)
 			summary.Failed++
-			continue
+		}
+		if d.ScanStatus == "" {
+			d.ScanStatus = scanStatusCompleted
+		}
+		if d.RobotsOutcome == "" {
+			d.RobotsOutcome = robotsOutcomeNotChecked
 		}
 
-		d := res.Data
 		dbWriteCtx, writeCancel := context.WithTimeout(ctx, cfg.DBWriteTimeout)
-		_, err := dbPool.Exec(
+		err := retryDBOperation(
 			dbWriteCtx,
-			query,
-			d.URL,
-			d.StatusCode,
-			d.IsRedirect,
-			d.RedirectURL,
-			d.Title,
-			d.TitleStatus,
-			d.Description,
-			d.DescriptionStatus,
-			d.H1,
-			d.H1Count,
-			d.H2ToH6Status,
-			d.OGTitle,
-			d.OGDescription,
-			d.OGImage,
-			d.TwitterCard,
-			d.InternalLinksCount,
-			d.ExternalLinksCount,
-			d.LinksCount,
-			d.CanonicalURL,
-			d.IsSelfCanonical,
-			d.MetaRobots,
-			d.XRobotsTag,
-			d.RobotsAllowed,
-			d.HasJsonLd,
-			d.HasViewport,
-			d.TotalImages,
-			d.ImagesMissingAlt,
-			d.WordCount,
-			d.Duration.Milliseconds(),
+			"save_audit_result",
+			retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay},
+			func() error {
+				_, err := dbPool.Exec(
+					dbWriteCtx,
+					query,
+					d.URL,
+					d.StatusCode,
+					d.ScanStatus,
+					d.ErrorCode,
+					d.ErrorMessage,
+					d.IsRedirect,
+					d.RedirectURL,
+					d.Title,
+					d.TitleStatus,
+					d.Description,
+					d.DescriptionStatus,
+					d.H1,
+					d.H1Count,
+					d.H2ToH6Status,
+					d.OGTitle,
+					d.OGDescription,
+					d.OGImage,
+					d.TwitterCard,
+					d.InternalLinksCount,
+					d.ExternalLinksCount,
+					d.LinksCount,
+					d.CanonicalURL,
+					d.IsSelfCanonical,
+					d.MetaRobots,
+					d.XRobotsTag,
+					d.RobotsAllowed,
+					d.RobotsOutcome,
+					d.HasJsonLd,
+					d.HasViewport,
+					d.TotalImages,
+					d.ImagesMissingAlt,
+					d.WordCount,
+					d.Duration.Milliseconds(),
+					cfg.RunID,
+				)
+				return err
+			},
 		)
 		writeCancel()
 
 		if err != nil {
 			slog.Error("Не вдалося зберегти результат SEO-аудиту", "url", d.URL, "error", err)
-			summary.Failed++
+			if !resultFailed {
+				summary.Failed++
+			}
 			continue
 		}
 
@@ -820,14 +898,21 @@ func worker(
 		allowed, err := robotsCache.isAllowedByRobots(operationCtx, robotsClient, targetURL, cfg.RobotsTimeout)
 		if err != nil {
 			wrappedErr := fmt.Errorf("worker %d cannot verify robots.txt for %s: %w", id, targetURL, err)
-			results <- Result{Data: SEOData{URL: targetURL, RobotsAllowed: false, Duration: time.Since(start)}, Error: wrappedErr}
+			results <- failedScanResult(SEOData{
+				URL:           targetURL,
+				RobotsAllowed: false,
+				RobotsOutcome: robotsOutcomeUnavailable,
+				Duration:      time.Since(start),
+			}, errorCodeRobotsUnavailable, wrappedErr)
 			continue
 		}
 		if !allowed {
 			workerLogger.Warn("Сканування URL заборонено правилами robots.txt", "url", targetURL)
 			results <- Result{Data: SEOData{
 				URL:           targetURL,
+				ScanStatus:    scanStatusBlockedByRobots,
 				RobotsAllowed: false,
+				RobotsOutcome: robotsOutcomeDisallowed,
 				Duration:      time.Since(start),
 			}}
 			continue
@@ -835,6 +920,7 @@ func worker(
 		baseData := SEOData{
 			URL:           targetURL,
 			RobotsAllowed: true,
+			RobotsOutcome: robotsOutcomeAllowed,
 		}
 
 		reqCtx, reqCancel := context.WithTimeout(operationCtx, cfg.HTTPRequestTimeout)
@@ -843,7 +929,7 @@ func worker(
 			reqCancel()
 			baseData.Duration = time.Since(start)
 			wrappedErr := fmt.Errorf("worker %d cannot create request for %s: %w", id, targetURL, err)
-			results <- Result{Data: baseData, Error: wrappedErr}
+			results <- failedScanResult(baseData, errorCodeRequestCreationFailed, wrappedErr)
 			continue
 		}
 		req.Header.Set("User-Agent", UserAgentStr)
@@ -854,7 +940,7 @@ func worker(
 			reqCancel()
 			baseData.Duration = time.Since(start)
 			wrappedErr := fmt.Errorf("worker %d network request failed for %s: %w", id, targetURL, err)
-			results <- Result{Data: baseData, Error: wrappedErr}
+			results <- failedScanResult(baseData, errorCodeRequestFailed, wrappedErr)
 			continue
 		}
 
@@ -875,10 +961,12 @@ func worker(
 
 			results <- Result{Data: SEOData{
 				URL:           targetURL,
-				StatusCode:    resp.StatusCode,
+				StatusCode:    httpStatus(resp.StatusCode),
+				ScanStatus:    scanStatusRedirect,
 				IsRedirect:    true,
 				RedirectURL:   redirectURL,
 				RobotsAllowed: true,
+				RobotsOutcome: robotsOutcomeAllowed,
 				Duration:      time.Since(start),
 			}}
 			continue
@@ -887,9 +975,11 @@ func worker(
 		if resp.StatusCode != http.StatusOK {
 			data := SEOData{
 				URL:           targetURL,
-				StatusCode:    resp.StatusCode,
+				StatusCode:    httpStatus(resp.StatusCode),
+				ScanStatus:    scanStatusCompleted,
 				XRobotsTag:    strings.TrimSpace(resp.Header.Get("X-Robots-Tag")),
 				RobotsAllowed: true,
+				RobotsOutcome: robotsOutcomeAllowed,
 				Duration:      time.Since(start),
 			}
 			resp.Body.Close()
@@ -899,7 +989,7 @@ func worker(
 			continue
 		}
 
-		baseData.StatusCode = resp.StatusCode
+		baseData.StatusCode = httpStatus(resp.StatusCode)
 		baseData.XRobotsTag = strings.TrimSpace(resp.Header.Get("X-Robots-Tag"))
 		contentType := resp.Header.Get("Content-Type")
 		if contentType == "" {
@@ -907,7 +997,7 @@ func worker(
 			reqCancel()
 			baseData.Duration = time.Since(start)
 			wrappedErr := fmt.Errorf("worker %d rejected %s: missing Content-Type header", id, targetURL)
-			results <- Result{Data: baseData, Error: wrappedErr}
+			results <- failedScanResult(baseData, errorCodeMissingContentType, wrappedErr)
 			continue
 		}
 
@@ -917,7 +1007,7 @@ func worker(
 			workerLogger.Warn("Пропущено непідтримуваний тип контенту", "url", targetURL, "content_type", contentType)
 			baseData.Duration = time.Since(start)
 			wrappedErr := fmt.Errorf("worker %d skipped unsupported content type %q for %s: %w", id, contentType, targetURL, err)
-			results <- Result{Data: baseData, Error: wrappedErr}
+			results <- failedScanResult(baseData, errorCodeUnsupportedContentType, wrappedErr)
 			continue
 		}
 
@@ -927,12 +1017,16 @@ func worker(
 
 		if err != nil {
 			data.RobotsAllowed = true
+			data.RobotsOutcome = robotsOutcomeAllowed
 			data.Duration = time.Since(start)
 			wrappedErr := fmt.Errorf("worker %d cannot parse HTML for %s: %w", id, targetURL, err)
-			results <- Result{Data: data, Error: wrappedErr}
+			results <- failedScanResult(data, errorCodeResponseParseFailed, wrappedErr)
 			continue
 		}
+
+		data.ScanStatus = scanStatusCompleted
 		data.RobotsAllowed = true
+		data.RobotsOutcome = robotsOutcomeAllowed
 		data.Duration = time.Since(start)
 
 		select {
@@ -1167,7 +1261,7 @@ func robotsPatternMatches(pattern, requestPath string) bool {
 func parsePage(resp *http.Response, targetURL string, maxBodyBytes int64) (SEOData, error) {
 	data := SEOData{
 		URL:        targetURL,
-		StatusCode: resp.StatusCode,
+		StatusCode: httpStatus(resp.StatusCode),
 		XRobotsTag: strings.TrimSpace(resp.Header.Get("X-Robots-Tag")),
 	}
 
