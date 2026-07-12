@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Go checks and Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DB_USER: seo_user
+      DB_PASSWORD: integration-only-password
+      DB_NAME: seo_db
+      DB_PORT: "5432"
+      DATABASE_URL: postgres://seo_user:integration-only-password@127.0.0.1:5432/seo_db?sslmode=disable
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Run tests with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Run staticcheck
+        uses: dominikh/staticcheck-action@288b4e28bae83c59f35f73651aeb5cab746a06fc # v1.4.0
+        with:
+          version: "2026.1"
+          install-go: false
+          cache-key: go-1.26
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
+        with:
+          go-version-file: go.mod
+          go-package: ./...
+          repo-checkout: false
+
+      - name: Build Docker image
+        run: docker build --pull --tag seo-auditor:ci .
+
+      - name: Scan Docker image
+        run: >-
+          docker run --rm
+          --volume /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.65.0@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
+          image --format table --exit-code 1 --ignore-unfixed
+          --severity HIGH,CRITICAL --skip-version-check seo-auditor:ci
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@aa0e114b2e19480f157109b9922bda359bd98b90 # v0.20.8
+        with:
+          image: seo-auditor:ci
+          artifact-name: seo-auditor.spdx.json
+          output-file: ./seo-auditor.spdx.json
+
+      - name: Start integration PostgreSQL
+        run: docker compose up --build --wait postgres
+
+      - name: Run integration test
+        run: go test -tags=integration -count=1 -run '^TestAuditPipelinePersistsResult$' ./...
+
+      - name: Stop integration PostgreSQL
+        if: always()
+        run: docker compose down --volumes
