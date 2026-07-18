@@ -61,7 +61,7 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		slog.Warn(
 			"Повторюється тимчасово невдалий HTTP-запит",
-			"url", req.URL.Redacted(),
+			"url", redactURL(req.URL.String()),
 			"attempt", attempt+1,
 			"delay", delay.String(),
 		)

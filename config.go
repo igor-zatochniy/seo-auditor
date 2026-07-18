@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,7 +19,7 @@ const (
 	DefaultRetryMaxDelay  = 2 * time.Second
 )
 
-var runIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+var runIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type Config struct {
 	RunID                string
@@ -221,14 +220,24 @@ func logLevelFromEnv(name string, fallback slog.Level) (slog.Level, error) {
 func runIDFromEnv() (string, error) {
 	if raw := strings.TrimSpace(os.Getenv("RUN_ID")); raw != "" {
 		if !runIDPattern.MatchString(raw) {
-			return "", fmt.Errorf("RUN_ID must match %s", runIDPattern.String())
+			return "", fmt.Errorf("RUN_ID must be a canonical UUID")
 		}
-		return raw, nil
+		return strings.ToLower(raw), nil
 	}
 
 	randomBytes := make([]byte, 16)
 	if _, err := rand.Read(randomBytes); err != nil {
 		return "", fmt.Errorf("generate run ID: %w", err)
 	}
-	return hex.EncodeToString(randomBytes), nil
+	randomBytes[6] = (randomBytes[6] & 0x0f) | 0x40
+	randomBytes[8] = (randomBytes[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf(
+		"%x-%x-%x-%x-%x",
+		randomBytes[0:4],
+		randomBytes[4:6],
+		randomBytes[6:8],
+		randomBytes[8:10],
+		randomBytes[10:16],
+	), nil
 }

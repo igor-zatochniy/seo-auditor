@@ -1,0 +1,21 @@
+title = "SEO Auditor gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known local placeholder values"
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)config_test\.go$''',
+  '''(^|/)redaction_test\.go$''',
+  '''(^|/)\.github/workflows/ci\.yml$''',
+]
+regexes = [
+  '''change-me-locally''',
+  '''integration-only-password''',
+  '''test-placeholder-not-a-secret''',
+  '''local-development-only''',
+]

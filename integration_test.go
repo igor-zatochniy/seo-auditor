@@ -21,7 +21,7 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 		t.Fatal("DATABASE_URL is required for integration tests")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -43,60 +43,173 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 	}))
 	defer server.Close()
 
-	const runID = "integration-test-run"
-	jobs := make(chan string, 1)
-	jobs <- server.URL + "/page"
-	close(jobs)
-	results := make(chan Result, 1)
-	cfg := Config{
-		RunID:              runID,
-		HTTPRequestTimeout: 2 * time.Second,
-		RobotsTimeout:      time.Second,
-		DBWriteTimeout:     3 * time.Second,
-		MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
-		DBMaxRetries:       2,
-		RetryBaseDelay:     10 * time.Millisecond,
-		RetryMaxDelay:      50 * time.Millisecond,
+	const firstRunID = "d2bc9bae-6bcd-4e85-9b56-fb0707488cc7"
+	const secondRunID = "517637b3-b45f-4b52-a982-78fdca30a4e4"
+	targetURL := server.URL + "/page"
+	deleteTestRuns := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(
+			cleanupCtx,
+			"DELETE FROM audit_runs WHERE id IN ($1::UUID, $2::UUID)",
+			firstRunID,
+			secondRunID,
+		)
+	}
+	deleteTestRuns(ctx)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		deleteTestRuns(cleanupCtx)
+	})
+
+	newConfig := func(runID string) Config {
+		return Config{
+			RunID:              runID,
+			HTTPRequestTimeout: 2 * time.Second,
+			RobotsTimeout:      time.Second,
+			DBWriteTimeout:     3 * time.Second,
+			MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+			DBMaxRetries:       2,
+			RetryBaseDelay:     10 * time.Millisecond,
+			RetryMaxDelay:      50 * time.Millisecond,
+		}
+	}
+	persistPipelineResult := func(cfg Config) ResultSummary {
+		t.Helper()
+		jobs := make(chan string, 1)
+		jobs <- targetURL
+		close(jobs)
+		results := make(chan Result, 1)
+
+		var workers sync.WaitGroup
+		workers.Add(1)
+		go worker(
+			ctx,
+			ctx,
+			1,
+			jobs,
+			results,
+			server.Client(),
+			server.Client(),
+			newRobotsPolicyCache(time.Minute, 16),
+			cfg,
+			&workers,
+		)
+		go func() {
+			workers.Wait()
+			close(results)
+		}()
+
+		return saveResults(ctx, pool, results, cfg)
 	}
 
-	var workers sync.WaitGroup
-	workers.Add(1)
-	go worker(
-		ctx,
-		ctx,
-		1,
-		jobs,
-		results,
-		server.Client(),
-		server.Client(),
-		newRobotsPolicyCache(time.Minute, 16),
-		cfg,
-		&workers,
-	)
-	go func() {
-		workers.Wait()
-		close(results)
-	}()
-
-	summary := saveResults(ctx, pool, results, cfg)
-	if summary.Saved != 1 || summary.Failed != 0 {
-		t.Fatalf("unexpected save summary: %+v", summary)
+	firstConfig := newConfig(firstRunID)
+	if err := createAuditRun(ctx, pool, firstConfig); err != nil {
+		t.Fatalf("create first audit run: %v", err)
+	}
+	firstSummary := persistPipelineResult(firstConfig)
+	if firstSummary.Saved != 1 || firstSummary.Successful != 1 || firstSummary.Failed != 0 {
+		t.Fatalf("unexpected first save summary: %+v", firstSummary)
 	}
 
-	var statusCode int
-	var scanStatus, storedRunID, title string
+	updatedResults := make(chan Result, 1)
+	updatedResults <- Result{Data: SEOData{
+		URL:           targetURL,
+		StatusCode:    httpStatus(http.StatusOK),
+		ScanStatus:    scanStatusCompleted,
+		Title:         "Updated result from the same run",
+		RobotsAllowed: true,
+		RobotsOutcome: robotsOutcomeAllowed,
+	}}
+	close(updatedResults)
+	updatedSummary := saveResults(ctx, pool, updatedResults, firstConfig)
+	if updatedSummary.Saved != 1 || updatedSummary.Successful != 1 || updatedSummary.Failed != 0 {
+		t.Fatalf("unexpected same-run update summary: %+v", updatedSummary)
+	}
+	if err := completeAuditRun(ctx, pool, firstRunID, auditRunCompletion{
+		Status:         auditRunStatusCompleted,
+		TotalURLs:      1,
+		SuccessfulURLs: firstSummary.Successful,
+		FailedURLs:     firstSummary.Failed,
+	}, firstConfig); err != nil {
+		t.Fatalf("complete first audit run: %v", err)
+	}
+
+	secondConfig := newConfig(secondRunID)
+	if err := createAuditRun(ctx, pool, secondConfig); err != nil {
+		t.Fatalf("create second audit run: %v", err)
+	}
+	secondSummary := persistPipelineResult(secondConfig)
+	if secondSummary.Saved != 1 || secondSummary.Successful != 1 || secondSummary.Failed != 0 {
+		t.Fatalf("unexpected second save summary: %+v", secondSummary)
+	}
+	if err := completeAuditRun(ctx, pool, secondRunID, auditRunCompletion{
+		Status:         auditRunStatusCompleted,
+		TotalURLs:      1,
+		SuccessfulURLs: secondSummary.Successful,
+		FailedURLs:     secondSummary.Failed,
+	}, secondConfig); err != nil {
+		t.Fatalf("complete second audit run: %v", err)
+	}
+
+	var resultCount int
 	err = pool.QueryRow(
 		ctx,
-		"SELECT status_code, scan_status, run_id, title FROM seo_results WHERE url = $1",
-		server.URL+"/page",
-	).Scan(&statusCode, &scanStatus, &storedRunID, &title)
+		`SELECT COUNT(*)
+		 FROM audit_results
+		 WHERE url = $1 AND run_id IN ($2::UUID, $3::UUID)`,
+		targetURL,
+		firstRunID,
+		secondRunID,
+	).Scan(&resultCount)
 	if err != nil {
-		t.Fatalf("read persisted audit result: %v", err)
+		t.Fatalf("count persisted audit history: %v", err)
 	}
-	if statusCode != http.StatusOK || scanStatus != scanStatusCompleted || storedRunID != runID {
-		t.Fatalf("unexpected persisted outcome: status=%d scan=%q run=%q", statusCode, scanStatus, storedRunID)
+	if resultCount != 2 {
+		t.Fatalf("expected two run-specific results, got %d", resultCount)
 	}
-	if title != "Integration audit result page title" {
-		t.Fatalf("unexpected persisted title: %q", title)
+
+	var firstTitle, secondTitle string
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT title FROM audit_results WHERE run_id = $1 AND url = $2",
+		firstRunID,
+		targetURL,
+	).Scan(&firstTitle); err != nil {
+		t.Fatalf("read first audit result: %v", err)
+	}
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT title FROM audit_results WHERE run_id = $1 AND url = $2",
+		secondRunID,
+		targetURL,
+	).Scan(&secondTitle); err != nil {
+		t.Fatalf("read second audit result: %v", err)
+	}
+	if firstTitle != "Updated result from the same run" {
+		t.Fatalf("same-run upsert did not update the first result: %q", firstTitle)
+	}
+	if secondTitle != "Integration audit result page title" {
+		t.Fatalf("second run did not preserve an independent result: %q", secondTitle)
+	}
+
+	var runStatus string
+	var totalURLs, successfulURLs, failedURLs int
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT status, total_urls, successful_urls, failed_urls
+		 FROM audit_runs
+		 WHERE id = $1`,
+		secondRunID,
+	).Scan(&runStatus, &totalURLs, &successfulURLs, &failedURLs); err != nil {
+		t.Fatalf("read completed audit run: %v", err)
+	}
+	if runStatus != auditRunStatusCompleted || totalURLs != 1 || successfulURLs != 1 || failedURLs != 0 {
+		t.Fatalf(
+			"unexpected audit run summary: status=%q total=%d successful=%d failed=%d",
+			runStatus,
+			totalURLs,
+			successfulURLs,
+			failedURLs,
+		)
 	}
 }

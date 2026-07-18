@@ -1,6 +1,22 @@
+# Environment files
 .env
+.env.*
+!.env.example
+
+# Local secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+credentials/
+
+# Local build and test artifacts
 .gocache/
 bin/
 coverage.out
 *.test
+
+# Local deployment overrides
 k8s/**/*.local.yaml

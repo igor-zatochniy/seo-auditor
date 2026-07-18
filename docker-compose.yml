@@ -57,7 +57,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: "on-failure:5"
+    restart: "no"
     read_only: true
     mem_limit: 256m
     cpus: 0.50

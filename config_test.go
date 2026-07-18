@@ -45,7 +45,7 @@ func TestLoadConfigRequiresDatabaseURL(t *testing.T) {
 
 func TestLoadConfigRejectsInvalidExplicitValue(t *testing.T) {
 	clearConfigEnvironment(t)
-	t.Setenv("DATABASE_URL", "postgres://user:password@postgres:5432/seo_db")
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
 	t.Setenv("WORKERS", "many")
 
 	if _, err := loadConfig(); err == nil {
@@ -55,9 +55,10 @@ func TestLoadConfigRejectsInvalidExplicitValue(t *testing.T) {
 
 func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	clearConfigEnvironment(t)
-	t.Setenv("DATABASE_URL", "postgres://user:password@postgres:5432/seo_db")
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
 	t.Setenv("LOG_LEVEL", "WARN")
-	t.Setenv("RUN_ID", "ci-run-42")
+	const runID = "9d532d38-2142-4f5a-9b68-6351ef5ed18c"
+	t.Setenv("RUN_ID", runID)
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -66,7 +67,7 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	if cfg.LogLevel != slog.LevelWarn {
 		t.Fatalf("unexpected log level: %s", cfg.LogLevel)
 	}
-	if cfg.RunID != "ci-run-42" {
+	if cfg.RunID != runID {
 		t.Fatalf("unexpected run ID: %q", cfg.RunID)
 	}
 	if cfg.HTTPMaxRetries != DefaultHTTPMaxRetries || cfg.DBMaxRetries != DefaultDBMaxRetries {
@@ -74,9 +75,32 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsNonUUIDRunID(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("RUN_ID", "ci-run-42")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected non-UUID RUN_ID to fail configuration loading")
+	}
+}
+
+func TestLoadConfigGeneratesUUIDRunID(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if !runIDPattern.MatchString(cfg.RunID) {
+		t.Fatalf("generated run ID is not a canonical UUID: %q", cfg.RunID)
+	}
+}
+
 func TestLoadConfigRejectsInvertedRetryDelays(t *testing.T) {
 	clearConfigEnvironment(t)
-	t.Setenv("DATABASE_URL", "postgres://user:password@postgres:5432/seo_db")
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
 	t.Setenv("RETRY_BASE_DELAY", "3s")
 	t.Setenv("RETRY_MAX_DELAY", "1s")
 

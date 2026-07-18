@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS pages_to_scan (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Результати розширеного SEO-аудиту.
+-- Початкова структура результатів; 02_audit_run_history.sql переносить її
+-- до моделі з окремими audit_runs та audit_results.
 CREATE TABLE IF NOT EXISTS seo_results (
     id SERIAL PRIMARY KEY,
     url VARCHAR(2048) NOT NULL UNIQUE,
