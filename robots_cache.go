@@ -65,7 +65,7 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 	ctx context.Context,
 	client *http.Client,
 	targetURL string,
-	timeout time.Duration,
+	totalTimeout time.Duration,
 ) (bool, error) {
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
@@ -73,8 +73,11 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 	}
 
 	key := strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
-	policy, err := c.policy(ctx, key, func() (robotsPolicy, error) {
-		return fetchRobotsPolicy(ctx, client, parsed, timeout)
+	robotsCtx, robotsCancel := context.WithTimeout(ctx, totalTimeout)
+	defer robotsCancel()
+
+	policy, err := c.policy(robotsCtx, key, func() (robotsPolicy, error) {
+		return fetchRobotsPolicy(robotsCtx, client, parsed)
 	})
 	if err != nil {
 		return false, err
@@ -178,7 +181,10 @@ func isAllowedByRobots(ctx context.Context, client *http.Client, targetURL strin
 	if err != nil {
 		return false, fmt.Errorf("parse target URL for robots.txt: %w", err)
 	}
-	policy, err := fetchRobotsPolicy(ctx, client, parsed, timeout)
+	robotsCtx, robotsCancel := context.WithTimeout(ctx, timeout)
+	defer robotsCancel()
+
+	policy, err := fetchRobotsPolicy(robotsCtx, client, parsed)
 	if err != nil {
 		return false, err
 	}
@@ -189,14 +195,9 @@ func fetchRobotsPolicy(
 	ctx context.Context,
 	client *http.Client,
 	target *url.URL,
-	timeout time.Duration,
 ) (robotsPolicy, error) {
 	robotsURL := fmt.Sprintf("%s://%s/robots.txt", target.Scheme, target.Host)
-
-	robotsCtx, robotsCancel := context.WithTimeout(ctx, timeout)
-	defer robotsCancel()
-
-	req, err := http.NewRequestWithContext(robotsCtx, http.MethodGet, robotsURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotsURL, nil)
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("create robots.txt request: %w", err)
 	}

@@ -10,32 +10,27 @@ import (
 const maxStoredErrorLength = 1000
 
 var sensitiveQueryKeys = map[string]struct{}{
-	"token":         {},
-	"access_token":  {},
-	"access-token":  {},
-	"api_key":       {},
-	"api-key":       {},
-	"key":           {},
-	"secret":        {},
-	"client_secret": {},
-	"client-secret": {},
-	"password":      {},
-	"signature":     {},
-	"sig":           {},
-	"code":          {},
-	"authorization": {},
-	"auth":          {},
-	"auth_token":    {},
-	"auth-token":    {},
-	"jwt":           {},
-	"id_token":      {},
-	"id-token":      {},
-	"refresh_token": {},
-	"refresh-token": {},
-	"session":       {},
-	"session_id":    {},
-	"session-id":    {},
-	"sessionid":     {},
+	"token":             {},
+	"accesstoken":       {},
+	"apikey":            {},
+	"key":               {},
+	"secret":            {},
+	"clientsecret":      {},
+	"privatekey":        {},
+	"password":          {},
+	"signature":         {},
+	"sig":               {},
+	"code":              {},
+	"authorization":     {},
+	"auth":              {},
+	"authtoken":         {},
+	"jwt":               {},
+	"idtoken":           {},
+	"refreshtoken":      {},
+	"session":           {},
+	"sessionid":         {},
+	"xamzcredential":    {},
+	"xamzsecuritytoken": {},
 }
 
 var urlInTextPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
@@ -53,7 +48,7 @@ func redactURL(raw string) string {
 
 	query := parsed.Query()
 	for key := range query {
-		if _, sensitive := sensitiveQueryKeys[strings.ToLower(key)]; sensitive {
+		if isSensitiveQueryKey(key) {
 			query.Set(key, "[REDACTED]")
 		}
 	}
@@ -63,6 +58,26 @@ func redactURL(raw string) string {
 	parsed.Fragment = ""
 
 	return parsed.String()
+}
+
+func isSensitiveQueryKey(key string) bool {
+	_, sensitive := sensitiveQueryKeys[normalizeQueryKey(key)]
+	return sensitive
+}
+
+func normalizeQueryKey(key string) string {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	var builder strings.Builder
+	builder.Grow(len(lower))
+	for _, r := range lower {
+		switch r {
+		case '_', '-', '.', ' ':
+			continue
+		default:
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func redactText(raw string) string {

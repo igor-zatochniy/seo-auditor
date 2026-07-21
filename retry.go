@@ -16,9 +16,10 @@ import (
 )
 
 type retryPolicy struct {
-	maxRetries int
-	baseDelay  time.Duration
-	maxDelay   time.Duration
+	maxRetries     int
+	attemptTimeout time.Duration
+	baseDelay      time.Duration
+	maxDelay       time.Duration
 }
 
 type retryRoundTripper struct {
@@ -36,12 +37,29 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	for attempt := 0; ; attempt++ {
-		attemptRequest, err := cloneRequestForRetry(req, attempt)
+		attemptCtx, attemptCancel := attemptContext(req.Context(), t.policy.attemptTimeout)
+		attemptRequest, err := cloneRequestForRetry(req, attempt, attemptCtx)
 		if err != nil {
+			attemptCancel()
 			return nil, err
 		}
 		resp, requestErr := base.RoundTrip(attemptRequest)
-		if !shouldRetryHTTP(resp, requestErr) || attempt >= t.policy.maxRetries {
+		retryable := shouldRetryHTTP(resp, requestErr) ||
+			isRetryableAttemptTimeout(requestErr, req.Context(), attemptCtx)
+		if !retryable || attempt >= t.policy.maxRetries {
+			if requestErr != nil {
+				if resp != nil && resp.Body != nil {
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+					_ = resp.Body.Close()
+				}
+				attemptCancel()
+				return resp, requestErr
+			}
+			if resp != nil && resp.Body != nil {
+				resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: attemptCancel}
+			} else {
+				attemptCancel()
+			}
 			return resp, requestErr
 		}
 
@@ -49,6 +67,7 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 			_ = resp.Body.Close()
 		}
+		attemptCancel()
 
 		delay := retryDelay(t.policy, attempt)
 		if resp != nil {
@@ -58,6 +77,9 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 					delay = retryAfterDelay
 				}
 			}
+		}
+		if delay, err = clampRetryDelay(req.Context(), delay); err != nil {
+			return nil, err
 		}
 		slog.Warn(
 			"Повторюється тимчасово невдалий HTTP-запит",
@@ -71,8 +93,8 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 }
 
-func cloneRequestForRetry(req *http.Request, attempt int) (*http.Request, error) {
-	clone := req.Clone(req.Context())
+func cloneRequestForRetry(req *http.Request, attempt int, ctx context.Context) (*http.Request, error) {
+	clone := req.Clone(ctx)
 	if attempt == 0 || req.Body == nil {
 		return clone, nil
 	}
@@ -85,6 +107,20 @@ func cloneRequestForRetry(req *http.Request, attempt int) (*http.Request, error)
 	}
 	clone.Body = body
 	return clone, nil
+}
+
+func attemptContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func isRetryableAttemptTimeout(err error, totalCtx context.Context, attemptCtx context.Context) bool {
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(attemptCtx.Err(), context.DeadlineExceeded) && totalCtx.Err() == nil
 }
 
 func isIdempotentRequest(req *http.Request) bool {
@@ -194,6 +230,35 @@ func retryDelay(policy retryPolicy, attempt int) time.Duration {
 	}
 	// Full jitter prevents synchronized retries across workers.
 	return time.Duration(rand.Float64() * float64(delay))
+}
+
+func clampRetryDelay(ctx context.Context, delay time.Duration) (time.Duration, error) {
+	if delay <= 0 {
+		return 0, nil
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return delay, nil
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, ctx.Err()
+	}
+	if delay > remaining {
+		delay = remaining
+	}
+	return delay, nil
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) error {

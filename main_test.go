@@ -369,9 +369,11 @@ func TestWorkerDoesNotFetchPageWhenRobotsIsUnreachable(t *testing.T) {
 		newRobotsHTTPClient(server.Client().Transport),
 		newRobotsPolicyCache(time.Minute, 16),
 		Config{
-			HTTPRequestTimeout: time.Second,
-			RobotsTimeout:      time.Second,
-			MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+			HTTPAttemptTimeout:   time.Second,
+			HTTPTotalTimeout:     5 * time.Second,
+			RobotsAttemptTimeout: time.Second,
+			RobotsTotalTimeout:   5 * time.Second,
+			MaxHTMLBodyBytes:     DefaultMaxHTMLBodyBytes,
 		},
 		&wg,
 	)
@@ -433,9 +435,11 @@ func TestWorkerReportsRobotsDisallowWithoutPageStatus(t *testing.T) {
 		newRobotsHTTPClient(server.Client().Transport),
 		newRobotsPolicyCache(time.Minute, 16),
 		Config{
-			HTTPRequestTimeout: time.Second,
-			RobotsTimeout:      time.Second,
-			MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+			HTTPAttemptTimeout:   time.Second,
+			HTTPTotalTimeout:     5 * time.Second,
+			RobotsAttemptTimeout: time.Second,
+			RobotsTotalTimeout:   5 * time.Second,
+			MaxHTMLBodyBytes:     DefaultMaxHTMLBodyBytes,
 		},
 		&wg,
 	)
@@ -498,9 +502,8 @@ func TestValidateResolvedTargetIPsBlocksPrivateAndSpecialRanges(t *testing.T) {
 func TestNewHTTPTransportUsesSafeDialer(t *testing.T) {
 	transport := newHTTPTransport(Config{
 		Workers:             1,
-		HTTPRequestTimeout:  time.Second,
 		AllowPrivateTargets: false,
-	})
+	}, time.Second)
 	if transport.DialContext == nil {
 		t.Fatalf("expected custom DialContext for transport-level SSRF protection")
 	}
@@ -640,9 +643,11 @@ func TestWorkerFinishesInFlightTaskAndStopsBeforeNextTask(t *testing.T) {
 		server.Client(),
 		newRobotsPolicyCache(time.Minute, 16),
 		Config{
-			HTTPRequestTimeout: 2 * time.Second,
-			RobotsTimeout:      time.Second,
-			MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+			HTTPAttemptTimeout:   2 * time.Second,
+			HTTPTotalTimeout:     5 * time.Second,
+			RobotsAttemptTimeout: time.Second,
+			RobotsTotalTimeout:   5 * time.Second,
+			MaxHTMLBodyBytes:     DefaultMaxHTMLBodyBytes,
 		},
 		&wg,
 	)

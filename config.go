@@ -12,22 +12,30 @@ import (
 )
 
 const (
-	DefaultHTTPMaxRetries = 2
-	DefaultDBMaxRetries   = 2
-	MaxRetryAttempts      = 5
-	DefaultRetryBaseDelay = 200 * time.Millisecond
-	DefaultRetryMaxDelay  = 2 * time.Second
+	DefaultHTTPMaxRetries       = 2
+	DefaultDBMaxRetries         = 2
+	MaxRetryAttempts            = 5
+	DefaultRetryBaseDelay       = 200 * time.Millisecond
+	DefaultRetryMaxDelay        = 2 * time.Second
+	DefaultHTTPAttemptTimeout   = 5 * time.Second
+	DefaultHTTPTotalTimeout     = 20 * time.Second
+	DefaultRobotsAttemptTimeout = 3 * time.Second
+	DefaultRobotsTotalTimeout   = 10 * time.Second
+	MinFingerprintKeyLen        = 32
 )
 
 var runIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type Config struct {
 	RunID                string
+	TargetFingerprintKey []byte
 	LogLevel             slog.Level
 	Workers              int
 	DatabaseURL          string
-	HTTPRequestTimeout   time.Duration
-	RobotsTimeout        time.Duration
+	HTTPAttemptTimeout   time.Duration
+	HTTPTotalTimeout     time.Duration
+	RobotsAttemptTimeout time.Duration
+	RobotsTotalTimeout   time.Duration
 	DBConnectTimeout     time.Duration
 	DBFetchTimeout       time.Duration
 	DBWriteTimeout       time.Duration
@@ -49,13 +57,27 @@ func loadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	requestTimeout, err := durationFromEnv("HTTP_REQUEST_TIMEOUT", 5*time.Second)
+	httpAttemptTimeout, err := durationFromEnv("HTTP_ATTEMPT_TIMEOUT", DefaultHTTPAttemptTimeout)
 	if err != nil {
 		return Config{}, err
 	}
-	robotsTimeout, err := durationFromEnv("ROBOTS_TIMEOUT", 3*time.Second)
+	httpTotalTimeout, err := durationFromEnv("HTTP_TOTAL_TIMEOUT", DefaultHTTPTotalTimeout)
 	if err != nil {
 		return Config{}, err
+	}
+	if httpAttemptTimeout > httpTotalTimeout {
+		return Config{}, fmt.Errorf("HTTP_ATTEMPT_TIMEOUT must not exceed HTTP_TOTAL_TIMEOUT")
+	}
+	robotsAttemptTimeout, err := durationFromEnv("ROBOTS_ATTEMPT_TIMEOUT", DefaultRobotsAttemptTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	robotsTotalTimeout, err := durationFromEnv("ROBOTS_TOTAL_TIMEOUT", DefaultRobotsTotalTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	if robotsAttemptTimeout > robotsTotalTimeout {
+		return Config{}, fmt.Errorf("ROBOTS_ATTEMPT_TIMEOUT must not exceed ROBOTS_TOTAL_TIMEOUT")
 	}
 	dbConnectTimeout, err := durationFromEnv("DB_CONNECT_TIMEOUT", 5*time.Second)
 	if err != nil {
@@ -119,6 +141,12 @@ func loadConfig() (Config, error) {
 	if retryBaseDelay > retryMaxDelay {
 		return Config{}, fmt.Errorf("RETRY_BASE_DELAY must not exceed RETRY_MAX_DELAY")
 	}
+	if retryMaxDelay >= httpTotalTimeout {
+		return Config{}, fmt.Errorf("RETRY_MAX_DELAY must be lower than HTTP_TOTAL_TIMEOUT")
+	}
+	if retryMaxDelay >= robotsTotalTimeout {
+		return Config{}, fmt.Errorf("RETRY_MAX_DELAY must be lower than ROBOTS_TOTAL_TIMEOUT")
+	}
 	logLevel, err := logLevelFromEnv("LOG_LEVEL", slog.LevelInfo)
 	if err != nil {
 		return Config{}, err
@@ -128,6 +156,10 @@ func loadConfig() (Config, error) {
 	if databaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
 	}
+	targetFingerprintKey, err := targetFingerprintKeyFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	runID, err := runIDFromEnv()
 	if err != nil {
 		return Config{}, err
@@ -135,11 +167,14 @@ func loadConfig() (Config, error) {
 
 	return Config{
 		RunID:                runID,
+		TargetFingerprintKey: targetFingerprintKey,
 		LogLevel:             logLevel,
 		Workers:              workers,
 		DatabaseURL:          databaseURL,
-		HTTPRequestTimeout:   requestTimeout,
-		RobotsTimeout:        robotsTimeout,
+		HTTPAttemptTimeout:   httpAttemptTimeout,
+		HTTPTotalTimeout:     httpTotalTimeout,
+		RobotsAttemptTimeout: robotsAttemptTimeout,
+		RobotsTotalTimeout:   robotsTotalTimeout,
 		DBConnectTimeout:     dbConnectTimeout,
 		DBFetchTimeout:       dbFetchTimeout,
 		DBWriteTimeout:       dbWriteTimeout,
@@ -155,6 +190,17 @@ func loadConfig() (Config, error) {
 		RetryBaseDelay:       retryBaseDelay,
 		RetryMaxDelay:        retryMaxDelay,
 	}, nil
+}
+
+func targetFingerprintKeyFromEnv() ([]byte, error) {
+	raw := strings.TrimSpace(os.Getenv("TARGET_FINGERPRINT_KEY"))
+	if raw == "" {
+		return nil, fmt.Errorf("TARGET_FINGERPRINT_KEY is required")
+	}
+	if len([]byte(raw)) < MinFingerprintKeyLen {
+		return nil, fmt.Errorf("TARGET_FINGERPRINT_KEY must be at least %d bytes", MinFingerprintKeyLen)
+	}
+	return []byte(raw), nil
 }
 
 func intFromEnv(name string, fallback, minValue, maxValue int) (int, error) {

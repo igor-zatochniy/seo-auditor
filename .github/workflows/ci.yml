@@ -25,6 +25,7 @@ jobs:
       DB_NAME: seo_db
       DB_PORT: "5432"
       DATABASE_URL: postgres://seo_user:integration-only-password@127.0.0.1:5432/seo_db?sslmode=disable
+      TARGET_FINGERPRINT_KEY: local-development-only-fingerprint-key
 
     steps:
       - name: Checkout repository

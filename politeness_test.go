@@ -219,9 +219,11 @@ func TestWorkersShareRobotsCacheAndHostConcurrency(t *testing.T) {
 			robotsClient,
 			robotsCache,
 			Config{
-				HTTPRequestTimeout: time.Second,
-				RobotsTimeout:      time.Second,
-				MaxHTMLBodyBytes:   DefaultMaxHTMLBodyBytes,
+				HTTPAttemptTimeout:   time.Second,
+				HTTPTotalTimeout:     5 * time.Second,
+				RobotsAttemptTimeout: time.Second,
+				RobotsTotalTimeout:   5 * time.Second,
+				MaxHTMLBodyBytes:     DefaultMaxHTMLBodyBytes,
 			},
 			&wg,
 		)

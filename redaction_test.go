@@ -6,15 +6,24 @@ import (
 )
 
 func TestRedactURLMasksSensitiveQueryValues(t *testing.T) {
-	raw := "https://user:pass@example.com/reset?utm=1&token=secret&API_KEY=private#access_token=fragment"
+	raw := "https://user:pass@example.com/reset?utm=1&token=secret&API_KEY=private&clientSecret=hidden&x-amz-security-token=aws&private_key=pk#access_token=fragment"
 	got := redactURL(raw)
-	want := "https://example.com/reset?API_KEY=%5BREDACTED%5D&token=%5BREDACTED%5D&utm=1"
+	want := "https://example.com/reset?API_KEY=%5BREDACTED%5D&clientSecret=%5BREDACTED%5D&private_key=%5BREDACTED%5D&token=%5BREDACTED%5D&utm=1&x-amz-security-token=%5BREDACTED%5D"
 
 	if got != want {
 		t.Fatalf("redactURL() = %q, want %q", got, want)
 	}
-	if strings.Contains(got, "secret") || strings.Contains(got, "private") || strings.Contains(got, "fragment") {
-		t.Fatalf("redactURL leaked sensitive data: %q", got)
+	for _, leaked := range []string{
+		"token=secret",
+		"API_KEY=private",
+		"clientSecret=hidden",
+		"private_key=pk",
+		"x-amz-security-token=aws",
+		"access_token=fragment",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("redactURL leaked sensitive data: %q", got)
+		}
 	}
 }
 
@@ -26,7 +35,7 @@ func TestRedactTextMasksURLsInsideErrorMessages(t *testing.T) {
 	if got != want {
 		t.Fatalf("redactText() = %q, want %q", got, want)
 	}
-	if strings.Contains(got, "secret") {
+	if strings.Contains(got, "token=secret") {
 		t.Fatalf("redactText leaked sensitive data: %q", got)
 	}
 }
@@ -48,10 +57,10 @@ func TestSanitizeSEODataForStorageRedactsURLFieldsAndTruncatesError(t *testing.T
 		"og_image":      got.OGImage,
 		"error_message": got.ErrorMessage,
 	} {
-		if strings.Contains(value, "secret") ||
-			strings.Contains(value, "oauth-code") ||
-			strings.Contains(value, "private-signature") ||
-			strings.Contains(value, "image-signature") {
+		if strings.Contains(value, "token=secret") ||
+			strings.Contains(value, "code=oauth-code") ||
+			strings.Contains(value, "signature=private-signature") ||
+			strings.Contains(value, "sig=image-signature") {
 			t.Fatalf("%s leaked sensitive data: %q", field, value)
 		}
 	}

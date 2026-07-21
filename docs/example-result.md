@@ -8,7 +8,7 @@
 
 | Metric | Value |
 | --- | --- |
-| URL | `https://example.com` |
+| Safe URL | `https://example.com` |
 | Status | `200 OK` |
 | Scan status | `completed` |
 | Title | `Example Domain` |
@@ -34,7 +34,7 @@
 ## Скорочений SQL-зріз
 
 ```text
-url                  | https://example.com
+safe_url             | https://example.com
 status_code          | 200
 scan_status          | completed
 error_code           |

@@ -211,8 +211,14 @@ func run() (exitCode int) {
 		"Конфігурацію рантайму ініціалізовано",
 		"workers",
 		cfg.Workers,
-		"request_timeout",
-		cfg.HTTPRequestTimeout.String(),
+		"http_attempt_timeout",
+		cfg.HTTPAttemptTimeout.String(),
+		"http_total_timeout",
+		cfg.HTTPTotalTimeout.String(),
+		"robots_attempt_timeout",
+		cfg.RobotsAttemptTimeout.String(),
+		"robots_total_timeout",
+		cfg.RobotsTotalTimeout.String(),
 		"shutdown_timeout",
 		cfg.ShutdownTimeout.String(),
 		"per_host_interval",
@@ -283,18 +289,18 @@ func run() (exitCode int) {
 		}
 	}()
 
-	queueSnapshot, err := fetchTargetURLSnapshot(signalCtx, dbPool, cfg)
+	targetSnapshot, err := captureAuditRunTargets(signalCtx, dbPool, cfg)
 	if err != nil {
 		if signalCtx.Err() != nil {
 			runCompletion.Status = auditRunStatusCanceled
-			slog.Warn("Запуск скасовано до формування черги URL", "error", signalCtx.Err())
+			slog.Warn("Запуск скасовано до фіксації стабільного набору цілей", "error", signalCtx.Err())
 			return exitCanceled
 		}
-		slog.Error("Не вдалося зафіксувати верхню межу черги URL", "error", err)
+		slog.Error("Не вдалося зафіксувати стабільний набір цілей аудиту", "error", err)
 		return exitFatal
 	}
-	if queueSnapshot.Total == 0 {
-		slog.Warn("Черга URL порожня")
+	if targetSnapshot.Total == 0 {
+		slog.Warn("Стабільний набір цілей аудиту порожній")
 		if signalCtx.Err() != nil {
 			runCompletion.Status = auditRunStatusCanceled
 			return exitCanceled
@@ -302,13 +308,13 @@ func run() (exitCode int) {
 		runCompletion.Status = auditRunStatusCompleted
 		return exitSuccess
 	}
-	runCompletion.TotalURLs = queueSnapshot.Total
+	runCompletion.TotalURLs = targetSnapshot.Total
 	slog.Info(
-		"Зафіксовано знімок черги URL",
+		"Зафіксовано стабільний набір цілей аудиту",
 		"high_watermark",
-		queueSnapshot.HighWatermark,
+		targetSnapshot.HighWatermark,
 		"total_urls",
-		queueSnapshot.Total,
+		targetSnapshot.Total,
 		"batch_size",
 		cfg.URLBatchSize,
 	)
@@ -317,35 +323,51 @@ func run() (exitCode int) {
 	jobs := make(chan string, queueCapacity)
 	results := make(chan Result, queueCapacity)
 
-	customTransport := newHTTPTransport(cfg)
+	pageCustomTransport := newHTTPTransport(cfg, cfg.HTTPAttemptTimeout)
+	robotsCustomTransport := newHTTPTransport(cfg, cfg.RobotsAttemptTimeout)
 	hostPolicies := newHostPolicyManager(
 		cfg.RateLimitInterval,
 		cfg.MaxConcurrentPerHost,
 		DefaultHostStateCacheSize,
 		MaxRetryAfterDelay,
 	)
-	politeTransport := &politeRoundTripper{
-		base:     customTransport,
+	pagePoliteTransport := &politeRoundTripper{
+		base:     pageCustomTransport,
 		policies: hostPolicies,
 	}
-	retryingTransport := &retryRoundTripper{
-		base: politeTransport,
+	robotsPoliteTransport := &politeRoundTripper{
+		base:     robotsCustomTransport,
+		policies: hostPolicies,
+	}
+	pageRetryingTransport := &retryRoundTripper{
+		base: pagePoliteTransport,
 		policy: retryPolicy{
-			maxRetries: cfg.HTTPMaxRetries,
-			baseDelay:  cfg.RetryBaseDelay,
-			maxDelay:   cfg.RetryMaxDelay,
+			maxRetries:     cfg.HTTPMaxRetries,
+			attemptTimeout: cfg.HTTPAttemptTimeout,
+			baseDelay:      cfg.RetryBaseDelay,
+			maxDelay:       cfg.RetryMaxDelay,
+		},
+	}
+	robotsRetryingTransport := &retryRoundTripper{
+		base: robotsPoliteTransport,
+		policy: retryPolicy{
+			maxRetries:     cfg.HTTPMaxRetries,
+			attemptTimeout: cfg.RobotsAttemptTimeout,
+			baseDelay:      cfg.RetryBaseDelay,
+			maxDelay:       cfg.RetryMaxDelay,
 		},
 	}
 	robotsCache := newRobotsPolicyCache(cfg.RobotsCacheTTL, DefaultRobotsCacheMaxEntries)
 
 	pageHTTPClient := &http.Client{
-		Transport: retryingTransport,
+		Transport: pageRetryingTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	robotsHTTPClient := newRobotsHTTPClient(retryingTransport)
-	defer customTransport.CloseIdleConnections()
+	robotsHTTPClient := newRobotsHTTPClient(robotsRetryingTransport)
+	defer pageCustomTransport.CloseIdleConnections()
+	defer robotsCustomTransport.CloseIdleConnections()
 
 	operationCtx, cancelOperations := context.WithCancel(context.WithoutCancel(signalCtx))
 	defer cancelOperations()
@@ -368,7 +390,7 @@ func run() (exitCode int) {
 		defer close(jobs)
 		streamDone <- streamTargetURLs(
 			signalCtx,
-			queueSnapshot.HighWatermark,
+			targetSnapshot.HighWatermark,
 			cfg.URLBatchSize,
 			cfg.AllowPrivateTargets,
 			jobs,
@@ -391,9 +413,9 @@ func run() (exitCode int) {
 
 	shutdownRequested := signalCtx.Err() != nil
 	streamCanceledByShutdown := shutdownRequested && errors.Is(streamSummary.Error, context.Canceled)
-	deferredURLs := queueSnapshot.Total - int64(streamSummary.Queued+streamSummary.Skipped)
-	if deferredURLs < 0 {
-		deferredURLs = 0
+	unprocessedTargets := targetSnapshot.Total - int64(streamSummary.Queued+streamSummary.Skipped)
+	if unprocessedTargets < 0 {
+		unprocessedTargets = 0
 	}
 	missingResults := streamSummary.Queued - summary.Received
 	if missingResults < 0 {
@@ -402,8 +424,9 @@ func run() (exitCode int) {
 	runCompletion.SuccessfulURLs = summary.Successful
 	runCompletion.FailedURLs = summary.Failed + streamSummary.Skipped + missingResults
 	if streamSummary.Error != nil && !streamCanceledByShutdown {
+		runCompletion.FailedURLs += int(unprocessedTargets)
 		slog.Error(
-			"Потокове читання черги URL завершилося помилкою",
+			"Потокове читання стабільного набору цілей завершилося помилкою",
 			"error",
 			streamSummary.Error,
 			"queued_urls",
@@ -415,16 +438,16 @@ func run() (exitCode int) {
 	}
 
 	if streamSummary.Queued == 0 {
-		slog.Warn("Черга URL не містить валідних цілей", "skipped_urls", streamSummary.Skipped)
+		slog.Warn("Стабільний набір цілей не містить валідних URL", "skipped_urls", streamSummary.Skipped)
 	}
-	if shutdownRequested || deferredURLs > 0 {
+	if shutdownRequested {
 		runCompletion.Status = auditRunStatusCanceled
 		slog.Warn(
-			"Запуск аудиту скасовано до обробки всієї черги",
+			"Запуск аудиту скасовано до завершення стабільного набору цілей",
 			"shutdown_requested",
 			shutdownRequested,
-			"deferred_urls",
-			deferredURLs,
+			"unprocessed_targets",
+			unprocessedTargets,
 			"skipped_urls",
 			streamSummary.Skipped,
 			"failed_results",
@@ -435,6 +458,24 @@ func run() (exitCode int) {
 			summary.Saved,
 		)
 		return exitCanceled
+	}
+	if unprocessedTargets > 0 {
+		runCompletion.FailedURLs += int(unprocessedTargets)
+		runCompletion.Status = auditRunStatusFailed
+		slog.Error(
+			"Стабільний набір цілей оброблено не повністю",
+			"unprocessed_targets",
+			unprocessedTargets,
+			"skipped_urls",
+			streamSummary.Skipped,
+			"failed_results",
+			summary.Failed,
+			"missing_results",
+			missingResults,
+			"saved_results",
+			summary.Saved,
+		)
+		return exitFatal
 	}
 	if streamSummary.Skipped > 0 || summary.Failed > 0 || missingResults > 0 {
 		runCompletion.Status = auditRunStatusCompletedWithErrors
@@ -499,9 +540,9 @@ func guardGracefulShutdown(
 	return guardDone
 }
 
-func newHTTPTransport(cfg Config) *http.Transport {
+func newHTTPTransport(cfg Config, attemptTimeout time.Duration) *http.Transport {
 	dialer := &net.Dialer{
-		Timeout:   cfg.HTTPRequestTimeout,
+		Timeout:   attemptTimeout,
 		KeepAlive: 30 * time.Second,
 	}
 
@@ -512,7 +553,7 @@ func newHTTPTransport(cfg Config) *http.Transport {
 		MaxConnsPerHost:       cfg.Workers * 2,
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: cfg.HTTPRequestTimeout,
+		ResponseHeaderTimeout: attemptTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 
 		MaxResponseHeaderBytes: 64 << 10,
@@ -627,29 +668,6 @@ func ipMatchesNetwork(ip netip.Addr, network string) bool {
 	return true
 }
 
-func fetchTargetURLSnapshot(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) (targetURLSnapshot, error) {
-	dbFetchCtx, fetchCancel := context.WithTimeout(ctx, cfg.DBFetchTimeout)
-	defer fetchCancel()
-
-	var snapshot targetURLSnapshot
-	err := retryDBOperation(
-		dbFetchCtx,
-		"fetch_target_url_snapshot",
-		retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay},
-		func() error {
-			return dbPool.QueryRow(
-				dbFetchCtx,
-				"SELECT COALESCE(MAX(id), 0), COUNT(*) FROM pages_to_scan WHERE is_active = TRUE",
-			).Scan(&snapshot.HighWatermark, &snapshot.Total)
-		},
-	)
-	if err != nil {
-		return targetURLSnapshot{}, fmt.Errorf("query target URL snapshot: %w", err)
-	}
-
-	return snapshot, nil
-}
-
 func fetchTargetURLBatch(
 	ctx context.Context,
 	dbPool *pgxpool.Pool,
@@ -669,11 +687,12 @@ func fetchTargetURLBatch(
 		func() error {
 			rows, err := dbPool.Query(
 				dbFetchCtx,
-				`SELECT id, url
-				 FROM pages_to_scan
-				 WHERE is_active = TRUE AND id > $1 AND id <= $2
-				 ORDER BY id
-				 LIMIT $3`,
+				`SELECT target_id, request_url
+				 FROM audit_run_targets
+				 WHERE run_id = $1 AND target_id > $2 AND target_id <= $3
+				 ORDER BY target_id
+				 LIMIT $4`,
+				cfg.RunID,
 				afterID,
 				highWatermark,
 				limit,
@@ -764,14 +783,15 @@ func streamTargetURLs(
 func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config) ResultSummary {
 	query := `
 		INSERT INTO audit_results (
-			url, status_code, scan_status, error_code, error_message,
+			safe_url, target_fingerprint, status_code, scan_status, error_code, error_message,
 			is_redirect, redirect_url, title, title_status, description, description_status,
 			h1, h1_count, h2_to_h6_status, og_title, og_description, og_image, twitter_card,
 			internal_links_count, external_links_count, links_count, canonical_url, is_self_canonical,
 			meta_robots, x_robots_tag, robots_allowed, robots_outcome, has_json_ld, has_viewport,
 			total_images, images_missing_alt, word_count, duration_ms, run_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)
-		ON CONFLICT (run_id, url) DO UPDATE SET
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
+		ON CONFLICT (run_id, target_fingerprint) DO UPDATE SET
+			safe_url = EXCLUDED.safe_url,
 			status_code = EXCLUDED.status_code,
 			scan_status = EXCLUDED.scan_status,
 			error_code = EXCLUDED.error_code,
@@ -810,6 +830,7 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 	for res := range results {
 		summary.Received++
 		d := res.Data
+		identity := newTargetIdentity(cfg.TargetFingerprintKey, d.URL)
 		resultFailed := res.Error != nil || d.ScanStatus == scanStatusFailed
 		if resultFailed {
 			if d.ScanStatus == "" {
@@ -842,6 +863,7 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			d.RobotsOutcome = robotsOutcomeNotChecked
 		}
 		d = sanitizeSEODataForStorage(d)
+		d.URL = identity.SafeURL
 
 		dbWriteCtx, writeCancel := context.WithTimeout(ctx, cfg.DBWriteTimeout)
 		err := retryDBOperation(
@@ -853,6 +875,7 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 					dbWriteCtx,
 					query,
 					d.URL,
+					identity.Fingerprint,
 					d.StatusCode,
 					d.ScanStatus,
 					d.ErrorCode,
@@ -946,7 +969,7 @@ func worker(
 
 		start := time.Now()
 
-		allowed, err := robotsCache.isAllowedByRobots(operationCtx, robotsClient, targetURL, cfg.RobotsTimeout)
+		allowed, err := robotsCache.isAllowedByRobots(operationCtx, robotsClient, targetURL, cfg.RobotsTotalTimeout)
 		if err != nil {
 			wrappedErr := fmt.Errorf("worker %d cannot verify robots.txt for %s: %s", id, safeURL, sanitizeError(err))
 			results <- failedScanResult(SEOData{
@@ -974,7 +997,7 @@ func worker(
 			RobotsOutcome: robotsOutcomeAllowed,
 		}
 
-		reqCtx, reqCancel := context.WithTimeout(operationCtx, cfg.HTTPRequestTimeout)
+		reqCtx, reqCancel := context.WithTimeout(operationCtx, cfg.HTTPTotalTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			reqCancel()
@@ -1112,6 +1135,7 @@ func normalizeTargetURL(rawURL string, allowPrivateTargets bool) (string, error)
 	if !allowPrivateTargets && isPrivateHost(parsed.Host) {
 		return "", fmt.Errorf("private or local targets are disabled")
 	}
+	parsed.Fragment = ""
 
 	return parsed.String(), nil
 }
