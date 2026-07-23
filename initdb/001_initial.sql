@@ -1,3 +1,6 @@
+-- +goose Up
+-- +goose NO TRANSACTION
+
 -- Черга URL для етичного сканування.
 CREATE TABLE IF NOT EXISTS pages_to_scan (
     id SERIAL PRIMARY KEY,
@@ -6,7 +9,7 @@ CREATE TABLE IF NOT EXISTS pages_to_scan (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Початкова структура результатів; 02_audit_run_history.sql переносить її
+-- Початкова структура результатів; 002_audit_run_history.sql переносить її
 -- до моделі з окремими audit_runs та audit_results.
 CREATE TABLE IF NOT EXISTS seo_results (
     id SERIAL PRIMARY KEY,
@@ -62,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_seo_results_status ON seo_results(status_code);
 CREATE INDEX IF NOT EXISTS idx_seo_results_scan_status ON seo_results(scan_status);
 CREATE INDEX IF NOT EXISTS idx_seo_results_run_status ON seo_results(run_id, scan_status);
 
--- Початковий набір URL для перевірки локального запуску через Docker Compose.
+-- Початковий набір URL для перевірки локального запуску.
 INSERT INTO pages_to_scan (url, is_active) VALUES
 ('https://go.dev', true),
 ('https://golang.org', true),

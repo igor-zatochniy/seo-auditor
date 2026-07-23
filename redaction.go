@@ -20,6 +20,8 @@ var sensitiveQueryKeys = map[string]struct{}{
 	"password":          {},
 	"signature":         {},
 	"sig":               {},
+	"xamzsignature":     {},
+	"xgoogsignature":    {},
 	"code":              {},
 	"authorization":     {},
 	"auth":              {},
@@ -31,6 +33,21 @@ var sensitiveQueryKeys = map[string]struct{}{
 	"sessionid":         {},
 	"xamzcredential":    {},
 	"xamzsecuritytoken": {},
+}
+
+var sensitiveQueryKeyFragments = []string{
+	"token",
+	"secret",
+	"signature",
+	"credential",
+	"password",
+	"passwd",
+	"privatekey",
+	"apikey",
+	"accesskey",
+	"session",
+	"authorization",
+	"jwt",
 }
 
 var urlInTextPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
@@ -50,7 +67,9 @@ func redactURL(raw string) string {
 	for key := range query {
 		if isSensitiveQueryKey(key) {
 			query.Set(key, "[REDACTED]")
+			continue
 		}
+		query.Set(key, "[VALUE]")
 	}
 
 	parsed.RawQuery = query.Encode()
@@ -61,8 +80,16 @@ func redactURL(raw string) string {
 }
 
 func isSensitiveQueryKey(key string) bool {
-	_, sensitive := sensitiveQueryKeys[normalizeQueryKey(key)]
-	return sensitive
+	normalized := normalizeQueryKey(key)
+	if _, sensitive := sensitiveQueryKeys[normalized]; sensitive {
+		return true
+	}
+	for _, fragment := range sensitiveQueryKeyFragments {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeQueryKey(key string) string {
@@ -108,7 +135,39 @@ func sanitizeSEODataForStorage(data SEOData) SEOData {
 	data.CanonicalURL = redactURL(data.CanonicalURL)
 	data.OGImage = redactURL(data.OGImage)
 	data.ErrorMessage = sanitizeErrorMessage(data.ErrorMessage)
+	data.URL, data.SafeURLTruncated, data.SafeURLOriginalLength = limitStorageString(data.URL, storageURLMaxRunes)
+	data.RedirectURL, data.RedirectURLTruncated, data.RedirectURLOriginalLength = limitStorageString(data.RedirectURL, storageURLMaxRunes)
+	data.Title, data.TitleTruncated, data.TitleOriginalLength = limitStorageString(data.Title, storageTitleMaxRunes)
+	data.H1, data.H1Truncated, data.H1OriginalLength = limitStorageString(data.H1, storageH1MaxRunes)
+	data.OGTitle, data.OGTitleTruncated, data.OGTitleOriginalLength = limitStorageString(data.OGTitle, storageTitleMaxRunes)
+	data.OGImage, data.OGImageTruncated, data.OGImageOriginalLength = limitStorageString(data.OGImage, storageURLMaxRunes)
+	data.TwitterCard, data.TwitterCardTruncated, data.TwitterCardOriginalLength = limitStorageString(data.TwitterCard, storageTwitterCardMaxRunes)
+	data.CanonicalURL, data.CanonicalURLTruncated, data.CanonicalURLOriginalLength = limitStorageString(data.CanonicalURL, storageURLMaxRunes)
+	data.MetaRobots, data.MetaRobotsTruncated, data.MetaRobotsOriginalLength = limitStorageString(data.MetaRobots, storageRobotsTagMaxRunes)
+	data.XRobotsTag, data.XRobotsTagTruncated, data.XRobotsTagOriginalLength = limitStorageString(data.XRobotsTag, storageRobotsTagMaxRunes)
 	return data
+}
+
+func limitStorageString(value string, maxRunes int) (string, bool, int) {
+	originalLength := utf8.RuneCountInString(value)
+	if originalLength <= maxRunes {
+		return value, false, 0
+	}
+	return truncateRunes(value, maxRunes), true, originalLength
+}
+
+func truncateRunes(value string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runeCount := 0
+	for index := range value {
+		if runeCount == maxRunes {
+			return value[:index]
+		}
+		runeCount++
+	}
+	return value
 }
 
 func truncateStoredErrorMessage(message string) string {

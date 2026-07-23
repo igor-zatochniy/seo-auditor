@@ -45,6 +45,15 @@ const (
 )
 
 const (
+	storageURLMaxRunes         = 2048
+	storageTitleMaxRunes       = 500
+	storageH1MaxRunes          = 1000
+	storageOGTitleMaxRunes     = 500
+	storageTwitterCardMaxRunes = 100
+	storageRobotsTagMaxRunes   = 200
+)
+
+const (
 	exitSuccess  = 0
 	exitFatal    = 1
 	exitCanceled = 130
@@ -67,6 +76,7 @@ const (
 	errorCodeMissingContentType     = "missing_content_type"
 	errorCodeUnsupportedContentType = "unsupported_content_type"
 	errorCodeResponseParseFailed    = "response_parse_failed"
+	errorCodeInvalidTargetURL       = "invalid_target_url"
 	errorCodeInternal               = "internal_error"
 )
 
@@ -100,44 +110,65 @@ var blockedTargetIPPrefixes = []netip.Prefix{
 
 // SEOData contains the full set of metrics collected by the parser.
 type SEOData struct {
-	URL                string
-	StatusCode         *int
-	ScanStatus         string
-	ErrorCode          string
-	ErrorMessage       string
-	IsRedirect         bool
-	RedirectURL        string
-	Title              string
-	TitleStatus        string
-	Description        string
-	DescriptionStatus  string
-	H1                 string
-	H1Count            int
-	H2ToH6Status       string
-	OGTitle            string
-	OGDescription      string
-	OGImage            string
-	TwitterCard        string
-	InternalLinksCount int
-	ExternalLinksCount int
-	LinksCount         int
-	CanonicalURL       string
-	IsSelfCanonical    bool
-	MetaRobots         string
-	XRobotsTag         string
-	RobotsAllowed      bool
-	RobotsOutcome      string
-	HasJsonLd          bool
-	HasViewport        bool
-	TotalImages        int
-	ImagesMissingAlt   int
-	WordCount          int
-	Duration           time.Duration
+	URL                        string
+	SafeURLTruncated           bool
+	SafeURLOriginalLength      int
+	StatusCode                 *int
+	ScanStatus                 string
+	ErrorCode                  string
+	ErrorMessage               string
+	IsRedirect                 bool
+	RedirectURL                string
+	RedirectURLTruncated       bool
+	RedirectURLOriginalLength  int
+	Title                      string
+	TitleStatus                string
+	TitleTruncated             bool
+	TitleOriginalLength        int
+	Description                string
+	DescriptionStatus          string
+	H1                         string
+	H1Count                    int
+	H1Truncated                bool
+	H1OriginalLength           int
+	H2ToH6Status               string
+	OGTitle                    string
+	OGTitleTruncated           bool
+	OGTitleOriginalLength      int
+	OGDescription              string
+	OGImage                    string
+	OGImageTruncated           bool
+	OGImageOriginalLength      int
+	TwitterCard                string
+	TwitterCardTruncated       bool
+	TwitterCardOriginalLength  int
+	InternalLinksCount         int
+	ExternalLinksCount         int
+	LinksCount                 int
+	CanonicalURL               string
+	CanonicalURLTruncated      bool
+	CanonicalURLOriginalLength int
+	IsSelfCanonical            bool
+	MetaRobots                 string
+	MetaRobotsTruncated        bool
+	MetaRobotsOriginalLength   int
+	XRobotsTag                 string
+	XRobotsTagTruncated        bool
+	XRobotsTagOriginalLength   int
+	RobotsAllowed              bool
+	RobotsOutcome              string
+	HasJsonLd                  bool
+	HasViewport                bool
+	TotalImages                int
+	ImagesMissingAlt           int
+	WordCount                  int
+	Duration                   time.Duration
 }
 
 type Result struct {
-	Data  SEOData
-	Error error
+	Target AuditTarget
+	Data   SEOData
+	Error  error
 }
 
 type ResultSummary struct {
@@ -161,6 +192,13 @@ func failedScanResult(data SEOData, code string, err error) Result {
 type targetURLRecord struct {
 	ID  int64
 	URL string
+}
+
+type AuditTarget struct {
+	TargetID    int64
+	RequestURL  string
+	SafeURL     string
+	Fingerprint []byte
 }
 
 type targetURLSnapshot struct {
@@ -209,6 +247,8 @@ func run() (exitCode int) {
 
 	slog.Info(
 		"Конфігурацію рантайму ініціалізовано",
+		"worker_instance_id",
+		cfg.WorkerInstanceID,
 		"workers",
 		cfg.Workers,
 		"http_attempt_timeout",
@@ -219,6 +259,12 @@ func run() (exitCode int) {
 		cfg.RobotsAttemptTimeout.String(),
 		"robots_total_timeout",
 		cfg.RobotsTotalTimeout.String(),
+		"db_migration_timeout",
+		cfg.DBMigrationTimeout.String(),
+		"audit_run_heartbeat",
+		cfg.AuditRunHeartbeatInterval.String(),
+		"stale_run_threshold",
+		cfg.StaleRunThreshold.String(),
 		"shutdown_timeout",
 		cfg.ShutdownTimeout.String(),
 		"per_host_interval",
@@ -262,15 +308,40 @@ func run() (exitCode int) {
 		slog.Error("PostgreSQL недоступний під час перевірки підключення", "error", err)
 		return exitFatal
 	}
-	if err := createAuditRun(dbInitCtx, dbPool, cfg); err != nil {
-		dbCancel()
+	dbCancel()
+
+	dbMigrationCtx, dbMigrationCancel := context.WithTimeout(signalCtx, cfg.DBMigrationTimeout)
+	if err := applySchemaMigrations(dbMigrationCtx, cfg); err != nil {
+		dbMigrationCancel()
+		dbPool.Close()
+		slog.Error("Не вдалося застосувати міграції PostgreSQL", "error", err)
+		return exitFatal
+	}
+	dbMigrationCancel()
+
+	dbMaintenanceCtx, dbMaintenanceCancel := context.WithTimeout(signalCtx, cfg.DBWriteTimeout)
+	abandonedRuns, err := abandonStaleAuditRuns(dbMaintenanceCtx, dbPool, cfg)
+	if err != nil {
+		dbMaintenanceCancel()
+		dbPool.Close()
+		slog.Error("Не вдалося позначити застарілі запуски аудиту як abandoned", "error", err)
+		return exitFatal
+	}
+	dbMaintenanceCancel()
+	if abandonedRuns > 0 {
+		slog.Warn("Застарілі running-запуски позначено як abandoned", "count", abandonedRuns)
+	}
+
+	dbRunCtx, dbRunCancel := context.WithTimeout(signalCtx, cfg.DBWriteTimeout)
+	if err := createAuditRun(dbRunCtx, dbPool, cfg); err != nil {
+		dbRunCancel()
 		dbPool.Close()
 		slog.Error("Не вдалося зареєструвати запуск аудиту", "error", err)
 		return exitFatal
 	}
-	dbCancel()
+	dbRunCancel()
 	slog.Info(
-		"Підключення до PostgreSQL підтверджено та запуск аудиту зареєстровано",
+		"Підключення до PostgreSQL підтверджено, схема актуальна та запуск аудиту зареєстровано",
 		"max_conns",
 		poolConfig.MaxConns,
 	)
@@ -287,6 +358,12 @@ func run() (exitCode int) {
 			slog.Error("Не вдалося завершити запис запуску аудиту", "error", err)
 			exitCode = exitFatal
 		}
+	}()
+	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
+	heartbeatDone := startAuditRunHeartbeat(heartbeatCtx, dbPool, cfg)
+	defer func() {
+		stopHeartbeat()
+		<-heartbeatDone
 	}()
 
 	targetSnapshot, err := captureAuditRunTargets(signalCtx, dbPool, cfg)
@@ -320,7 +397,7 @@ func run() (exitCode int) {
 	)
 
 	queueCapacity := cfg.Workers * QueueBufferPerWorker
-	jobs := make(chan string, queueCapacity)
+	jobs := make(chan AuditTarget, queueCapacity)
 	results := make(chan Result, queueCapacity)
 
 	pageCustomTransport := newHTTPTransport(cfg, cfg.HTTPAttemptTimeout)
@@ -382,7 +459,7 @@ func run() (exitCode int) {
 	var wg sync.WaitGroup
 	for w := 1; w <= cfg.Workers; w++ {
 		wg.Add(1)
-		go worker(signalCtx, operationCtx, w, jobs, results, pageHTTPClient, robotsHTTPClient, robotsCache, cfg, &wg)
+		go worker(signalCtx, operationCtx, w, jobs, results, pageHTTPClient, robotsHTTPClient, robotsCache, dbPool, cfg, &wg)
 	}
 
 	streamDone := make(chan urlStreamSummary, 1)
@@ -392,8 +469,9 @@ func run() (exitCode int) {
 			signalCtx,
 			targetSnapshot.HighWatermark,
 			cfg.URLBatchSize,
-			cfg.AllowPrivateTargets,
+			cfg,
 			jobs,
+			results,
 			func(ctx context.Context, afterID, highWatermark int64, limit int) ([]targetURLRecord, error) {
 				return fetchTargetURLBatch(ctx, dbPool, cfg, afterID, highWatermark, limit)
 			},
@@ -417,12 +495,13 @@ func run() (exitCode int) {
 	if unprocessedTargets < 0 {
 		unprocessedTargets = 0
 	}
-	missingResults := streamSummary.Queued - summary.Received
+	expectedResults := streamSummary.Queued + streamSummary.Skipped
+	missingResults := expectedResults - summary.Received
 	if missingResults < 0 {
 		missingResults = 0
 	}
 	runCompletion.SuccessfulURLs = summary.Successful
-	runCompletion.FailedURLs = summary.Failed + streamSummary.Skipped + missingResults
+	runCompletion.FailedURLs = summary.Failed + missingResults
 	if streamSummary.Error != nil && !streamCanceledByShutdown {
 		runCompletion.FailedURLs += int(unprocessedTargets)
 		slog.Error(
@@ -728,8 +807,9 @@ func streamTargetURLs(
 	ctx context.Context,
 	highWatermark int64,
 	batchSize int,
-	allowPrivateTargets bool,
-	jobs chan<- string,
+	cfg Config,
+	jobs chan<- AuditTarget,
+	results chan<- Result,
 	fetchBatch targetURLBatchFetcher,
 ) urlStreamSummary {
 	summary := urlStreamSummary{}
@@ -760,18 +840,33 @@ func streamTargetURLs(
 			}
 			afterID = record.ID
 
-			normalizedURL, err := normalizeTargetURL(record.URL, allowPrivateTargets)
+			normalizedURL, err := normalizeTargetURL(record.URL, cfg.AllowPrivateTargets)
 			if err != nil {
-				slog.Warn("URL пропущено через помилку валідації", "url", redactURL(record.URL), "error", sanitizeError(err))
-				summary.Skipped++
+				target := newAuditTarget(record, record.URL, cfg.TargetFingerprintKey)
+				wrappedErr := fmt.Errorf("target %d has invalid URL %s: %s", record.ID, target.SafeURL, sanitizeError(err))
+				result := failedScanResult(SEOData{
+					URL:           record.URL,
+					RobotsAllowed: false,
+					RobotsOutcome: robotsOutcomeNotChecked,
+				}, errorCodeInvalidTargetURL, wrappedErr)
+				result.Target = target
+				slog.Warn("URL не пройшов валідацію", "target_id", record.ID, "url", target.SafeURL, "error", sanitizeError(err))
+				select {
+				case <-ctx.Done():
+					summary.Error = ctx.Err()
+					return summary
+				case results <- result:
+					summary.Skipped++
+				}
 				continue
 			}
+			target := newAuditTarget(record, normalizedURL, cfg.TargetFingerprintKey)
 
 			select {
 			case <-ctx.Done():
 				summary.Error = ctx.Err()
 				return summary
-			case jobs <- normalizedURL:
+			case jobs <- target:
 				summary.Queued++
 			}
 		}
@@ -783,15 +878,27 @@ func streamTargetURLs(
 func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config) ResultSummary {
 	query := `
 		INSERT INTO audit_results (
-			safe_url, target_fingerprint, status_code, scan_status, error_code, error_message,
+			run_id, target_id, safe_url, target_fingerprint, fingerprint_key_id, status_code, scan_status, error_code, error_message,
 			is_redirect, redirect_url, title, title_status, description, description_status,
 			h1, h1_count, h2_to_h6_status, og_title, og_description, og_image, twitter_card,
 			internal_links_count, external_links_count, links_count, canonical_url, is_self_canonical,
 			meta_robots, x_robots_tag, robots_allowed, robots_outcome, has_json_ld, has_viewport,
-			total_images, images_missing_alt, word_count, duration_ms, run_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
-		ON CONFLICT (run_id, target_fingerprint) DO UPDATE SET
+			total_images, images_missing_alt, word_count, duration_ms,
+			safe_url_truncated, safe_url_original_length,
+			redirect_url_truncated, redirect_url_original_length,
+			title_truncated, title_original_length,
+			h1_truncated, h1_original_length,
+			og_title_truncated, og_title_original_length,
+			og_image_truncated, og_image_original_length,
+			twitter_card_truncated, twitter_card_original_length,
+			canonical_url_truncated, canonical_url_original_length,
+			meta_robots_truncated, meta_robots_original_length,
+			x_robots_tag_truncated, x_robots_tag_original_length
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57)
+		ON CONFLICT (run_id, target_id) DO UPDATE SET
 			safe_url = EXCLUDED.safe_url,
+			target_fingerprint = EXCLUDED.target_fingerprint,
+			fingerprint_key_id = EXCLUDED.fingerprint_key_id,
 			status_code = EXCLUDED.status_code,
 			scan_status = EXCLUDED.scan_status,
 			error_code = EXCLUDED.error_code,
@@ -824,13 +931,41 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			images_missing_alt = EXCLUDED.images_missing_alt,
 			word_count = EXCLUDED.word_count,
 			duration_ms = EXCLUDED.duration_ms,
+			safe_url_truncated = EXCLUDED.safe_url_truncated,
+			safe_url_original_length = EXCLUDED.safe_url_original_length,
+			redirect_url_truncated = EXCLUDED.redirect_url_truncated,
+			redirect_url_original_length = EXCLUDED.redirect_url_original_length,
+			title_truncated = EXCLUDED.title_truncated,
+			title_original_length = EXCLUDED.title_original_length,
+			h1_truncated = EXCLUDED.h1_truncated,
+			h1_original_length = EXCLUDED.h1_original_length,
+			og_title_truncated = EXCLUDED.og_title_truncated,
+			og_title_original_length = EXCLUDED.og_title_original_length,
+			og_image_truncated = EXCLUDED.og_image_truncated,
+			og_image_original_length = EXCLUDED.og_image_original_length,
+			twitter_card_truncated = EXCLUDED.twitter_card_truncated,
+			twitter_card_original_length = EXCLUDED.twitter_card_original_length,
+			canonical_url_truncated = EXCLUDED.canonical_url_truncated,
+			canonical_url_original_length = EXCLUDED.canonical_url_original_length,
+			meta_robots_truncated = EXCLUDED.meta_robots_truncated,
+			meta_robots_original_length = EXCLUDED.meta_robots_original_length,
+			x_robots_tag_truncated = EXCLUDED.x_robots_tag_truncated,
+			x_robots_tag_original_length = EXCLUDED.x_robots_tag_original_length,
 			created_at = CURRENT_TIMESTAMP;`
 
 	summary := ResultSummary{}
 	for res := range results {
 		summary.Received++
 		d := res.Data
-		identity := newTargetIdentity(cfg.TargetFingerprintKey, d.URL)
+		target := res.Target
+		if target.TargetID == 0 {
+			slog.Error("Результат SEO-аудиту не має зв'язку зі snapshot target", "url", redactURL(d.URL))
+			summary.Failed++
+			continue
+		}
+		if target.SafeURL == "" || len(target.Fingerprint) == 0 {
+			target = newAuditTarget(targetURLRecord{ID: target.TargetID, URL: d.URL}, d.URL, cfg.TargetFingerprintKey)
+		}
 		resultFailed := res.Error != nil || d.ScanStatus == scanStatusFailed
 		if resultFailed {
 			if d.ScanStatus == "" {
@@ -846,8 +981,10 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			if res.Error != nil {
 				slog.Error(
 					"Задача завершилася помилкою",
+					"target_id",
+					target.TargetID,
 					"url",
-					d.URL,
+					target.SafeURL,
 					"error_code",
 					d.ErrorCode,
 					"error",
@@ -862,8 +999,12 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 		if d.RobotsOutcome == "" {
 			d.RobotsOutcome = robotsOutcomeNotChecked
 		}
+		d.URL = target.SafeURL
 		d = sanitizeSEODataForStorage(d)
-		d.URL = identity.SafeURL
+		fingerprintKeyID := cfg.TargetFingerprintKeyID
+		if fingerprintKeyID == "" {
+			fingerprintKeyID = DefaultTargetFingerprintKeyID
+		}
 
 		dbWriteCtx, writeCancel := context.WithTimeout(ctx, cfg.DBWriteTimeout)
 		err := retryDBOperation(
@@ -871,11 +1012,22 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			"save_audit_result",
 			retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay},
 			func() error {
-				_, err := dbPool.Exec(
+				tx, err := dbPool.Begin(dbWriteCtx)
+				if err != nil {
+					return err
+				}
+				defer func() {
+					_ = tx.Rollback(dbWriteCtx)
+				}()
+
+				if _, err := tx.Exec(
 					dbWriteCtx,
 					query,
+					cfg.RunID,
+					target.TargetID,
 					d.URL,
-					identity.Fingerprint,
+					target.Fingerprint,
+					fingerprintKeyID,
 					d.StatusCode,
 					d.ScanStatus,
 					d.ErrorCode,
@@ -908,15 +1060,46 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 					d.ImagesMissingAlt,
 					d.WordCount,
 					d.Duration.Milliseconds(),
+					d.SafeURLTruncated,
+					d.SafeURLOriginalLength,
+					d.RedirectURLTruncated,
+					d.RedirectURLOriginalLength,
+					d.TitleTruncated,
+					d.TitleOriginalLength,
+					d.H1Truncated,
+					d.H1OriginalLength,
+					d.OGTitleTruncated,
+					d.OGTitleOriginalLength,
+					d.OGImageTruncated,
+					d.OGImageOriginalLength,
+					d.TwitterCardTruncated,
+					d.TwitterCardOriginalLength,
+					d.CanonicalURLTruncated,
+					d.CanonicalURLOriginalLength,
+					d.MetaRobotsTruncated,
+					d.MetaRobotsOriginalLength,
+					d.XRobotsTagTruncated,
+					d.XRobotsTagOriginalLength,
+				); err != nil {
+					return err
+				}
+				if err := markAuditRunTargetFinished(
+					dbWriteCtx,
+					tx,
 					cfg.RunID,
-				)
-				return err
+					target.TargetID,
+					finalAuditTargetStatus(d, resultFailed),
+					d.ErrorMessage,
+				); err != nil {
+					return err
+				}
+				return tx.Commit(dbWriteCtx)
 			},
 		)
 		writeCancel()
 
 		if err != nil {
-			slog.Error("Не вдалося зберегти результат SEO-аудиту", "url", d.URL, "error", sanitizeError(err))
+			slog.Error("Не вдалося зберегти результат SEO-аудиту", "target_id", target.TargetID, "url", d.URL, "error", sanitizeError(err))
 			if !resultFailed {
 				summary.Failed++
 			}
@@ -927,7 +1110,7 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 		if !resultFailed {
 			summary.Successful++
 		}
-		slog.Debug("Результат SEO-аудиту збережено", "url", d.URL)
+		slog.Debug("Результат SEO-аудиту збережено", "target_id", target.TargetID, "url", d.URL)
 	}
 
 	return summary
@@ -937,11 +1120,12 @@ func worker(
 	schedulingCtx context.Context,
 	operationCtx context.Context,
 	id int,
-	jobs <-chan string,
+	jobs <-chan AuditTarget,
 	results chan<- Result,
 	pageClient *http.Client,
 	robotsClient *http.Client,
 	robotsCache *robotsPolicyCache,
+	dbPool *pgxpool.Pool,
 	cfg Config,
 	wg *sync.WaitGroup,
 ) {
@@ -949,41 +1133,44 @@ func worker(
 	workerLogger := slog.With("worker_id", id)
 
 	for {
-		var targetURL string
-		var safeURL string
+		var target AuditTarget
 		select {
 		case <-schedulingCtx.Done():
 			workerLogger.Debug("Worker не приймає нові задачі після сигналу зупинки")
 			return
-		case queuedURL, ok := <-jobs:
+		case queuedTarget, ok := <-jobs:
 			if !ok {
 				return
 			}
-			targetURL = queuedURL
-			safeURL = redactURL(targetURL)
+			target = queuedTarget
 		}
 		if schedulingCtx.Err() != nil {
 			workerLogger.Debug("Worker залишає заплановану задачу для наступного запуску")
 			return
 		}
 
+		if err := markAuditRunTargetStarted(operationCtx, dbPool, target, cfg); err != nil {
+			workerLogger.Warn("Не вдалося позначити target як running", "target_id", target.TargetID, "url", target.SafeURL, "error", err)
+		}
 		start := time.Now()
 
-		allowed, err := robotsCache.isAllowedByRobots(operationCtx, robotsClient, targetURL, cfg.RobotsTotalTimeout)
+		allowed, err := robotsCache.isAllowedByRobots(operationCtx, robotsClient, target.RequestURL, cfg.RobotsTotalTimeout)
 		if err != nil {
-			wrappedErr := fmt.Errorf("worker %d cannot verify robots.txt for %s: %s", id, safeURL, sanitizeError(err))
-			results <- failedScanResult(SEOData{
-				URL:           targetURL,
+			wrappedErr := fmt.Errorf("worker %d cannot verify robots.txt for %s: %s", id, target.SafeURL, sanitizeError(err))
+			result := failedScanResult(SEOData{
+				URL:           target.RequestURL,
 				RobotsAllowed: false,
 				RobotsOutcome: robotsOutcomeUnavailable,
 				Duration:      time.Since(start),
 			}, errorCodeRobotsUnavailable, wrappedErr)
+			result.Target = target
+			results <- result
 			continue
 		}
 		if !allowed {
-			workerLogger.Warn("Сканування URL заборонено правилами robots.txt", "url", safeURL)
-			results <- Result{Data: SEOData{
-				URL:           targetURL,
+			workerLogger.Warn("Сканування URL заборонено правилами robots.txt", "target_id", target.TargetID, "url", target.SafeURL)
+			results <- Result{Target: target, Data: SEOData{
+				URL:           target.RequestURL,
 				ScanStatus:    scanStatusBlockedByRobots,
 				RobotsAllowed: false,
 				RobotsOutcome: robotsOutcomeDisallowed,
@@ -992,18 +1179,20 @@ func worker(
 			continue
 		}
 		baseData := SEOData{
-			URL:           targetURL,
+			URL:           target.RequestURL,
 			RobotsAllowed: true,
 			RobotsOutcome: robotsOutcomeAllowed,
 		}
 
 		reqCtx, reqCancel := context.WithTimeout(operationCtx, cfg.HTTPTotalTimeout)
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target.RequestURL, nil)
 		if err != nil {
 			reqCancel()
 			baseData.Duration = time.Since(start)
-			wrappedErr := fmt.Errorf("worker %d cannot create request for %s: %s", id, safeURL, sanitizeError(err))
-			results <- failedScanResult(baseData, errorCodeRequestCreationFailed, wrappedErr)
+			wrappedErr := fmt.Errorf("worker %d cannot create request for %s: %s", id, target.SafeURL, sanitizeError(err))
+			result := failedScanResult(baseData, errorCodeRequestCreationFailed, wrappedErr)
+			result.Target = target
+			results <- result
 			continue
 		}
 		req.Header.Set("User-Agent", UserAgentStr)
@@ -1013,8 +1202,10 @@ func worker(
 		if err != nil {
 			reqCancel()
 			baseData.Duration = time.Since(start)
-			wrappedErr := fmt.Errorf("worker %d network request failed for %s: %s", id, safeURL, sanitizeError(err))
-			results <- failedScanResult(baseData, errorCodeRequestFailed, wrappedErr)
+			wrappedErr := fmt.Errorf("worker %d network request failed for %s: %s", id, target.SafeURL, sanitizeError(err))
+			result := failedScanResult(baseData, errorCodeRequestFailed, wrappedErr)
+			result.Target = target
+			results <- result
 			continue
 		}
 
@@ -1027,15 +1218,15 @@ func worker(
 			workerLogger.Info(
 				"Виявлено HTTP-редирект",
 				"from",
-				safeURL,
+				target.SafeURL,
 				"to",
 				safeRedirectURL,
 				"status",
 				resp.StatusCode,
 			)
 
-			results <- Result{Data: SEOData{
-				URL:           targetURL,
+			results <- Result{Target: target, Data: SEOData{
+				URL:           target.RequestURL,
 				StatusCode:    httpStatus(resp.StatusCode),
 				ScanStatus:    scanStatusRedirect,
 				IsRedirect:    true,
@@ -1049,7 +1240,7 @@ func worker(
 
 		if resp.StatusCode != http.StatusOK {
 			data := SEOData{
-				URL:           targetURL,
+				URL:           target.RequestURL,
 				StatusCode:    httpStatus(resp.StatusCode),
 				ScanStatus:    scanStatusCompleted,
 				XRobotsTag:    strings.TrimSpace(resp.Header.Get("X-Robots-Tag")),
@@ -1059,8 +1250,8 @@ func worker(
 			}
 			resp.Body.Close()
 			reqCancel()
-			workerLogger.Info("Збережено HTTP-статус без HTML-парсингу", "url", safeURL, "status", resp.StatusCode)
-			results <- Result{Data: data}
+			workerLogger.Info("Збережено HTTP-статус без HTML-парсингу", "target_id", target.TargetID, "url", target.SafeURL, "status", resp.StatusCode)
+			results <- Result{Target: target, Data: data}
 			continue
 		}
 
@@ -1071,22 +1262,26 @@ func worker(
 			resp.Body.Close()
 			reqCancel()
 			baseData.Duration = time.Since(start)
-			wrappedErr := fmt.Errorf("worker %d rejected %s: missing Content-Type header", id, safeURL)
-			results <- failedScanResult(baseData, errorCodeMissingContentType, wrappedErr)
+			wrappedErr := fmt.Errorf("worker %d rejected %s: missing Content-Type header", id, target.SafeURL)
+			result := failedScanResult(baseData, errorCodeMissingContentType, wrappedErr)
+			result.Target = target
+			results <- result
 			continue
 		}
 
 		if err := validateHTMLContentType(contentType); err != nil {
 			resp.Body.Close()
 			reqCancel()
-			workerLogger.Warn("Пропущено непідтримуваний тип контенту", "url", safeURL, "content_type", contentType)
+			workerLogger.Warn("Пропущено непідтримуваний тип контенту", "target_id", target.TargetID, "url", target.SafeURL, "content_type", contentType)
 			baseData.Duration = time.Since(start)
-			wrappedErr := fmt.Errorf("worker %d skipped unsupported content type %q for %s: %s", id, contentType, safeURL, sanitizeError(err))
-			results <- failedScanResult(baseData, errorCodeUnsupportedContentType, wrappedErr)
+			wrappedErr := fmt.Errorf("worker %d skipped unsupported content type %q for %s: %s", id, contentType, target.SafeURL, sanitizeError(err))
+			result := failedScanResult(baseData, errorCodeUnsupportedContentType, wrappedErr)
+			result.Target = target
+			results <- result
 			continue
 		}
 
-		data, err := parsePage(resp, targetURL, cfg.MaxHTMLBodyBytes)
+		data, err := parsePage(resp, target.RequestURL, cfg.MaxHTMLBodyBytes)
 		resp.Body.Close()
 		reqCancel()
 
@@ -1094,8 +1289,10 @@ func worker(
 			data.RobotsAllowed = true
 			data.RobotsOutcome = robotsOutcomeAllowed
 			data.Duration = time.Since(start)
-			wrappedErr := fmt.Errorf("worker %d cannot parse HTML for %s: %s", id, safeURL, sanitizeError(err))
-			results <- failedScanResult(data, errorCodeResponseParseFailed, wrappedErr)
+			wrappedErr := fmt.Errorf("worker %d cannot parse HTML for %s: %s", id, target.SafeURL, sanitizeError(err))
+			result := failedScanResult(data, errorCodeResponseParseFailed, wrappedErr)
+			result.Target = target
+			results <- result
 			continue
 		}
 
@@ -1106,9 +1303,9 @@ func worker(
 
 		select {
 		case <-operationCtx.Done():
-			workerLogger.Warn("Відправлення результату скасовано після вичерпання shutdown timeout", "url", safeURL)
+			workerLogger.Warn("Відправлення результату скасовано після вичерпання shutdown timeout", "target_id", target.TargetID, "url", target.SafeURL)
 			return
-		case results <- Result{Data: data}:
+		case results <- Result{Target: target, Data: data}:
 		}
 	}
 }

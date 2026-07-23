@@ -12,44 +12,61 @@ import (
 )
 
 const (
-	DefaultHTTPMaxRetries       = 2
-	DefaultDBMaxRetries         = 2
-	MaxRetryAttempts            = 5
-	DefaultRetryBaseDelay       = 200 * time.Millisecond
-	DefaultRetryMaxDelay        = 2 * time.Second
-	DefaultHTTPAttemptTimeout   = 5 * time.Second
-	DefaultHTTPTotalTimeout     = 20 * time.Second
-	DefaultRobotsAttemptTimeout = 3 * time.Second
-	DefaultRobotsTotalTimeout   = 10 * time.Second
-	MinFingerprintKeyLen        = 32
+	DefaultHTTPMaxRetries            = 2
+	DefaultDBMaxRetries              = 2
+	MaxRetryAttempts                 = 5
+	DefaultRetryBaseDelay            = 200 * time.Millisecond
+	DefaultRetryMaxDelay             = 2 * time.Second
+	DefaultHTTPAttemptTimeout        = 5 * time.Second
+	DefaultHTTPTotalTimeout          = 20 * time.Second
+	DefaultRobotsAttemptTimeout      = 3 * time.Second
+	DefaultRobotsTotalTimeout        = 10 * time.Second
+	DefaultDBConnectTimeout          = 5 * time.Second
+	DefaultDBMigrationTimeout        = 30 * time.Second
+	DefaultDBFetchTimeout            = 5 * time.Second
+	DefaultDBWriteTimeout            = 3 * time.Second
+	DefaultAuditRunHeartbeatInterval = 30 * time.Second
+	DefaultStaleRunThreshold         = 5 * time.Minute
+	DefaultTargetFingerprintKeyID    = "default"
+	MinFingerprintKeyLen             = 32
+	MaxWorkerInstanceIDLen           = 128
 )
 
-var runIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var (
+	runIDPattern            = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	fingerprintKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
+	workerInstanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+)
 
 type Config struct {
-	RunID                string
-	TargetFingerprintKey []byte
-	LogLevel             slog.Level
-	Workers              int
-	DatabaseURL          string
-	HTTPAttemptTimeout   time.Duration
-	HTTPTotalTimeout     time.Duration
-	RobotsAttemptTimeout time.Duration
-	RobotsTotalTimeout   time.Duration
-	DBConnectTimeout     time.Duration
-	DBFetchTimeout       time.Duration
-	DBWriteTimeout       time.Duration
-	ShutdownTimeout      time.Duration
-	URLBatchSize         int
-	MaxHTMLBodyBytes     int64
-	AllowPrivateTargets  bool
-	RateLimitInterval    time.Duration
-	MaxConcurrentPerHost int
-	RobotsCacheTTL       time.Duration
-	HTTPMaxRetries       int
-	DBMaxRetries         int
-	RetryBaseDelay       time.Duration
-	RetryMaxDelay        time.Duration
+	RunID                     string
+	WorkerInstanceID          string
+	TargetFingerprintKey      []byte
+	TargetFingerprintKeyID    string
+	LogLevel                  slog.Level
+	Workers                   int
+	DatabaseURL               string
+	HTTPAttemptTimeout        time.Duration
+	HTTPTotalTimeout          time.Duration
+	RobotsAttemptTimeout      time.Duration
+	RobotsTotalTimeout        time.Duration
+	DBConnectTimeout          time.Duration
+	DBMigrationTimeout        time.Duration
+	DBFetchTimeout            time.Duration
+	DBWriteTimeout            time.Duration
+	AuditRunHeartbeatInterval time.Duration
+	StaleRunThreshold         time.Duration
+	ShutdownTimeout           time.Duration
+	URLBatchSize              int
+	MaxHTMLBodyBytes          int64
+	AllowPrivateTargets       bool
+	RateLimitInterval         time.Duration
+	MaxConcurrentPerHost      int
+	RobotsCacheTTL            time.Duration
+	HTTPMaxRetries            int
+	DBMaxRetries              int
+	RetryBaseDelay            time.Duration
+	RetryMaxDelay             time.Duration
 }
 
 func loadConfig() (Config, error) {
@@ -79,17 +96,32 @@ func loadConfig() (Config, error) {
 	if robotsAttemptTimeout > robotsTotalTimeout {
 		return Config{}, fmt.Errorf("ROBOTS_ATTEMPT_TIMEOUT must not exceed ROBOTS_TOTAL_TIMEOUT")
 	}
-	dbConnectTimeout, err := durationFromEnv("DB_CONNECT_TIMEOUT", 5*time.Second)
+	dbConnectTimeout, err := durationFromEnv("DB_CONNECT_TIMEOUT", DefaultDBConnectTimeout)
 	if err != nil {
 		return Config{}, err
 	}
-	dbFetchTimeout, err := durationFromEnv("DB_FETCH_TIMEOUT", 5*time.Second)
+	dbMigrationTimeout, err := durationFromEnv("DB_MIGRATION_TIMEOUT", DefaultDBMigrationTimeout)
 	if err != nil {
 		return Config{}, err
 	}
-	dbWriteTimeout, err := durationFromEnv("DB_WRITE_TIMEOUT", 3*time.Second)
+	dbFetchTimeout, err := durationFromEnv("DB_FETCH_TIMEOUT", DefaultDBFetchTimeout)
 	if err != nil {
 		return Config{}, err
+	}
+	dbWriteTimeout, err := durationFromEnv("DB_WRITE_TIMEOUT", DefaultDBWriteTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	auditRunHeartbeatInterval, err := durationFromEnv("AUDIT_RUN_HEARTBEAT_INTERVAL", DefaultAuditRunHeartbeatInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	staleRunThreshold, err := durationFromEnv("STALE_RUN_THRESHOLD", DefaultStaleRunThreshold)
+	if err != nil {
+		return Config{}, err
+	}
+	if auditRunHeartbeatInterval >= staleRunThreshold {
+		return Config{}, fmt.Errorf("AUDIT_RUN_HEARTBEAT_INTERVAL must be lower than STALE_RUN_THRESHOLD")
 	}
 	shutdownTimeout, err := durationFromEnv("SHUTDOWN_TIMEOUT", DefaultShutdownTimeout)
 	if err != nil {
@@ -160,35 +192,48 @@ func loadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	targetFingerprintKeyID, err := targetFingerprintKeyIDFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	runID, err := runIDFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+	workerInstanceID, err := workerInstanceIDFromEnv(runID)
 	if err != nil {
 		return Config{}, err
 	}
 
 	return Config{
-		RunID:                runID,
-		TargetFingerprintKey: targetFingerprintKey,
-		LogLevel:             logLevel,
-		Workers:              workers,
-		DatabaseURL:          databaseURL,
-		HTTPAttemptTimeout:   httpAttemptTimeout,
-		HTTPTotalTimeout:     httpTotalTimeout,
-		RobotsAttemptTimeout: robotsAttemptTimeout,
-		RobotsTotalTimeout:   robotsTotalTimeout,
-		DBConnectTimeout:     dbConnectTimeout,
-		DBFetchTimeout:       dbFetchTimeout,
-		DBWriteTimeout:       dbWriteTimeout,
-		ShutdownTimeout:      shutdownTimeout,
-		URLBatchSize:         urlBatchSize,
-		MaxHTMLBodyBytes:     maxHTMLBodyBytes,
-		AllowPrivateTargets:  allowPrivateTargets,
-		RateLimitInterval:    rateLimitInterval,
-		MaxConcurrentPerHost: maxConcurrentPerHost,
-		RobotsCacheTTL:       robotsCacheTTL,
-		HTTPMaxRetries:       httpMaxRetries,
-		DBMaxRetries:         dbMaxRetries,
-		RetryBaseDelay:       retryBaseDelay,
-		RetryMaxDelay:        retryMaxDelay,
+		RunID:                     runID,
+		WorkerInstanceID:          workerInstanceID,
+		TargetFingerprintKey:      targetFingerprintKey,
+		TargetFingerprintKeyID:    targetFingerprintKeyID,
+		LogLevel:                  logLevel,
+		Workers:                   workers,
+		DatabaseURL:               databaseURL,
+		HTTPAttemptTimeout:        httpAttemptTimeout,
+		HTTPTotalTimeout:          httpTotalTimeout,
+		RobotsAttemptTimeout:      robotsAttemptTimeout,
+		RobotsTotalTimeout:        robotsTotalTimeout,
+		DBConnectTimeout:          dbConnectTimeout,
+		DBMigrationTimeout:        dbMigrationTimeout,
+		DBFetchTimeout:            dbFetchTimeout,
+		DBWriteTimeout:            dbWriteTimeout,
+		AuditRunHeartbeatInterval: auditRunHeartbeatInterval,
+		StaleRunThreshold:         staleRunThreshold,
+		ShutdownTimeout:           shutdownTimeout,
+		URLBatchSize:              urlBatchSize,
+		MaxHTMLBodyBytes:          maxHTMLBodyBytes,
+		AllowPrivateTargets:       allowPrivateTargets,
+		RateLimitInterval:         rateLimitInterval,
+		MaxConcurrentPerHost:      maxConcurrentPerHost,
+		RobotsCacheTTL:            robotsCacheTTL,
+		HTTPMaxRetries:            httpMaxRetries,
+		DBMaxRetries:              dbMaxRetries,
+		RetryBaseDelay:            retryBaseDelay,
+		RetryMaxDelay:             retryMaxDelay,
 	}, nil
 }
 
@@ -201,6 +246,70 @@ func targetFingerprintKeyFromEnv() ([]byte, error) {
 		return nil, fmt.Errorf("TARGET_FINGERPRINT_KEY must be at least %d bytes", MinFingerprintKeyLen)
 	}
 	return []byte(raw), nil
+}
+
+func targetFingerprintKeyIDFromEnv() (string, error) {
+	raw := strings.TrimSpace(os.Getenv("TARGET_FINGERPRINT_KEY_ID"))
+	if raw == "" {
+		return DefaultTargetFingerprintKeyID, nil
+	}
+	if !fingerprintKeyIDPattern.MatchString(raw) {
+		return "", fmt.Errorf("TARGET_FINGERPRINT_KEY_ID must be 1-32 characters and contain only letters, digits, dots, dashes or underscores")
+	}
+	return raw, nil
+}
+
+func workerInstanceIDFromEnv(runID string) (string, error) {
+	raw := strings.TrimSpace(os.Getenv("WORKER_INSTANCE_ID"))
+	if raw == "" {
+		return defaultWorkerInstanceID(runID), nil
+	}
+	if !workerInstanceIDPattern.MatchString(raw) {
+		return "", fmt.Errorf("WORKER_INSTANCE_ID must be 1-%d characters and contain only letters, digits, dots, dashes, colons or underscores", MaxWorkerInstanceIDLen)
+	}
+	return raw, nil
+}
+
+func defaultWorkerInstanceID(runID string) string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "unknown-host"
+	}
+	runSuffix := runID
+	if len(runSuffix) > 8 {
+		runSuffix = runSuffix[:8]
+	}
+	value := fmt.Sprintf("%s-p%d-%s", sanitizeWorkerInstanceIDPart(hostname), os.Getpid(), runSuffix)
+	if len(value) > MaxWorkerInstanceIDLen {
+		return value[:MaxWorkerInstanceIDLen]
+	}
+	return value
+}
+
+func sanitizeWorkerInstanceIDPart(value string) string {
+	var builder strings.Builder
+	builder.Grow(len(value))
+	lastDash := false
+	for _, r := range strings.TrimSpace(value) {
+		allowed := r >= 'a' && r <= 'z' ||
+			r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' ||
+			r == '.' || r == '_' || r == ':' || r == '-'
+		if allowed {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	sanitized := strings.Trim(builder.String(), "-")
+	if sanitized == "" {
+		return "worker"
+	}
+	return sanitized
 }
 
 func intFromEnv(name string, fallback, minValue, maxValue int) (int, error) {

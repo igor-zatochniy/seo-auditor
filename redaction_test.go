@@ -6,9 +6,9 @@ import (
 )
 
 func TestRedactURLMasksSensitiveQueryValues(t *testing.T) {
-	raw := "https://user:pass@example.com/reset?utm=1&token=secret&API_KEY=private&clientSecret=hidden&x-amz-security-token=aws&private_key=pk#access_token=fragment"
+	raw := "https://user:pass@example.com/reset?utm=1&token=secret&API_KEY=private&clientSecret=hidden&x-amz-security-token=aws&X-Amz-Signature=sig&X-Goog-Signature=goog&download_token_v2=download&temporarySignature=temp&mySecret=hidden&private_key=pk#access_token=fragment"
 	got := redactURL(raw)
-	want := "https://example.com/reset?API_KEY=%5BREDACTED%5D&clientSecret=%5BREDACTED%5D&private_key=%5BREDACTED%5D&token=%5BREDACTED%5D&utm=1&x-amz-security-token=%5BREDACTED%5D"
+	want := "https://example.com/reset?API_KEY=%5BREDACTED%5D&X-Amz-Signature=%5BREDACTED%5D&X-Goog-Signature=%5BREDACTED%5D&clientSecret=%5BREDACTED%5D&download_token_v2=%5BREDACTED%5D&mySecret=%5BREDACTED%5D&private_key=%5BREDACTED%5D&temporarySignature=%5BREDACTED%5D&token=%5BREDACTED%5D&utm=%5BVALUE%5D&x-amz-security-token=%5BREDACTED%5D"
 
 	if got != want {
 		t.Fatalf("redactURL() = %q, want %q", got, want)
@@ -19,7 +19,13 @@ func TestRedactURLMasksSensitiveQueryValues(t *testing.T) {
 		"clientSecret=hidden",
 		"private_key=pk",
 		"x-amz-security-token=aws",
+		"X-Amz-Signature=sig",
+		"X-Goog-Signature=goog",
+		"download_token_v2=download",
+		"temporarySignature=temp",
+		"mySecret=hidden",
 		"access_token=fragment",
+		"utm=1",
 	} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("redactURL leaked sensitive data: %q", got)
@@ -30,7 +36,7 @@ func TestRedactURLMasksSensitiveQueryValues(t *testing.T) {
 func TestRedactTextMasksURLsInsideErrorMessages(t *testing.T) {
 	raw := `Get "https://example.com/api?token=secret&ok=1": dial tcp: timeout`
 	got := redactText(raw)
-	want := `Get "https://example.com/api?ok=1&token=%5BREDACTED%5D": dial tcp: timeout`
+	want := `Get "https://example.com/api?ok=%5BVALUE%5D&token=%5BREDACTED%5D": dial tcp: timeout`
 
 	if got != want {
 		t.Fatalf("redactText() = %q, want %q", got, want)
@@ -60,7 +66,8 @@ func TestSanitizeSEODataForStorageRedactsURLFieldsAndTruncatesError(t *testing.T
 		if strings.Contains(value, "token=secret") ||
 			strings.Contains(value, "code=oauth-code") ||
 			strings.Contains(value, "signature=private-signature") ||
-			strings.Contains(value, "sig=image-signature") {
+			strings.Contains(value, "sig=image-signature") ||
+			strings.Contains(value, "view=full") {
 			t.Fatalf("%s leaked sensitive data: %q", field, value)
 		}
 	}

@@ -1,3 +1,6 @@
+-- +goose Up
+-- +goose NO TRANSACTION
+
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS audit_runs (
@@ -28,21 +31,10 @@ ALTER TABLE audit_runs
     ADD CONSTRAINT audit_runs_status_check
     CHECK (status IN ('running', 'completed', 'completed_with_errors', 'failed', 'canceled'));
 
--- Матеріалізований набір цілей для одного запуску зберігає стабільну чергу,
--- навіть якщо pages_to_scan змінюється під час виконання.
-CREATE TABLE IF NOT EXISTS audit_run_targets (
-    run_id UUID NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
-    target_id BIGINT NOT NULL,
-    request_url TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (run_id, target_id)
-);
-
 CREATE TABLE IF NOT EXISTS audit_results (
     id BIGSERIAL PRIMARY KEY,
     run_id UUID NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
-    safe_url VARCHAR(2048) NOT NULL,
-    target_fingerprint BYTEA NOT NULL,
+    url VARCHAR(2048) NOT NULL,
     status_code INT,
     scan_status VARCHAR(32) NOT NULL DEFAULT 'completed',
     error_code VARCHAR(64) NOT NULL DEFAULT '',
@@ -76,55 +68,11 @@ CREATE TABLE IF NOT EXISTS audit_results (
     word_count INT DEFAULT 0,
     duration_ms INT DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT audit_results_run_target_fingerprint_key UNIQUE (run_id, target_fingerprint)
+    CONSTRAINT audit_results_run_url_key UNIQUE (run_id, url)
 );
 
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = 'audit_results'
-          AND column_name = 'url'
-    ) AND NOT EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = 'audit_results'
-          AND column_name = 'safe_url'
-    ) THEN
-        ALTER TABLE audit_results RENAME COLUMN url TO safe_url;
-    END IF;
-END
-$$;
-
-ALTER TABLE audit_results
-    ADD COLUMN IF NOT EXISTS target_fingerprint BYTEA;
-
-UPDATE audit_results
-SET target_fingerprint = decode(md5(run_id::TEXT || ':' || safe_url), 'hex')
-WHERE target_fingerprint IS NULL;
-
-ALTER TABLE audit_results
-    ALTER COLUMN target_fingerprint SET NOT NULL;
-
-ALTER TABLE audit_results
-    DROP CONSTRAINT IF EXISTS audit_results_run_url_key;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid = 'audit_results'::regclass
-          AND conname = 'audit_results_run_target_fingerprint_key'
-    ) THEN
-        ALTER TABLE audit_results
-            ADD CONSTRAINT audit_results_run_target_fingerprint_key UNIQUE (run_id, target_fingerprint);
-    END IF;
-END
-$$;
-
 -- Перенесення результатів зі старої таблиці без втрати попередніх аудитів.
+-- +goose StatementBegin
 DO $$
 BEGIN
     IF to_regclass('seo_results') IS NULL THEN
@@ -171,7 +119,7 @@ BEGIN
     ON CONFLICT (id) DO NOTHING;
 
     INSERT INTO audit_results (
-        run_id, safe_url, target_fingerprint, status_code, scan_status, error_code, error_message,
+        run_id, url, status_code, scan_status, error_code, error_message,
         is_redirect, redirect_url, title, title_status, description, description_status,
         h1, h1_count, h2_to_h6_status, og_title, og_description, og_image, twitter_card,
         internal_links_count, external_links_count, links_count, canonical_url, is_self_canonical,
@@ -179,8 +127,7 @@ BEGIN
         total_images, images_missing_alt, word_count, duration_ms, created_at
     )
     SELECT
-        run_map.new_run_id, result.url, decode(md5(run_map.new_run_id::TEXT || ':' || result.url), 'hex'),
-        result.status_code, result.scan_status,
+        run_map.new_run_id, result.url, result.status_code, result.scan_status,
         result.error_code, result.error_message, result.is_redirect, result.redirect_url,
         result.title, result.title_status, result.description, result.description_status,
         result.h1, result.h1_count, result.h2_to_h6_status, result.og_title,
@@ -193,11 +140,12 @@ BEGIN
         COALESCE(result.created_at, CURRENT_TIMESTAMP)
     FROM seo_results AS result
     JOIN legacy_audit_run_map AS run_map ON run_map.legacy_run_id = result.run_id
-    ON CONFLICT (run_id, target_fingerprint) DO NOTHING;
+    ON CONFLICT (run_id, url) DO NOTHING;
 
     DROP TABLE seo_results;
 END
 $$;
+-- +goose StatementEnd
 
 CREATE INDEX IF NOT EXISTS idx_audit_runs_status_started
     ON audit_runs(status, started_at DESC);
@@ -208,6 +156,6 @@ CREATE INDEX IF NOT EXISTS idx_audit_results_scan_status
 CREATE INDEX IF NOT EXISTS idx_audit_results_run_status
     ON audit_results(run_id, scan_status);
 CREATE INDEX IF NOT EXISTS idx_audit_results_url_created
-    ON audit_results(safe_url, created_at DESC);
+    ON audit_results(url, created_at DESC);
 
 COMMIT;

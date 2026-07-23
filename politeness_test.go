@@ -200,9 +200,11 @@ func TestWorkersShareRobotsCacheAndHostConcurrency(t *testing.T) {
 	robotsClient := newRobotsHTTPClient(transport)
 	robotsCache := newRobotsPolicyCache(time.Hour, 16)
 
-	jobs := make(chan string, 2)
-	jobs <- server.URL + "/page/1"
-	jobs <- server.URL + "/page/2"
+	firstURL := server.URL + "/page/1"
+	secondURL := server.URL + "/page/2"
+	jobs := make(chan AuditTarget, 2)
+	jobs <- newAuditTarget(targetURLRecord{ID: 1, URL: firstURL}, firstURL, []byte(testTargetFingerprintKey))
+	jobs <- newAuditTarget(targetURLRecord{ID: 2, URL: secondURL}, secondURL, []byte(testTargetFingerprintKey))
 	close(jobs)
 	results := make(chan Result, 2)
 
@@ -218,6 +220,7 @@ func TestWorkersShareRobotsCacheAndHostConcurrency(t *testing.T) {
 			pageClient,
 			robotsClient,
 			robotsCache,
+			nil,
 			Config{
 				HTTPAttemptTimeout:   time.Second,
 				HTTPTotalTimeout:     5 * time.Second,

@@ -2,13 +2,16 @@ package main
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 )
 
 var configEnvironmentVariables = []string{
 	"DATABASE_URL",
 	"RUN_ID",
+	"WORKER_INSTANCE_ID",
 	"TARGET_FINGERPRINT_KEY",
+	"TARGET_FINGERPRINT_KEY_ID",
 	"LOG_LEVEL",
 	"WORKERS",
 	"HTTP_ATTEMPT_TIMEOUT",
@@ -16,8 +19,11 @@ var configEnvironmentVariables = []string{
 	"ROBOTS_ATTEMPT_TIMEOUT",
 	"ROBOTS_TOTAL_TIMEOUT",
 	"DB_CONNECT_TIMEOUT",
+	"DB_MIGRATION_TIMEOUT",
 	"DB_FETCH_TIMEOUT",
 	"DB_WRITE_TIMEOUT",
+	"AUDIT_RUN_HEARTBEAT_INTERVAL",
+	"STALE_RUN_THRESHOLD",
 	"SHUTDOWN_TIMEOUT",
 	"URL_BATCH_SIZE",
 	"MAX_HTML_BODY_BYTES",
@@ -80,6 +86,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	if string(cfg.TargetFingerprintKey) != testTargetFingerprintKey {
 		t.Fatalf("unexpected target fingerprint key")
 	}
+	if cfg.TargetFingerprintKeyID != DefaultTargetFingerprintKeyID {
+		t.Fatalf("unexpected target fingerprint key ID: %q", cfg.TargetFingerprintKeyID)
+	}
 	if cfg.HTTPMaxRetries != DefaultHTTPMaxRetries || cfg.DBMaxRetries != DefaultDBMaxRetries {
 		t.Fatalf("unexpected retry defaults: HTTP=%d DB=%d", cfg.HTTPMaxRetries, cfg.DBMaxRetries)
 	}
@@ -88,6 +97,37 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.RobotsAttemptTimeout != DefaultRobotsAttemptTimeout || cfg.RobotsTotalTimeout != DefaultRobotsTotalTimeout {
 		t.Fatalf("unexpected robots timeout defaults: attempt=%s total=%s", cfg.RobotsAttemptTimeout, cfg.RobotsTotalTimeout)
+	}
+	if cfg.DBConnectTimeout != DefaultDBConnectTimeout || cfg.DBMigrationTimeout != DefaultDBMigrationTimeout {
+		t.Fatalf("unexpected DB timeout defaults: connect=%s migration=%s", cfg.DBConnectTimeout, cfg.DBMigrationTimeout)
+	}
+	if cfg.AuditRunHeartbeatInterval != DefaultAuditRunHeartbeatInterval || cfg.StaleRunThreshold != DefaultStaleRunThreshold {
+		t.Fatalf("unexpected audit run heartbeat defaults: heartbeat=%s stale=%s", cfg.AuditRunHeartbeatInterval, cfg.StaleRunThreshold)
+	}
+	if cfg.WorkerInstanceID == "" {
+		t.Fatal("expected generated worker instance ID")
+	}
+}
+
+func TestLoadConfigRejectsInvalidTargetFingerprintKeyID(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("TARGET_FINGERPRINT_KEY_ID", strings.Repeat("x", 33))
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid TARGET_FINGERPRINT_KEY_ID to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsInvalidWorkerInstanceID(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("WORKER_INSTANCE_ID", "worker with spaces")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid WORKER_INSTANCE_ID to fail configuration loading")
 	}
 }
 
@@ -159,6 +199,18 @@ func TestLoadConfigRejectsInvertedRobotsTimeouts(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected inverted robots timeouts to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsHeartbeatAboveStaleThreshold(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("AUDIT_RUN_HEARTBEAT_INTERVAL", "5m")
+	t.Setenv("STALE_RUN_THRESHOLD", "5m")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected heartbeat interval at stale threshold to fail configuration loading")
 	}
 }
 

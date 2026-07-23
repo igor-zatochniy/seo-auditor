@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestParsePageExtractsSEOMetrics(t *testing.T) {
@@ -87,6 +88,76 @@ func TestParsePageExtractsSEOMetrics(t *testing.T) {
 	}
 	if data.WordCount == 0 {
 		t.Fatalf("expected non-zero word count")
+	}
+}
+
+func TestStorageSanitizerTruncatesOversizedHTMLMetadata(t *testing.T) {
+	longTitle := strings.Repeat("T", storageTitleMaxRunes+25)
+	longH1 := strings.Repeat("H", storageH1MaxRunes+25)
+	longOGTitle := strings.Repeat("O", storageTitleMaxRunes+25)
+	longTwitterCard := strings.Repeat("C", storageTwitterCardMaxRunes+25)
+	longCanonical := "https://example.com/" + strings.Repeat("canonical", 260)
+	longRobots := strings.Repeat("noindex,", 40)
+	html := `<!doctype html>
+<html>
+<head>
+  <title>` + longTitle + `</title>
+  <link rel="canonical" href="` + longCanonical + `">
+  <meta name="robots" content="` + longRobots + `">
+  <meta property="og:title" content="` + longOGTitle + `">
+  <meta property="og:image" content="https://cdn.example.com/` + strings.Repeat("image", 420) + `.png?token=secret">
+  <meta name="twitter:card" content="` + longTwitterCard + `">
+</head>
+<body><h1>` + longH1 + `</h1></body>
+</html>`
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"X-Robots-Tag": []string{longRobots},
+		},
+		Body: io.NopCloser(strings.NewReader(html)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", DefaultMaxHTMLBodyBytes)
+	if err != nil {
+		t.Fatalf("parsePage returned error: %v", err)
+	}
+	if data.TitleStatus != "Too Long" || utf8.RuneCountInString(data.Title) != storageTitleMaxRunes+25 {
+		t.Fatalf("parser did not preserve oversized title before storage: status=%q length=%d", data.TitleStatus, utf8.RuneCountInString(data.Title))
+	}
+
+	stored := sanitizeSEODataForStorage(data)
+	assertTruncatedField(t, "title", stored.Title, stored.TitleTruncated, stored.TitleOriginalLength, storageTitleMaxRunes, storageTitleMaxRunes+25)
+	assertTruncatedField(t, "h1", stored.H1, stored.H1Truncated, stored.H1OriginalLength, storageH1MaxRunes, storageH1MaxRunes+25)
+	assertTruncatedField(t, "og_title", stored.OGTitle, stored.OGTitleTruncated, stored.OGTitleOriginalLength, storageTitleMaxRunes, storageTitleMaxRunes+25)
+	assertTruncatedField(t, "twitter_card", stored.TwitterCard, stored.TwitterCardTruncated, stored.TwitterCardOriginalLength, storageTwitterCardMaxRunes, storageTwitterCardMaxRunes+25)
+	assertTruncatedAtLimit(t, "canonical_url", stored.CanonicalURL, stored.CanonicalURLTruncated, stored.CanonicalURLOriginalLength, storageURLMaxRunes)
+	assertTruncatedAtLimit(t, "og_image", stored.OGImage, stored.OGImageTruncated, stored.OGImageOriginalLength, storageURLMaxRunes)
+	assertTruncatedAtLimit(t, "meta_robots", stored.MetaRobots, stored.MetaRobotsTruncated, stored.MetaRobotsOriginalLength, storageRobotsTagMaxRunes)
+	assertTruncatedAtLimit(t, "x_robots_tag", stored.XRobotsTag, stored.XRobotsTagTruncated, stored.XRobotsTagOriginalLength, storageRobotsTagMaxRunes)
+}
+
+func assertTruncatedField(t *testing.T, name, value string, truncated bool, originalLength, maxRunes, expectedOriginalLength int) {
+	t.Helper()
+	if !truncated {
+		t.Fatalf("%s was not marked as truncated", name)
+	}
+	if originalLength != expectedOriginalLength {
+		t.Fatalf("%s original length = %d, want %d", name, originalLength, expectedOriginalLength)
+	}
+	if got := utf8.RuneCountInString(value); got != maxRunes {
+		t.Fatalf("%s stored length = %d, want %d", name, got, maxRunes)
+	}
+}
+
+func assertTruncatedAtLimit(t *testing.T, name, value string, truncated bool, originalLength, maxRunes int) {
+	t.Helper()
+	if !truncated || originalLength <= maxRunes {
+		t.Fatalf("%s was not marked with a valid original length: truncated=%t original=%d", name, truncated, originalLength)
+	}
+	if got := utf8.RuneCountInString(value); got != maxRunes {
+		t.Fatalf("%s stored length = %d, want %d", name, got, maxRunes)
 	}
 }
 
@@ -352,8 +423,9 @@ func TestWorkerDoesNotFetchPageWhenRobotsIsUnreachable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	jobs := make(chan string, 1)
-	jobs <- server.URL + "/page"
+	targetURL := server.URL + "/page"
+	jobs := make(chan AuditTarget, 1)
+	jobs <- newAuditTarget(targetURLRecord{ID: 1, URL: targetURL}, targetURL, []byte(testTargetFingerprintKey))
 	close(jobs)
 	results := make(chan Result, 1)
 
@@ -368,6 +440,7 @@ func TestWorkerDoesNotFetchPageWhenRobotsIsUnreachable(t *testing.T) {
 		server.Client(),
 		newRobotsHTTPClient(server.Client().Transport),
 		newRobotsPolicyCache(time.Minute, 16),
+		nil,
 		Config{
 			HTTPAttemptTimeout:   time.Second,
 			HTTPTotalTimeout:     5 * time.Second,
@@ -387,7 +460,10 @@ func TestWorkerDoesNotFetchPageWhenRobotsIsUnreachable(t *testing.T) {
 	if result.Error == nil {
 		t.Fatal("expected robots.txt 503 to become a task error")
 	}
-	if result.Data.URL != server.URL+"/page" {
+	if result.Target.TargetID != 1 {
+		t.Fatalf("unexpected target ID: %d", result.Target.TargetID)
+	}
+	if result.Data.URL != targetURL {
 		t.Fatalf("unexpected result URL: %q", result.Data.URL)
 	}
 	if result.Data.StatusCode != nil {
@@ -418,8 +494,9 @@ func TestWorkerReportsRobotsDisallowWithoutPageStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	jobs := make(chan string, 1)
-	jobs <- server.URL + "/page"
+	targetURL := server.URL + "/page"
+	jobs := make(chan AuditTarget, 1)
+	jobs <- newAuditTarget(targetURLRecord{ID: 1, URL: targetURL}, targetURL, []byte(testTargetFingerprintKey))
 	close(jobs)
 	results := make(chan Result, 1)
 
@@ -434,6 +511,7 @@ func TestWorkerReportsRobotsDisallowWithoutPageStatus(t *testing.T) {
 		server.Client(),
 		newRobotsHTTPClient(server.Client().Transport),
 		newRobotsPolicyCache(time.Minute, 16),
+		nil,
 		Config{
 			HTTPAttemptTimeout:   time.Second,
 			HTTPTotalTimeout:     5 * time.Second,
@@ -565,18 +643,21 @@ func TestStreamTargetURLsUsesKeysetBatches(t *testing.T) {
 		return batch, nil
 	}
 
-	jobs := make(chan string, 1)
+	jobs := make(chan AuditTarget, 1)
+	invalidResults := make(chan Result, 2)
 	collected := make(chan []string, 1)
 	go func() {
 		var urls []string
-		for targetURL := range jobs {
-			urls = append(urls, targetURL)
+		for target := range jobs {
+			urls = append(urls, target.RequestURL)
 		}
 		collected <- urls
 	}()
 
-	summary := streamTargetURLs(context.Background(), 4, 2, false, jobs, fetchBatch)
+	cfg := Config{TargetFingerprintKey: []byte(testTargetFingerprintKey)}
+	summary := streamTargetURLs(context.Background(), 4, 2, cfg, jobs, invalidResults, fetchBatch)
 	close(jobs)
+	close(invalidResults)
 	urls := <-collected
 
 	if summary.Error != nil {
@@ -584,6 +665,19 @@ func TestStreamTargetURLsUsesKeysetBatches(t *testing.T) {
 	}
 	if summary.Queued != 2 || summary.Skipped != 2 {
 		t.Fatalf("unexpected stream summary: queued=%d skipped=%d", summary.Queued, summary.Skipped)
+	}
+	invalidCount := 0
+	for result := range invalidResults {
+		invalidCount++
+		if result.Target.TargetID == 0 {
+			t.Fatalf("invalid target result has no target ID")
+		}
+		if result.Data.ScanStatus != scanStatusFailed || result.Data.ErrorCode != errorCodeInvalidTargetURL {
+			t.Fatalf("unexpected invalid target result: status=%q code=%q", result.Data.ScanStatus, result.Data.ErrorCode)
+		}
+	}
+	if invalidCount != 2 {
+		t.Fatalf("unexpected invalid target result count: %d", invalidCount)
 	}
 	if len(urls) != 2 || urls[0] != "https://example.com/one" || urls[1] != "https://example.com/three" {
 		t.Fatalf("unexpected queued URLs: %#v", urls)
@@ -625,9 +719,11 @@ func TestWorkerFinishesInFlightTaskAndStopsBeforeNextTask(t *testing.T) {
 	operationCtx, cancelOperations := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancelOperations)
 
-	jobs := make(chan string, 2)
-	jobs <- server.URL
-	jobs <- server.URL
+	firstTarget := newAuditTarget(targetURLRecord{ID: 1, URL: server.URL}, server.URL, []byte(testTargetFingerprintKey))
+	secondTarget := newAuditTarget(targetURLRecord{ID: 2, URL: server.URL}, server.URL, []byte(testTargetFingerprintKey))
+	jobs := make(chan AuditTarget, 2)
+	jobs <- firstTarget
+	jobs <- secondTarget
 	close(jobs)
 	results := make(chan Result, 2)
 
@@ -642,6 +738,7 @@ func TestWorkerFinishesInFlightTaskAndStopsBeforeNextTask(t *testing.T) {
 		server.Client(),
 		server.Client(),
 		newRobotsPolicyCache(time.Minute, 16),
+		nil,
 		Config{
 			HTTPAttemptTimeout:   2 * time.Second,
 			HTTPTotalTimeout:     5 * time.Second,

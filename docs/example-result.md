@@ -8,11 +8,16 @@
 
 | Metric | Value |
 | --- | --- |
+| Target ID | `42` |
+| Target status | `completed` |
+| Attempts | `1` |
 | Safe URL | `https://example.com` |
+| Fingerprint key ID | `local-dev` |
 | Status | `200 OK` |
 | Scan status | `completed` |
 | Title | `Example Domain` |
 | Title status | `Too Short` |
+| Title truncated | `false` |
 | Description | `[Missing]` |
 | Description status | `Missing` |
 | H1 | `Example Domain` |
@@ -34,13 +39,19 @@
 ## Скорочений SQL-зріз
 
 ```text
+target_id            | 42
+target_status        | completed
+attempts             | 1
 safe_url             | https://example.com
+fingerprint_key_id   | local-dev
 status_code          | 200
 scan_status          | completed
 error_code           |
 error_message        |
 title                | Example Domain
 title_status         | Too Short
+title_truncated      | false
+title_original_length | 0
 description_status   | Missing
 h1                   | Example Domain
 h1_count             | 1
