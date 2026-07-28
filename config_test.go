@@ -24,6 +24,7 @@ var configEnvironmentVariables = []string{
 	"DB_WRITE_TIMEOUT",
 	"AUDIT_RUN_HEARTBEAT_INTERVAL",
 	"STALE_RUN_THRESHOLD",
+	"TARGET_LEASE_DURATION",
 	"SHUTDOWN_TIMEOUT",
 	"URL_BATCH_SIZE",
 	"MAX_HTML_BODY_BYTES",
@@ -103,6 +104,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.AuditRunHeartbeatInterval != DefaultAuditRunHeartbeatInterval || cfg.StaleRunThreshold != DefaultStaleRunThreshold {
 		t.Fatalf("unexpected audit run heartbeat defaults: heartbeat=%s stale=%s", cfg.AuditRunHeartbeatInterval, cfg.StaleRunThreshold)
+	}
+	if cfg.TargetLeaseDuration != DefaultTargetLeaseDuration {
+		t.Fatalf("unexpected target lease duration: %s", cfg.TargetLeaseDuration)
 	}
 	if cfg.WorkerInstanceID == "" {
 		t.Fatal("expected generated worker instance ID")
@@ -214,6 +218,30 @@ func TestLoadConfigRejectsHeartbeatAboveStaleThreshold(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsLeaseAtHeartbeatInterval(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("AUDIT_RUN_HEARTBEAT_INTERVAL", "30s")
+	t.Setenv("TARGET_LEASE_DURATION", "30s")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected target lease at heartbeat interval to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsLeaseBelowRequestBudget(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("AUDIT_RUN_HEARTBEAT_INTERVAL", "5s")
+	t.Setenv("TARGET_LEASE_DURATION", "25s")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected target lease below combined request budget to fail configuration loading")
+	}
+}
+
 func TestLoadConfigRejectsRetryDelayAboveHTTPBudget(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
@@ -222,5 +250,28 @@ func TestLoadConfigRejectsRetryDelayAboveHTTPBudget(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected retry max delay above HTTP budget to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsOversizedHTMLBody(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("MAX_HTML_BODY_BYTES", "8388609")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected oversized MAX_HTML_BODY_BYTES to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsExcessiveInFlightHTMLBudget(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("WORKERS", "4")
+	t.Setenv("MAX_HTML_BODY_BYTES", "5242880")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected excessive in-flight HTML budget to fail configuration loading")
 	}
 }

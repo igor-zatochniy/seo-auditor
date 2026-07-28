@@ -20,7 +20,7 @@ const (
 	DefaultHostStateCacheSize    = 4096
 	DefaultRobotsCacheTTL        = time.Hour
 	MaxRobotsCacheTTL            = 24 * time.Hour
-	DefaultRobotsCacheMaxEntries = 4096
+	DefaultRobotsCacheMaxEntries = 64
 	MaxRetryAfterDelay           = 5 * time.Minute
 )
 

@@ -172,9 +172,23 @@ func isRetryableNetworkError(err error) bool {
 }
 
 func retryDBOperation(ctx context.Context, operation string, policy retryPolicy, fn func() error) error {
+	return retryDBOperationIf(ctx, operation, policy, isRetryableDBError, fn)
+}
+
+func retryDBMutation(ctx context.Context, operation string, policy retryPolicy, fn func() error) error {
+	return retryDBOperationIf(ctx, operation, policy, isSafeToRetryDBMutationError, fn)
+}
+
+func retryDBOperationIf(
+	ctx context.Context,
+	operation string,
+	policy retryPolicy,
+	retryable func(error) bool,
+	fn func() error,
+) error {
 	for attempt := 0; ; attempt++ {
 		err := fn()
-		if err == nil || attempt >= policy.maxRetries || !isRetryableDBError(err) {
+		if err == nil || attempt >= policy.maxRetries || !retryable(err) {
 			return err
 		}
 		delay := retryDelay(policy, attempt)
@@ -188,6 +202,27 @@ func retryDBOperation(ctx context.Context, operation string, policy retryPolicy,
 		if err := waitForRetry(ctx, delay); err != nil {
 			return err
 		}
+	}
+}
+
+// Mutations are retried only when PostgreSQL confirms that the operation was
+// not applied or the whole transaction was rolled back.
+func isSafeToRetryDBMutationError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if pgconn.SafeToRetry(err) {
+		return true
+	}
+	var pgError *pgconn.PgError
+	if !errors.As(err, &pgError) {
+		return false
+	}
+	switch pgError.Code {
+	case "40001", "40P01", "55P03":
+		return true
+	default:
+		return false
 	}
 }
 

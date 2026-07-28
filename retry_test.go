@@ -119,6 +119,44 @@ func TestRetryDBOperationDoesNotRetryContextCancellation(t *testing.T) {
 	}
 }
 
+func TestRetryDBMutationRetriesRolledBackTransaction(t *testing.T) {
+	attempts := 0
+	err := retryDBMutation(
+		context.Background(),
+		"test_mutation",
+		retryPolicy{maxRetries: 2, baseDelay: time.Nanosecond, maxDelay: time.Microsecond},
+		func() error {
+			attempts++
+			if attempts == 1 {
+				return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("retryDBMutation returned error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("unexpected attempt count: %d", attempts)
+	}
+}
+
+func TestRetryDBMutationDoesNotRetryAmbiguousNetworkFailure(t *testing.T) {
+	attempts := 0
+	err := retryDBMutation(
+		context.Background(),
+		"test_mutation",
+		retryPolicy{maxRetries: 2, baseDelay: time.Nanosecond, maxDelay: time.Microsecond},
+		func() error {
+			attempts++
+			return syscall.ECONNRESET
+		},
+	)
+	if !errors.Is(err, syscall.ECONNRESET) || attempts != 1 {
+		t.Fatalf("unexpected mutation retry result: error=%v attempts=%d", err, attempts)
+	}
+}
+
 func TestRetryRoundTripperUsesAttemptTimeout(t *testing.T) {
 	var attempts atomic.Int32
 	transport := &retryRoundTripper{

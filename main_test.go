@@ -612,7 +612,7 @@ func TestNormalizeTargetURL(t *testing.T) {
 	}
 }
 
-func TestStreamTargetURLsUsesKeysetBatches(t *testing.T) {
+func TestStreamTargetURLsUsesClaimedBatches(t *testing.T) {
 	records := []targetURLRecord{
 		{ID: 1, URL: "https://example.com/one"},
 		{ID: 2, URL: "ftp://example.com/unsupported"},
@@ -620,26 +620,19 @@ func TestStreamTargetURLsUsesKeysetBatches(t *testing.T) {
 		{ID: 4, URL: "http://127.0.0.1/private"},
 	}
 
-	var afterIDs []int64
-	fetchBatch := func(_ context.Context, afterID, highWatermark int64, limit int) ([]targetURLRecord, error) {
-		if highWatermark != 4 {
-			t.Fatalf("unexpected high watermark: %d", highWatermark)
-		}
+	var batchLimits []int
+	claimBatch := func(_ context.Context, limit int) ([]targetURLRecord, error) {
 		if limit != 2 {
 			t.Fatalf("unexpected batch limit: %d", limit)
 		}
-		afterIDs = append(afterIDs, afterID)
+		batchLimits = append(batchLimits, limit)
 
-		batch := make([]targetURLRecord, 0, limit)
-		for _, record := range records {
-			if record.ID <= afterID || record.ID > highWatermark {
-				continue
-			}
-			batch = append(batch, record)
-			if len(batch) == limit {
-				break
-			}
+		if len(records) == 0 {
+			return nil, nil
 		}
+		count := min(limit, len(records))
+		batch := append([]targetURLRecord(nil), records[:count]...)
+		records = records[count:]
 		return batch, nil
 	}
 
@@ -655,7 +648,7 @@ func TestStreamTargetURLsUsesKeysetBatches(t *testing.T) {
 	}()
 
 	cfg := Config{TargetFingerprintKey: []byte(testTargetFingerprintKey)}
-	summary := streamTargetURLs(context.Background(), 4, 2, cfg, jobs, invalidResults, fetchBatch)
+	summary := streamTargetURLs(context.Background(), 2, cfg, jobs, invalidResults, claimBatch)
 	close(jobs)
 	close(invalidResults)
 	urls := <-collected
@@ -682,8 +675,8 @@ func TestStreamTargetURLsUsesKeysetBatches(t *testing.T) {
 	if len(urls) != 2 || urls[0] != "https://example.com/one" || urls[1] != "https://example.com/three" {
 		t.Fatalf("unexpected queued URLs: %#v", urls)
 	}
-	if len(afterIDs) != 2 || afterIDs[0] != 0 || afterIDs[1] != 2 {
-		t.Fatalf("unexpected keyset positions: %#v", afterIDs)
+	if len(batchLimits) != 3 {
+		t.Fatalf("unexpected claim batch calls: %#v", batchLimits)
 	}
 }
 

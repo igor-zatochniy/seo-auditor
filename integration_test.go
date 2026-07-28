@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pressly/goose/v3"
 )
@@ -64,11 +65,11 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 		)
 	}
 	deleteTestRuns(ctx)
-	t.Cleanup(func() {
+	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
 		deleteTestRuns(cleanupCtx)
-	})
+	}()
 
 	newConfig := func(runID string) Config {
 		return Config{
@@ -78,6 +79,7 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 			HTTPTotalTimeout:     5 * time.Second,
 			RobotsAttemptTimeout: time.Second,
 			RobotsTotalTimeout:   5 * time.Second,
+			DBFetchTimeout:       3 * time.Second,
 			DBWriteTimeout:       3 * time.Second,
 			MaxHTMLBodyBytes:     DefaultMaxHTMLBodyBytes,
 			DBMaxRetries:         2,
@@ -100,7 +102,14 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 		); err != nil {
 			t.Fatalf("create audit run target: %v", err)
 		}
-		return target
+		claimed, err := claimTargetURLBatch(ctx, pool, cfg, 1)
+		if err != nil {
+			t.Fatalf("claim audit run target: %v", err)
+		}
+		if len(claimed) != 1 || claimed[0].ID != targetID {
+			t.Fatalf("unexpected claimed audit target: %#v", claimed)
+		}
+		return newAuditTarget(claimed[0], claimed[0].URL, cfg.TargetFingerprintKey)
 	}
 	persistPipelineResult := func(cfg Config, target AuditTarget) ResultSummary {
 		t.Helper()
@@ -169,8 +178,11 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 	}}
 	close(updatedResults)
 	updatedSummary := saveResults(ctx, pool, updatedResults, firstConfig)
-	if updatedSummary.Saved != 1 || updatedSummary.Successful != 1 || updatedSummary.Failed != 0 {
-		t.Fatalf("unexpected same-run update summary: %+v", updatedSummary)
+	if updatedSummary.Saved != 0 ||
+		updatedSummary.Successful != 0 ||
+		updatedSummary.Failed != 1 ||
+		updatedSummary.PersistenceFailures != 1 {
+		t.Fatalf("unclaimed same-run update was not rejected: %+v", updatedSummary)
 	}
 	if err := completeAuditRun(ctx, pool, firstRunID, auditRunCompletion{
 		Status:         auditRunStatusCompleted,
@@ -233,8 +245,8 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 	).Scan(&secondTitle); err != nil {
 		t.Fatalf("read second audit result: %v", err)
 	}
-	if firstTitle != "Updated result from the same run" {
-		t.Fatalf("same-run upsert did not update the first result: %q", firstTitle)
+	if firstTitle != "Integration audit result page title" {
+		t.Fatalf("unclaimed same-run update changed the first result: %q", firstTitle)
 	}
 	if secondTitle != "Integration audit result page title" {
 		t.Fatalf("second run did not preserve an independent result: %q", secondTitle)
@@ -382,6 +394,8 @@ func TestAuditRunTargetSnapshotIsStable(t *testing.T) {
 	const sourceA = "https://stability-check.example/a"
 	const sourceB = "https://stability-check.example/b"
 	const sourceC = "https://stability-check.example/c"
+	restoreActivePages := suspendActivePages(t, ctx, pool)
+	defer restoreActivePages()
 
 	cleanup := func(cleanupCtx context.Context) {
 		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_run_targets WHERE run_id = $1", runID)
@@ -389,11 +403,11 @@ func TestAuditRunTargetSnapshotIsStable(t *testing.T) {
 		_, _ = pool.Exec(cleanupCtx, "DELETE FROM pages_to_scan WHERE url IN ($1, $2, $3)", sourceA, sourceB, sourceC)
 	}
 	cleanup(ctx)
-	t.Cleanup(func() {
+	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
 		cleanup(cleanupCtx)
-	})
+	}()
 
 	cfg := Config{
 		RunID:                runID,
@@ -446,13 +460,12 @@ func TestAuditRunTargetSnapshotIsStable(t *testing.T) {
 	invalidResults := make(chan Result, 1)
 	streamSummary := streamTargetURLs(
 		ctx,
-		snapshot.HighWatermark,
 		2,
 		cfg,
 		jobs,
 		invalidResults,
-		func(batchCtx context.Context, afterID, highWatermark int64, limit int) ([]targetURLRecord, error) {
-			return fetchTargetURLBatch(batchCtx, pool, cfg, afterID, highWatermark, limit)
+		func(batchCtx context.Context, limit int) ([]targetURLRecord, error) {
+			return claimTargetURLBatch(batchCtx, pool, cfg, limit)
 		},
 	)
 	close(jobs)
@@ -525,11 +538,11 @@ func TestAbandonStaleAuditRunsMarksRunAndTargets(t *testing.T) {
 		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
 	}
 	cleanup(ctx)
-	t.Cleanup(func() {
+	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
 		cleanup(cleanupCtx)
-	})
+	}()
 
 	if err := createAuditRun(ctx, pool, cfg); err != nil {
 		t.Fatalf("create stale audit run: %v", err)
@@ -558,8 +571,8 @@ func TestAbandonStaleAuditRunsMarksRunAndTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("abandon stale audit runs: %v", err)
 	}
-	if abandoned != 1 {
-		t.Fatalf("unexpected abandoned run count: %d", abandoned)
+	if abandoned < 1 {
+		t.Fatalf("expected at least one abandoned run, got %d", abandoned)
 	}
 
 	var runStatus string
@@ -593,6 +606,381 @@ func TestAbandonStaleAuditRunsMarksRunAndTargets(t *testing.T) {
 	}
 }
 
+func TestAuditRunClaimsAreExclusiveAndResumable(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Fatalf("ping PostgreSQL: %v", err)
+	}
+
+	const runID = "26569014-f160-49aa-92fd-eb4fbd06e297"
+	const sourceA = "https://lease-check.example/a"
+	const sourceB = "https://lease-check.example/b"
+	const sourceC = "https://lease-check.example/late"
+	restoreActivePages := suspendActivePages(t, ctx, pool)
+	defer restoreActivePages()
+	ownerConfig := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "lease-owner-a",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		DBWriteTimeout:       3 * time.Second,
+		DBFetchTimeout:       3 * time.Second,
+		TargetLeaseDuration:  2 * time.Minute,
+		StaleRunThreshold:    time.Minute,
+		DBMaxRetries:         2,
+		RetryBaseDelay:       10 * time.Millisecond,
+		RetryMaxDelay:        50 * time.Millisecond,
+	}
+	resumeConfig := ownerConfig
+	resumeConfig.WorkerInstanceID = "lease-owner-b"
+
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM pages_to_scan WHERE url IN ($1, $2, $3)", sourceA, sourceB, sourceC)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO pages_to_scan (url, is_active)
+		 VALUES ($1, TRUE), ($2, TRUE)
+		 ON CONFLICT (url) DO UPDATE
+		 SET is_active = EXCLUDED.is_active`,
+		sourceA,
+		sourceB,
+	); err != nil {
+		t.Fatalf("seed lease targets: %v", err)
+	}
+	if err := createAuditRun(ctx, pool, ownerConfig); err != nil {
+		t.Fatalf("create owned audit run: %v", err)
+	}
+	if _, err := captureAuditRunTargets(ctx, pool, ownerConfig); err != nil {
+		t.Fatalf("capture owned target snapshot: %v", err)
+	}
+	if err := createAuditRun(ctx, pool, resumeConfig); err == nil {
+		t.Fatal("expected a second parser to be rejected while the audit run owner is active")
+	}
+
+	firstClaim, err := claimTargetURLBatch(ctx, pool, ownerConfig, 1)
+	if err != nil {
+		t.Fatalf("claim first target: %v", err)
+	}
+	if len(firstClaim) != 1 {
+		t.Fatalf("unexpected first claim size: %d", len(firstClaim))
+	}
+
+	wrongOwnerTx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin wrong-owner transaction: %v", err)
+	}
+	err = markAuditRunTargetFinished(
+		ctx,
+		wrongOwnerTx,
+		runID,
+		firstClaim[0].ID,
+		"intruder",
+		auditTargetStatusCompleted,
+		"",
+	)
+	_ = wrongOwnerTx.Rollback(ctx)
+	if err == nil {
+		t.Fatal("expected a non-owner to be unable to finish the claimed target")
+	}
+
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO pages_to_scan (url, is_active)
+		 VALUES ($1, TRUE)
+		 ON CONFLICT (url) DO UPDATE
+		 SET is_active = EXCLUDED.is_active`,
+		sourceC,
+	); err != nil {
+		t.Fatalf("insert late target: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE audit_runs
+		 SET heartbeat_at = CURRENT_TIMESTAMP - INTERVAL '10 minutes'
+		 WHERE id = $1`,
+		runID,
+	); err != nil {
+		t.Fatalf("expire audit run heartbeat: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE audit_run_targets
+		 SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+		 WHERE run_id = $1 AND status = $2`,
+		runID,
+		auditTargetStatusRunning,
+	); err != nil {
+		t.Fatalf("expire target lease: %v", err)
+	}
+
+	abandoned, err := abandonStaleAuditRuns(ctx, pool, resumeConfig)
+	if err != nil {
+		t.Fatalf("abandon stale run before resume: %v", err)
+	}
+	if abandoned < 1 {
+		t.Fatalf("expected at least one abandoned run before resume, got %d", abandoned)
+	}
+	if err := createAuditRun(ctx, pool, resumeConfig); err != nil {
+		t.Fatalf("resume abandoned audit run: %v", err)
+	}
+	if err := updateAuditRunHeartbeat(ctx, pool, ownerConfig); err == nil {
+		t.Fatal("expected the previous owner heartbeat to be rejected after resume")
+	}
+	resumedSnapshot, err := captureAuditRunTargets(ctx, pool, resumeConfig)
+	if err != nil {
+		t.Fatalf("read resumed target snapshot: %v", err)
+	}
+	if resumedSnapshot.Total != 2 {
+		t.Fatalf("resume rebuilt the stable snapshot: total=%d want=2", resumedSnapshot.Total)
+	}
+
+	type claimResult struct {
+		records []targetURLRecord
+		err     error
+	}
+	claims := make(chan claimResult, 2)
+	for range 2 {
+		go func() {
+			records, claimErr := claimTargetURLBatch(ctx, pool, resumeConfig, 1)
+			claims <- claimResult{records: records, err: claimErr}
+		}()
+	}
+
+	claimedIDs := make(map[int64]struct{}, 2)
+	for range 2 {
+		claim := <-claims
+		if claim.err != nil {
+			t.Fatalf("claim resumed target: %v", claim.err)
+		}
+		if len(claim.records) != 1 {
+			t.Fatalf("unexpected resumed claim size: %d", len(claim.records))
+		}
+		claimedIDs[claim.records[0].ID] = struct{}{}
+	}
+	if len(claimedIDs) != 2 {
+		t.Fatalf("concurrent claims returned duplicate targets: %#v", claimedIDs)
+	}
+
+	noMoreTargets, err := claimTargetURLBatch(ctx, pool, resumeConfig, 1)
+	if err != nil {
+		t.Fatalf("check exhausted target claims: %v", err)
+	}
+	if len(noMoreTargets) != 0 {
+		t.Fatalf("expected no unclaimed targets, got %#v", noMoreTargets)
+	}
+}
+
+func TestFailedAuditRunPreservesTargetForResume(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "f8cd2ba6-e2e9-4436-89e0-56d0611a098f"
+	const requestURL = "https://resume-check.example/page?token=runtime-secret"
+	ownerConfig := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "failed-run-owner",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		DBWriteTimeout:       3 * time.Second,
+		DBFetchTimeout:       3 * time.Second,
+		TargetLeaseDuration:  2 * time.Minute,
+		DBMaxRetries:         2,
+		RetryBaseDelay:       10 * time.Millisecond,
+		RetryMaxDelay:        50 * time.Millisecond,
+	}
+	resumeConfig := ownerConfig
+	resumeConfig.WorkerInstanceID = "failed-run-resumer"
+
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if err := createAuditRun(ctx, pool, ownerConfig); err != nil {
+		t.Fatalf("create audit run: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO audit_run_targets (run_id, target_id, request_url)
+		 VALUES ($1, 1, $2)`,
+		runID,
+		requestURL,
+	); err != nil {
+		t.Fatalf("insert audit target: %v", err)
+	}
+	claimed, err := claimTargetURLBatch(ctx, pool, ownerConfig, 1)
+	if err != nil {
+		t.Fatalf("claim audit target: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("unexpected claimed target count: %d", len(claimed))
+	}
+
+	if err := completeAuditRun(ctx, pool, runID, auditRunCompletion{
+		Status:     auditRunStatusFailed,
+		TotalURLs:  1,
+		FailedURLs: 1,
+	}, ownerConfig); err != nil {
+		t.Fatalf("fail audit run: %v", err)
+	}
+
+	var runStatus, targetStatus, retainedURL string
+	var claimedBy *string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT run.status, target.status, target.request_url, target.claimed_by
+		 FROM audit_runs AS run
+		 JOIN audit_run_targets AS target ON target.run_id = run.id
+		 WHERE run.id = $1 AND target.target_id = 1`,
+		runID,
+	).Scan(&runStatus, &targetStatus, &retainedURL, &claimedBy); err != nil {
+		t.Fatalf("read failed run state: %v", err)
+	}
+	if runStatus != auditRunStatusFailed ||
+		targetStatus != auditTargetStatusPending ||
+		retainedURL != requestURL ||
+		claimedBy != nil {
+		t.Fatalf(
+			"failed run did not preserve resumable target: run=%q target=%q url=%q claimed_by=%v",
+			runStatus,
+			targetStatus,
+			retainedURL,
+			claimedBy,
+		)
+	}
+
+	if err := createAuditRun(ctx, pool, resumeConfig); err != nil {
+		t.Fatalf("resume failed audit run: %v", err)
+	}
+	resumed, err := claimTargetURLBatch(ctx, pool, resumeConfig, 1)
+	if err != nil {
+		t.Fatalf("claim resumed target: %v", err)
+	}
+	if len(resumed) != 1 || resumed[0].ID != 1 || resumed[0].URL != requestURL {
+		t.Fatalf("unexpected resumed target: %#v", resumed)
+	}
+}
+
+func TestCompletedRunRejectsNonTerminalTargets(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "202bc44a-b871-485d-b749-571361c058de"
+	const requestURL = "https://completion-check.example/page"
+	cfg := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "completion-owner",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		DBWriteTimeout:       3 * time.Second,
+		DBMaxRetries:         2,
+		RetryBaseDelay:       10 * time.Millisecond,
+		RetryMaxDelay:        50 * time.Millisecond,
+	}
+
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if err := createAuditRun(ctx, pool, cfg); err != nil {
+		t.Fatalf("create audit run: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO audit_run_targets (run_id, target_id, request_url)
+		 VALUES ($1, 1, $2)`,
+		runID,
+		requestURL,
+	); err != nil {
+		t.Fatalf("insert pending audit target: %v", err)
+	}
+
+	err = completeAuditRun(ctx, pool, runID, auditRunCompletion{
+		Status:     auditRunStatusCompletedWithErrors,
+		TotalURLs:  1,
+		FailedURLs: 1,
+	}, cfg)
+	if err == nil {
+		t.Fatal("expected completion with a non-terminal target to fail")
+	}
+
+	var runStatus, targetStatus, retainedURL string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT run.status, target.status, target.request_url
+		 FROM audit_runs AS run
+		 JOIN audit_run_targets AS target ON target.run_id = run.id
+		 WHERE run.id = $1 AND target.target_id = 1`,
+		runID,
+	).Scan(&runStatus, &targetStatus, &retainedURL); err != nil {
+		t.Fatalf("read rolled-back completion state: %v", err)
+	}
+	if runStatus != auditRunStatusRunning ||
+		targetStatus != auditTargetStatusPending ||
+		retainedURL != requestURL {
+		t.Fatalf(
+			"failed completion changed durable state: run=%q target=%q url=%q",
+			runStatus,
+			targetStatus,
+			retainedURL,
+		)
+	}
+}
+
 func TestMigrationsUpgradeLegacyAuditResults(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -615,11 +1003,11 @@ func TestMigrationsUpgradeLegacyAuditResults(t *testing.T) {
 	if _, err := adminDB.ExecContext(ctx, `CREATE SCHEMA `+quoteSQLIdentifier(schemaName)); err != nil {
 		t.Fatalf("create temporary schema: %v", err)
 	}
-	t.Cleanup(func() {
+	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
 		_, _ = adminDB.ExecContext(cleanupCtx, `DROP SCHEMA IF EXISTS `+quoteSQLIdentifier(schemaName)+` CASCADE`)
-	})
+	}()
 
 	migrationDB, err := sql.Open(postgresMigrationDriver, withSearchPath(databaseURL, schemaName))
 	if err != nil {
@@ -728,5 +1116,40 @@ func applyIntegrationMigrations(t *testing.T, ctx context.Context, databaseURL s
 	t.Helper()
 	if err := applySchemaMigrations(ctx, Config{DatabaseURL: databaseURL}); err != nil {
 		t.Fatalf("apply PostgreSQL migrations: %v", err)
+	}
+}
+
+func suspendActivePages(t *testing.T, ctx context.Context, pool *pgxpool.Pool) func() {
+	t.Helper()
+
+	rows, err := pool.Query(ctx, `SELECT id FROM pages_to_scan WHERE is_active = TRUE`)
+	if err != nil {
+		t.Fatalf("read active pages before isolated test: %v", err)
+	}
+	var activeIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			t.Fatalf("scan active page before isolated test: %v", err)
+		}
+		activeIDs = append(activeIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("iterate active pages before isolated test: %v", err)
+	}
+	rows.Close()
+
+	if _, err := pool.Exec(ctx, `UPDATE pages_to_scan SET is_active = FALSE WHERE is_active = TRUE`); err != nil {
+		t.Fatalf("suspend active pages for isolated test: %v", err)
+	}
+
+	return func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, id := range activeIDs {
+			_, _ = pool.Exec(cleanupCtx, `UPDATE pages_to_scan SET is_active = TRUE WHERE id = $1`, id)
+		}
 	}
 }

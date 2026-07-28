@@ -7,17 +7,18 @@ Go-сервіс для етичного технічного SEO-аудиту с
 ## Можливості
 
 - Конкурентний worker pool з керованою кількістю goroutine через `WORKERS`.
-- Потокове читання URL через keyset pagination і bounded channels без завантаження всієї черги в RAM.
+- Атомарна видача URL bounded batches через PostgreSQL `FOR UPDATE SKIP LOCKED`, target leases і bounded channels без завантаження всієї черги в RAM.
 - Стабільний per-run snapshot targets із прямим `target_id` зв'язком між `audit_run_targets` та `audit_results`.
+- Один активний owner для кожного `RUN_ID`: паралельний parser не може перехопити запуск, а після stale heartbeat той самий run відновлюється без повторної обробки завершених targets.
 - Невалідні URL з snapshot не губляться в логах, а зберігаються як `failed` results з `error_code=invalid_target_url`.
 - Версіоновані PostgreSQL migrations через `goose`: parser застосовує непройдені SQL-кроки на старті, веде `schema_migrations` і бере advisory lock.
 - Таймаути для PostgreSQL, HTTP-запитів, `robots.txt` і запису результатів.
 - Двофазне graceful shutdown: припинення планування, завершення in-flight задач і примусове скасування за timeout.
-- Обмеження максимального розміру HTML-відповіді для захисту від resource exhaustion.
+- Fail-fast memory budget: HTML обмежений до `8 MiB` на відповідь і `16 MiB` сумарно для всіх workers.
 - Базовий SSRF hardening: локальні та приватні IP-цілі заблоковані за замовчуванням.
 - Маскування всіх query values URL у логах, помилках і `safe_url`; `target_fingerprint` лишається псевдонімізованим lookup-полем, а унікальність результатів тримається на `UNIQUE(run_id, target_id)`.
 - Bounded storage для недовірених HTML metadata: oversized `title`, `H1`, canonical, Open Graph і robots values обрізаються до DB-safe меж із `*_truncated` та `*_original_length`.
-- Етичне сканування з per-host rate/concurrency control, bounded robots cache і підтримкою `Retry-After`.
+- Етичне сканування з per-host rate/concurrency control, robots cache до 64 hosts і підтримкою `Retry-After`.
 - RFC 9309 access handling: до п'яти redirect, fail-closed для network/5xx помилок і allow для unavailable 4xx.
 - Строга перевірка MIME type через `mime.ParseMediaType` і декодування HTML charset перед аналізом DOM.
 - Структуровані JSON-логи через `log/slog`.
@@ -41,9 +42,12 @@ Docker Compose
     ├── waits for healthy PostgreSQL
     ├── applies embedded goose migrations with schema_migrations
     ├── materializes a stable per-run target set in audit_run_targets
+    ├── claims targets atomically with bounded leases
     ├── scans pages concurrently
     └── реєструє запуск в audit_runs і upserts метрики в audit_results
 ```
+
+Код розділено за межами відповідальності: `main.go` відповідає за lifecycle, shutdown і orchestration; `internal/config` ізолює runtime configuration та fail-fast validation; `internal/crawler` містить URL normalization, transport-level SSRF guard і HTTP client primitives; `internal/robots` відповідає за robots.txt path matching; `internal/seo` витягує HTML/SEO метрики. PostgreSQL boundary винесено з entrypoint у `audit_storage.go`, `audit_targets.go`, `audit_results.go` і `migrations.go`: ці файли відповідають за lifecycle запусків, snapshot цілей, persistence результатів і schema migrations.
 
 ## Структура репозиторію
 
@@ -61,7 +65,13 @@ Docker Compose
 │   ├── 003_stable_targets_and_fingerprints.sql
 │   ├── 004_url_retention_and_key_rotation.sql
 │   ├── 005_storage_truncation_metadata.sql
-│   └── 006_run_heartbeat_and_target_progress.sql
+│   ├── 006_run_heartbeat_and_target_progress.sql
+│   └── 007_target_leases_and_resume.sql
+├── internal/
+│   ├── config/
+│   ├── crawler/
+│   ├── robots/
+│   └── seo/
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
@@ -71,8 +81,12 @@ Docker Compose
 ├── go.mod
 ├── go.sum
 ├── LICENSE
+├── audit_models.go
+├── audit_results.go
+├── audit_stream.go
 ├── audit_targets.go
 ├── config.go
+├── crawler_compat.go
 ├── config_test.go
 ├── integration_test.go
 ├── main.go
@@ -83,7 +97,10 @@ Docker Compose
 ├── retry.go
 ├── retry_test.go
 ├── robots_cache.go
+├── robots_compat.go
+├── seo_compat.go
 ├── target_identity.go
+├── worker.go
 └── README.md
 ```
 
@@ -121,7 +138,7 @@ Docker Compose читає локальний `.env`. Для нового сер�
 | `WORKER_INSTANCE_ID` | generated | Необов'язковий ID parser instance для heartbeat і target claims. |
 | `TARGET_FINGERPRINT_KEY` | set in `.env` | HMAC key для `target_fingerprint`; замініть локальний placeholder перед deployment. |
 | `TARGET_FINGERPRINT_KEY_ID` | `default` | Non-secret identifier ключа fingerprint; змінюйте під час ротації HMAC key. |
-| `WORKERS` | `3` | Кількість паралельних worker goroutines. |
+| `WORKERS` | `3` | Кількість паралельних worker goroutines; разом із `MAX_HTML_BODY_BYTES` має вкладатися в `16 MiB` in-flight budget. |
 | `LOG_LEVEL` | `INFO` | Мінімальний рівень JSON-логів: `DEBUG`, `INFO`, `WARN` або `ERROR`. |
 | `HTTP_ATTEMPT_TIMEOUT` | `5s` | Таймаут однієї HTTP-спроби. |
 | `HTTP_TOTAL_TIMEOUT` | `20s` | Загальний таймаут для всього URL-запиту разом із retry/backoff. |
@@ -133,15 +150,16 @@ Docker Compose читає локальний `.env`. Для нового сер�
 | `DB_WRITE_TIMEOUT` | `3s` | Таймаут запису одного результату. |
 | `AUDIT_RUN_HEARTBEAT_INTERVAL` | `30s` | Інтервал оновлення `audit_runs.heartbeat_at` для активного parser instance. |
 | `STALE_RUN_THRESHOLD` | `5m` | Running-запуски зі старішим heartbeat автоматично позначаються як `abandoned` на наступному startup. |
+| `TARGET_LEASE_DURATION` | `2m` | Тривалість target claim; heartbeat продовжує leases активного owner. Має перевищувати heartbeat interval і сумарний robots/page request budget. |
 | `SHUTDOWN_TIMEOUT` | `25s` | Максимальний час для завершення in-flight задач і запису результатів після сигналу. |
 | `URL_BATCH_SIZE` | `100` | Максимальна кількість URL, що читаються з PostgreSQL за один batch. |
-| `MAX_HTML_BODY_BYTES` | `5242880` | Максимальний розмір HTML-відповіді. |
+| `MAX_HTML_BODY_BYTES` | `5242880` | Максимальний розмір HTML-відповіді; абсолютна межа `8 MiB`. |
 | `RATE_LIMIT_INTERVAL` | `500ms` | Мінімальний інтервал між HTTP-запитами до одного host. |
 | `MAX_CONCURRENT_PER_HOST` | `1` | Максимальна кількість одночасних HTTP-запитів до одного host. |
 | `ROBOTS_CACHE_TTL` | `1h` | TTL кешованої robots policy; дозволений максимум становить `24h`. |
 | `ALLOW_PRIVATE_TARGETS` | `false` | Дозвіл на локальні та приватні IP-цілі. |
 | `HTTP_MAX_RETRIES` | `2` | Кількість повторів idempotent HTTP-запиту після transient failure. |
-| `DB_MAX_RETRIES` | `2` | Кількість повторів безпечної PostgreSQL-операції після transient failure. |
+| `DB_MAX_RETRIES` | `2` | Кількість повторів PostgreSQL-операції. Mutations повторюються лише після гарантованого rollback або помилки до відправлення запиту. |
 | `RETRY_BASE_DELAY` | `200ms` | Початкова межа exponential backoff. |
 | `RETRY_MAX_DELAY` | `2s` | Максимальна межа retry delay без урахування `Retry-After`; фактичне очікування також обмежується total budget. |
 
@@ -156,7 +174,9 @@ docker compose up --build
 
 Parser є batch-сервісом: він завершується після обробки стабільного набору URL, а PostgreSQL продовжує працювати для перегляду результатів.
 Помилки окремих URL зберігаються у `audit_results` і позначають запуск як `completed_with_errors`, але не перезапускають весь batch. Після `SIGTERM` parser завершує in-flight задачі в межах `SHUTDOWN_TIMEOUT`, фіксує запуск як `canceled` і повертає exit code `130`.
-Активний запуск регулярно оновлює `audit_runs.heartbeat_at`. Під час наступного startup parser позначає застарілі `running` runs як `abandoned` і переносить незавершені targets у status `abandoned`. Автоматичне resume прерваного запуску не виконується: новий run повторно формує стабільний target snapshot і обробляє його з початку.
+Активний запуск регулярно оновлює `audit_runs.heartbeat_at` і `lease_until` виданих targets. PostgreSQL атомарно видає лише `pending` або допустимі прострочені targets через `FOR UPDATE SKIP LOCKED`; worker може завершити target лише за умови збігу `RUN_ID`, `WORKER_INSTANCE_ID` і активного claim.
+
+Якщо heartbeat застарів після аварійного завершення, наступний startup позначає run як `abandoned`. Системна помилка persistence переводить run у `failed`, але залишає незавершені targets у `pending` разом із захищеним runtime payload. Повторний запуск із тим самим `RUN_ID` отримує ownership і продовжує за збереженим snapshot. Targets зі статусами `completed` і `failed` повторно не скануються. Поки попередній owner активний, другий parser із тим самим `RUN_ID` завершується з fatal configuration/runtime error до будь-яких HTTP-запитів.
 
 Parser автоматично застосовує непройдені міграції з `initdb/` перед створенням нового `audit_run`. Для старих PostgreSQL volumes без `schema_migrations` застосунок ідемпотентно приймає наявну схему, доганяє її до поточної версії та завершується з exit code `1`, якщо схема новіша за підтримувану цим binary.
 
@@ -189,7 +209,7 @@ docker compose exec postgres psql -U seo_user -d seo_db -c "SELECT id, status, w
 Перегляд прогресу targets останнього запуску:
 
 ```bash
-docker compose exec postgres psql -U seo_user -d seo_db -c "SELECT target_id, status, attempts, claimed_by, claimed_at, finished_at, last_error FROM audit_run_targets WHERE run_id = (SELECT id FROM audit_runs ORDER BY started_at DESC LIMIT 1) ORDER BY target_id LIMIT 20;"
+docker compose exec postgres psql -U seo_user -d seo_db -c "SELECT target_id, status, attempts, claimed_by, claimed_at, lease_until, finished_at, last_error FROM audit_run_targets WHERE run_id = (SELECT id FROM audit_runs ORDER BY started_at DESC LIMIT 1) ORDER BY target_id LIMIT 20;"
 ```
 
 Перегляд невдалих задач останнього запуску:
@@ -210,7 +230,7 @@ docker compose down
 docker compose down -v
 ```
 
-`002_audit_run_history.sql` створює UUID-запуски для legacy-результатів, переносить їх до `audit_results` і видаляє стару таблицю `seo_results` після успішного перенесення. `003_stable_targets_and_fingerprints.sql` додає стабільний snapshot targets, `safe_url`, `target_fingerprint` і прямий `UNIQUE(run_id, target_id)` зв'язок. `004_url_retention_and_key_rotation.sql` очищає legacy query strings у result-полях, додає `fingerprint_key_id` і прибирає historical `request_url` для завершених запусків. `005_storage_truncation_metadata.sql` додає telemetry для HTML metadata, які були обрізані перед записом у bounded storage columns. `006_run_heartbeat_and_target_progress.sql` додає heartbeat запуску, `worker_instance_id` і status/attempt tracking для `audit_run_targets`.
+`002_audit_run_history.sql` створює UUID-запуски для legacy-результатів, переносить їх до `audit_results` і видаляє стару таблицю `seo_results` після успішного перенесення. `003_stable_targets_and_fingerprints.sql` додає стабільний snapshot targets, `safe_url`, `target_fingerprint` і прямий `UNIQUE(run_id, target_id)` зв'язок. `004_url_retention_and_key_rotation.sql` очищає legacy query strings у result-полях, додає `fingerprint_key_id` і прибирає historical `request_url` для завершених запусків. `005_storage_truncation_metadata.sql` додає telemetry для HTML metadata, які були обрізані перед записом у bounded storage columns. `006_run_heartbeat_and_target_progress.sql` додає heartbeat запуску, `worker_instance_id` і status/attempt tracking для `audit_run_targets`. `007_target_leases_and_resume.sql` додає `lease_until`, стабільний marker фіксації snapshot і індекс атомарної видачі targets.
 
 ## Локальні перевірки
 

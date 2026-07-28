@@ -26,28 +26,80 @@ func captureAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cfg Confi
 				_ = tx.Rollback(dbWriteCtx)
 			}()
 
-			_, err = tx.Exec(
+			var alreadyCaptured bool
+			if err := tx.QueryRow(
 				dbWriteCtx,
-				`INSERT INTO audit_run_targets (run_id, target_id, request_url)
-				 SELECT $1, id, url
-				 FROM pages_to_scan
-				 WHERE is_active = TRUE
-				 ORDER BY id
-				 ON CONFLICT (run_id, target_id) DO UPDATE
-				 SET request_url = EXCLUDED.request_url`,
+				`SELECT targets_captured_at IS NOT NULL
+				 FROM audit_runs
+				 WHERE id = $1
+				   AND status = $2
+				   AND worker_instance_id = $3
+				 FOR UPDATE`,
 				cfg.RunID,
-			)
-			if err != nil {
+				auditRunStatusRunning,
+				effectiveWorkerInstanceID(cfg),
+			).Scan(&alreadyCaptured); err != nil {
 				return err
+			}
+
+			if !alreadyCaptured {
+				if _, err := tx.Exec(
+					dbWriteCtx,
+					`INSERT INTO audit_run_targets (run_id, target_id, request_url)
+					 SELECT $1, id, url
+					 FROM pages_to_scan
+					 WHERE is_active = TRUE
+					 ORDER BY id
+					 ON CONFLICT (run_id, target_id) DO NOTHING`,
+					cfg.RunID,
+				); err != nil {
+					return err
+				}
+
+				if _, err := tx.Exec(
+					dbWriteCtx,
+					`UPDATE audit_runs
+					 SET targets_captured_at = CURRENT_TIMESTAMP
+					 WHERE id = $1`,
+					cfg.RunID,
+				); err != nil {
+					return err
+				}
 			}
 
 			if err := tx.QueryRow(
 				dbWriteCtx,
-				`SELECT COALESCE(MAX(target_id), 0), COUNT(*)
+				`SELECT
+				     COALESCE(MAX(target_id), 0),
+				     COUNT(*),
+				     COUNT(*) FILTER (WHERE status = $2),
+				     COUNT(*) FILTER (WHERE status = $3)
 				 FROM audit_run_targets
 				 WHERE run_id = $1`,
 				cfg.RunID,
-			).Scan(&snapshot.HighWatermark, &snapshot.Total); err != nil {
+				auditTargetStatusCompleted,
+				auditTargetStatusFailed,
+			).Scan(
+				&snapshot.HighWatermark,
+				&snapshot.Total,
+				&snapshot.Successful,
+				&snapshot.Failed,
+			); err != nil {
+				return err
+			}
+
+			if _, err := tx.Exec(
+				dbWriteCtx,
+				`UPDATE audit_runs
+				 SET total_urls = $2,
+				     successful_urls = $3,
+				     failed_urls = $4
+				 WHERE id = $1`,
+				cfg.RunID,
+				snapshot.Total,
+				snapshot.Successful,
+				snapshot.Failed,
+			); err != nil {
 				return err
 			}
 
