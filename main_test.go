@@ -54,7 +54,7 @@ func TestParsePageExtractsSEOMetrics(t *testing.T) {
 		Body: io.NopCloser(strings.NewReader(html)),
 	}
 
-	data, err := parsePage(resp, "https://example.com/page", DefaultMaxHTMLBodyBytes)
+	data, err := parsePage(resp, "https://example.com/page", DefaultMaxHTMLBodyBytes, DefaultMaxHTMLTokenBytes)
 	if err != nil {
 		t.Fatalf("parsePage returned error: %v", err)
 	}
@@ -119,12 +119,21 @@ func TestStorageSanitizerTruncatesOversizedHTMLMetadata(t *testing.T) {
 		Body: io.NopCloser(strings.NewReader(html)),
 	}
 
-	data, err := parsePage(resp, "https://example.com/page", DefaultMaxHTMLBodyBytes)
+	data, err := parsePage(resp, "https://example.com/page", DefaultMaxHTMLBodyBytes, DefaultMaxHTMLTokenBytes)
 	if err != nil {
 		t.Fatalf("parsePage returned error: %v", err)
 	}
-	if data.TitleStatus != "Too Long" || utf8.RuneCountInString(data.Title) != storageTitleMaxRunes+25 {
-		t.Fatalf("parser did not preserve oversized title before storage: status=%q length=%d", data.TitleStatus, utf8.RuneCountInString(data.Title))
+	if data.TitleStatus != "Too Long" ||
+		utf8.RuneCountInString(data.Title) != storageTitleMaxRunes ||
+		!data.TitleTruncated ||
+		data.TitleOriginalLength != storageTitleMaxRunes+25 {
+		t.Fatalf(
+			"parser did not bound oversized title with telemetry: status=%q length=%d truncated=%t original=%d",
+			data.TitleStatus,
+			utf8.RuneCountInString(data.Title),
+			data.TitleTruncated,
+			data.TitleOriginalLength,
+		)
 	}
 
 	stored := sanitizeSEODataForStorage(data)
@@ -168,9 +177,46 @@ func TestParsePageRejectsOversizedHTML(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader("abcdef")),
 	}
 
-	_, err := parsePage(resp, "https://example.com", 5)
+	_, err := parsePage(resp, "https://example.com", 5, DefaultMaxHTMLTokenBytes)
 	if err == nil {
 		t.Fatalf("expected body size limit error")
+	}
+}
+
+func TestParsePageRejectsOversizedHTMLToken(t *testing.T) {
+	body := "<html><body><script>" + strings.Repeat("x", 1024) + "</script></body></html>"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	_, err := parsePage(resp, "https://example.com", int64(len(body)+1), 256)
+	if err == nil || !strings.Contains(err.Error(), "HTML token exceeds configured limit") {
+		t.Fatalf("expected oversized token error, got %v", err)
+	}
+}
+
+func TestParsePageStreamsTagDenseHTML(t *testing.T) {
+	const tagCount = 100_000
+	body := "<html><body>" + strings.Repeat("<i>x</i>", tagCount) + "</body></html>"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(
+		resp,
+		"https://example.com",
+		int64(len(body)+1),
+		DefaultMaxHTMLTokenBytes,
+	)
+	if err != nil {
+		t.Fatalf("stream tag-dense HTML: %v", err)
+	}
+	if data.WordCount != 1 {
+		t.Fatalf("unexpected streamed word count: got %d want 1", data.WordCount)
 	}
 }
 
@@ -183,7 +229,7 @@ func TestParsePagePreservesNonOKStatus(t *testing.T) {
 		Body: io.NopCloser(strings.NewReader("not found")),
 	}
 
-	data, err := parsePage(resp, "https://example.com/missing", DefaultMaxHTMLBodyBytes)
+	data, err := parsePage(resp, "https://example.com/missing", DefaultMaxHTMLBodyBytes, DefaultMaxHTMLTokenBytes)
 	if err != nil {
 		t.Fatalf("parsePage returned error for non-200 status: %v", err)
 	}
@@ -192,6 +238,28 @@ func TestParsePagePreservesNonOKStatus(t *testing.T) {
 	}
 	if data.XRobotsTag != "noindex" {
 		t.Fatalf("unexpected X-Robots-Tag: %q", data.XRobotsTag)
+	}
+}
+
+func BenchmarkParsePageTagDenseHTML(b *testing.B) {
+	body := "<html><body>" + strings.Repeat("<i>x</i>", 100_000) + "</body></html>"
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+
+	for range b.N {
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+		if _, err := parsePage(
+			resp,
+			"https://example.com",
+			int64(len(body)+1),
+			DefaultMaxHTMLTokenBytes,
+		); err != nil {
+			b.Fatalf("stream tag-dense HTML: %v", err)
+		}
 	}
 }
 
@@ -205,7 +273,7 @@ func TestParsePageDecodesDeclaredCharset(t *testing.T) {
 		Body: io.NopCloser(strings.NewReader(string(body))),
 	}
 
-	data, err := parsePage(resp, "https://example.com", DefaultMaxHTMLBodyBytes)
+	data, err := parsePage(resp, "https://example.com", DefaultMaxHTMLBodyBytes, DefaultMaxHTMLTokenBytes)
 	if err != nil {
 		t.Fatalf("parsePage returned error: %v", err)
 	}

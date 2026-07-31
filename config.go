@@ -10,7 +10,10 @@ const (
 	MaxWorkers                       = appconfig.MaxWorkers
 	DefaultMaxHTMLBodyBytes          = appconfig.DefaultMaxHTMLBodyBytes
 	MaxHTMLBodyBytes                 = appconfig.MaxHTMLBodyBytes
-	MaxInFlightHTMLBodyBytes         = appconfig.MaxInFlightHTMLBodyBytes
+	DefaultMaxHTMLTokenBytes         = appconfig.DefaultMaxHTMLTokenBytes
+	MaxHTMLTokenBytes                = appconfig.MaxHTMLTokenBytes
+	MaxEstimatedHTMLParserHeapBytes  = appconfig.MaxEstimatedHTMLParserHeapBytes
+	HTMLParserHeapAmplification      = appconfig.HTMLParserHeapAmplification
 	DefaultHTTPMaxRetries            = appconfig.DefaultHTTPMaxRetries
 	DefaultDBMaxRetries              = appconfig.DefaultDBMaxRetries
 	MaxRetryAttempts                 = appconfig.MaxRetryAttempts

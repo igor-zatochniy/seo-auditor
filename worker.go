@@ -178,7 +178,16 @@ func worker(
 			continue
 		}
 
-		data, err := parsePage(resp, target.RequestURL, cfg.MaxHTMLBodyBytes)
+		maxHTMLTokenBytes := cfg.MaxHTMLTokenBytes
+		if maxHTMLTokenBytes <= 0 {
+			maxHTMLTokenBytes = DefaultMaxHTMLTokenBytes
+		}
+		data, err := parsePage(
+			resp,
+			target.RequestURL,
+			cfg.MaxHTMLBodyBytes,
+			maxHTMLTokenBytes,
+		)
 		resp.Body.Close()
 		reqCancel()
 

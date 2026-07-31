@@ -23,15 +23,6 @@ const (
 )
 
 const (
-	storageURLMaxRunes         = 2048
-	storageTitleMaxRunes       = 500
-	storageH1MaxRunes          = 1000
-	storageOGTitleMaxRunes     = 500
-	storageTwitterCardMaxRunes = 100
-	storageRobotsTagMaxRunes   = 200
-)
-
-const (
 	exitSuccess  = 0
 	exitFatal    = 1
 	exitCanceled = 130
@@ -166,15 +157,21 @@ func run() (exitCode int) {
 	if abandonedRuns > 0 {
 		slog.Warn("Застарілі running-запуски позначено як abandoned", "count", abandonedRuns)
 	}
+	clearedRetainedURLs, err := clearRetainedTerminalAuditRunTargetURLs(signalCtx, dbPool, cfg)
+	if err != nil {
+		dbPool.Close()
+		slog.Error("Не вдалося очистити збережені URL завершених запусків", "error", err)
+		return exitFatal
+	}
+	if clearedRetainedURLs > 0 {
+		slog.Info("Очищено URL завершених запусків після перерваної фіналізації", "count", clearedRetainedURLs)
+	}
 
-	dbRunCtx, dbRunCancel := context.WithTimeout(signalCtx, cfg.DBWriteTimeout)
-	if err := createAuditRun(dbRunCtx, dbPool, cfg); err != nil {
-		dbRunCancel()
+	if err := createAuditRun(signalCtx, dbPool, cfg); err != nil {
 		dbPool.Close()
 		slog.Error("Не вдалося зареєструвати запуск аудиту", "error", err)
 		return exitFatal
 	}
-	dbRunCancel()
 	slog.Info(
 		"Підключення до PostgreSQL підтверджено, схема актуальна та запуск аудиту зареєстровано",
 		"max_conns",
@@ -187,9 +184,7 @@ func run() (exitCode int) {
 	}()
 	runCompletion := auditRunCompletion{Status: auditRunStatusFailed}
 	defer func() {
-		completionCtx, completionCancel := context.WithTimeout(context.Background(), cfg.DBWriteTimeout)
-		defer completionCancel()
-		if err := completeAuditRun(completionCtx, dbPool, cfg.RunID, runCompletion, cfg); err != nil {
+		if err := completeAuditRun(context.Background(), dbPool, cfg.RunID, runCompletion, cfg); err != nil {
 			slog.Error("Не вдалося завершити запис запуску аудиту", "error", err)
 			exitCode = exitFatal
 		}

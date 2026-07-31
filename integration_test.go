@@ -504,6 +504,226 @@ func TestAuditRunTargetSnapshotIsStable(t *testing.T) {
 	}
 }
 
+func TestTargetSnapshotUsesPerBatchWriteTimeout(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "006d8998-a43f-452c-ac7f-91919259db23"
+	const triggerName = "integration_delay_snapshot_target"
+	restoreActivePages := suspendActivePages(t, ctx, pool)
+	defer restoreActivePages()
+
+	urls := make([]string, 8)
+	for index := range urls {
+		urls[index] = fmt.Sprintf("https://bounded-snapshot.example/page-%d", index)
+	}
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, `DROP TRIGGER IF EXISTS integration_delay_snapshot_target ON audit_run_targets`)
+		_, _ = pool.Exec(cleanupCtx, `DROP FUNCTION IF EXISTS integration_delay_snapshot_target()`)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM audit_runs WHERE id = $1`, runID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM pages_to_scan WHERE url = ANY($1::TEXT[])`, urls)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	for _, targetURL := range urls {
+		if _, err := pool.Exec(
+			ctx,
+			`INSERT INTO pages_to_scan (url, is_active)
+			 VALUES ($1, TRUE)
+			 ON CONFLICT (url) DO UPDATE SET is_active = TRUE`,
+			targetURL,
+		); err != nil {
+			t.Fatalf("seed bounded snapshot URL: %v", err)
+		}
+	}
+	if _, err := pool.Exec(
+		ctx,
+		fmt.Sprintf(
+			`CREATE FUNCTION %s()
+			 RETURNS TRIGGER
+			 LANGUAGE plpgsql
+			 AS $$
+			 BEGIN
+			     IF NEW.run_id = '%s'::UUID THEN
+			         PERFORM pg_sleep(0.15);
+			     END IF;
+			     RETURN NEW;
+			 END
+			 $$`,
+			triggerName,
+			runID,
+		),
+	); err != nil {
+		t.Fatalf("create snapshot delay function: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`CREATE TRIGGER integration_delay_snapshot_target
+		 BEFORE INSERT ON audit_run_targets
+		 FOR EACH ROW
+		 EXECUTE FUNCTION integration_delay_snapshot_target()`,
+	); err != nil {
+		t.Fatalf("create snapshot delay trigger: %v", err)
+	}
+
+	cfg := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "bounded-snapshot-worker",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		URLBatchSize:         2,
+		DBWriteTimeout:       800 * time.Millisecond,
+		DBFetchTimeout:       time.Second,
+	}
+	if err := createAuditRun(ctx, pool, cfg); err != nil {
+		t.Fatalf("create bounded snapshot audit run: %v", err)
+	}
+
+	snapshot, err := captureAuditRunTargets(ctx, pool, cfg)
+	if err != nil {
+		t.Fatalf("capture bounded audit target snapshot: %v", err)
+	}
+	if snapshot.Total != int64(len(urls)) {
+		t.Fatalf("unexpected bounded snapshot total: got %d want %d", snapshot.Total, len(urls))
+	}
+}
+
+func TestAuditRunCompletionUsesPerBatchWriteTimeout(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "62bcc470-d79d-4939-916f-822384b24b36"
+	const triggerName = "integration_delay_target_cleanup"
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, `DROP TRIGGER IF EXISTS integration_delay_target_cleanup ON audit_run_targets`)
+		_, _ = pool.Exec(cleanupCtx, `DROP FUNCTION IF EXISTS integration_delay_target_cleanup()`)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM audit_runs WHERE id = $1`, runID)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	cfg := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "bounded-completion-worker",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		URLBatchSize:         2,
+		DBWriteTimeout:       800 * time.Millisecond,
+		DBFetchTimeout:       time.Second,
+	}
+	if err := createAuditRun(ctx, pool, cfg); err != nil {
+		t.Fatalf("create bounded completion audit run: %v", err)
+	}
+	for targetID := int64(1); targetID <= 8; targetID++ {
+		if _, err := pool.Exec(
+			ctx,
+			`INSERT INTO audit_run_targets (
+			     run_id, target_id, request_url, status, finished_at
+			 ) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)`,
+			runID,
+			targetID,
+			fmt.Sprintf("https://bounded-completion.example/page-%d", targetID),
+			auditTargetStatusCompleted,
+		); err != nil {
+			t.Fatalf("insert completed audit target: %v", err)
+		}
+	}
+	if _, err := pool.Exec(
+		ctx,
+		fmt.Sprintf(
+			`CREATE FUNCTION %s()
+			 RETURNS TRIGGER
+			 LANGUAGE plpgsql
+			 AS $$
+			 BEGIN
+			     IF OLD.run_id = '%s'::UUID
+			        AND OLD.request_url <> ''
+			        AND NEW.request_url = '' THEN
+			         PERFORM pg_sleep(0.15);
+			     END IF;
+			     RETURN NEW;
+			 END
+			 $$`,
+			triggerName,
+			runID,
+		),
+	); err != nil {
+		t.Fatalf("create completion delay function: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`CREATE TRIGGER integration_delay_target_cleanup
+		 BEFORE UPDATE ON audit_run_targets
+		 FOR EACH ROW
+		 EXECUTE FUNCTION integration_delay_target_cleanup()`,
+	); err != nil {
+		t.Fatalf("create completion delay trigger: %v", err)
+	}
+
+	if err := completeAuditRun(ctx, pool, runID, auditRunCompletion{
+		Status:         auditRunStatusCompleted,
+		TotalURLs:      8,
+		SuccessfulURLs: 8,
+	}, cfg); err != nil {
+		t.Fatalf("complete audit run in bounded batches: %v", err)
+	}
+	if err := completeAuditRun(ctx, pool, runID, auditRunCompletion{
+		Status:         auditRunStatusCompleted,
+		TotalURLs:      8,
+		SuccessfulURLs: 8,
+	}, cfg); err != nil {
+		t.Fatalf("repeat idempotent audit run completion: %v", err)
+	}
+
+	var status string
+	var retainedURLs int
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT run.status, COUNT(*) FILTER (WHERE target.request_url <> '')
+		 FROM audit_runs AS run
+		 JOIN audit_run_targets AS target ON target.run_id = run.id
+		 WHERE run.id = $1
+		 GROUP BY run.status`,
+		runID,
+	).Scan(&status, &retainedURLs); err != nil {
+		t.Fatalf("read bounded completion state: %v", err)
+	}
+	if status != auditRunStatusCompleted || retainedURLs != 0 {
+		t.Fatalf("unexpected bounded completion state: status=%q retained_urls=%d", status, retainedURLs)
+	}
+}
+
 func TestAbandonStaleAuditRunsMarksRunAndTargets(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {

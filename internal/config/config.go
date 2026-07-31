@@ -38,7 +38,10 @@ const (
 	MaxWorkers                       = 32
 	DefaultMaxHTMLBodyBytes          = int64(5 * 1024 * 1024)
 	MaxHTMLBodyBytes                 = int64(8 * 1024 * 1024)
-	MaxInFlightHTMLBodyBytes         = int64(16 * 1024 * 1024)
+	DefaultMaxHTMLTokenBytes         = int64(512 * 1024)
+	MaxHTMLTokenBytes                = int64(1024 * 1024)
+	MaxEstimatedHTMLParserHeapBytes  = int64(96 * 1024 * 1024)
+	HTMLParserHeapAmplification      = int64(8)
 
 	DefaultMaxConcurrentPerHost = 1
 	MaxPerHostConcurrency       = 16
@@ -74,6 +77,7 @@ type Config struct {
 	ShutdownTimeout           time.Duration
 	URLBatchSize              int
 	MaxHTMLBodyBytes          int64
+	MaxHTMLTokenBytes         int64
 	AllowPrivateTargets       bool
 	RateLimitInterval         time.Duration
 	MaxConcurrentPerHost      int
@@ -160,11 +164,17 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if int64(workers) > MaxInFlightHTMLBodyBytes/maxHTMLBodyBytes {
-		return Config{}, fmt.Errorf(
-			"WORKERS multiplied by MAX_HTML_BODY_BYTES must not exceed %d bytes",
-			MaxInFlightHTMLBodyBytes,
-		)
+	maxHTMLTokenBytes, err := int64FromEnv(
+		"MAX_HTML_TOKEN_BYTES",
+		DefaultMaxHTMLTokenBytes,
+		1024,
+		MaxHTMLTokenBytes,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := validateHTMLParserHeapBudget(workers, maxHTMLBodyBytes, maxHTMLTokenBytes); err != nil {
+		return Config{}, err
 	}
 	allowPrivateTargets, err := boolFromEnv("ALLOW_PRIVATE_TARGETS", false)
 	if err != nil {
@@ -258,6 +268,7 @@ func Load() (Config, error) {
 		ShutdownTimeout:           shutdownTimeout,
 		URLBatchSize:              urlBatchSize,
 		MaxHTMLBodyBytes:          maxHTMLBodyBytes,
+		MaxHTMLTokenBytes:         maxHTMLTokenBytes,
 		AllowPrivateTargets:       allowPrivateTargets,
 		RateLimitInterval:         rateLimitInterval,
 		MaxConcurrentPerHost:      maxConcurrentPerHost,
@@ -267,6 +278,24 @@ func Load() (Config, error) {
 		RetryBaseDelay:            retryBaseDelay,
 		RetryMaxDelay:             retryMaxDelay,
 	}, nil
+}
+
+func validateHTMLParserHeapBudget(workers int, maxBodyBytes, maxTokenBytes int64) error {
+	effectiveTokenBytes := min(maxBodyBytes, maxTokenBytes)
+	if effectiveTokenBytes <= 0 {
+		return fmt.Errorf("effective HTML token limit must be positive")
+	}
+	maxWorkersForHeap := MaxEstimatedHTMLParserHeapBytes /
+		(effectiveTokenBytes * HTMLParserHeapAmplification)
+	if int64(workers) > maxWorkersForHeap {
+		return fmt.Errorf(
+			"estimated HTML parser heap for WORKERS=%d and MAX_HTML_TOKEN_BYTES=%d exceeds %d bytes",
+			workers,
+			maxTokenBytes,
+			MaxEstimatedHTMLParserHeapBytes,
+		)
+	}
+	return nil
 }
 
 func targetFingerprintKeyFromEnv() ([]byte, error) {

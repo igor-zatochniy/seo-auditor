@@ -9,20 +9,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	robotsparser "github.com/igor-zatochniy/seo-auditor/internal/robots"
 )
 
 const robotsErrorCacheTTL = time.Minute
 
 type robotsPolicy struct {
 	allowAll bool
-	content  string
+	compiled *robotsparser.Policy
 }
 
 func (p robotsPolicy) allows(target *url.URL) bool {
 	if p.allowAll {
 		return true
 	}
-	return isPathAllowedByRobots(p.content, UserAgentStr, robotsRequestPath(target))
+	return p.compiled != nil && p.compiled.AllowsURL(target)
 }
 
 type robotsPolicyCache struct {
@@ -237,5 +239,9 @@ func fetchRobotsPolicy(
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("read robots.txt from %s: %w", robotsURL, err)
 	}
-	return robotsPolicy{content: string(body)}, nil
+	compiled, err := robotsparser.CompilePolicy(string(body), UserAgentStr)
+	if err != nil {
+		return robotsPolicy{}, fmt.Errorf("compile robots.txt from %s: %w", robotsURL, err)
+	}
+	return robotsPolicy{compiled: compiled}, nil
 }

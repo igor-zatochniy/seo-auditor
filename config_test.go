@@ -28,6 +28,7 @@ var configEnvironmentVariables = []string{
 	"SHUTDOWN_TIMEOUT",
 	"URL_BATCH_SIZE",
 	"MAX_HTML_BODY_BYTES",
+	"MAX_HTML_TOKEN_BYTES",
 	"RATE_LIMIT_INTERVAL",
 	"MAX_CONCURRENT_PER_HOST",
 	"ROBOTS_CACHE_TTL",
@@ -110,6 +111,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.WorkerInstanceID == "" {
 		t.Fatal("expected generated worker instance ID")
+	}
+	if cfg.MaxHTMLTokenBytes != DefaultMaxHTMLTokenBytes {
+		t.Fatalf("unexpected HTML token limit: %d", cfg.MaxHTMLTokenBytes)
 	}
 }
 
@@ -264,14 +268,26 @@ func TestLoadConfigRejectsOversizedHTMLBody(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsExcessiveInFlightHTMLBudget(t *testing.T) {
+func TestLoadConfigRejectsOversizedHTMLToken(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
 	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
-	t.Setenv("WORKERS", "4")
-	t.Setenv("MAX_HTML_BODY_BYTES", "5242880")
+	t.Setenv("MAX_HTML_TOKEN_BYTES", "1048577")
 
 	if _, err := loadConfig(); err == nil {
-		t.Fatal("expected excessive in-flight HTML budget to fail configuration loading")
+		t.Fatal("expected oversized MAX_HTML_TOKEN_BYTES to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsExcessiveHTMLParserHeapBudget(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("WORKERS", "32")
+	t.Setenv("MAX_HTML_BODY_BYTES", "8388608")
+	t.Setenv("MAX_HTML_TOKEN_BYTES", "1048576")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected excessive HTML parser heap budget to fail configuration loading")
 	}
 }

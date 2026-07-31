@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,6 +38,30 @@ func TestRobotsCacheSharesPolicyAcrossPaths(t *testing.T) {
 	}
 	if robotsRequests.Load() != 1 {
 		t.Fatalf("robots.txt fetched %d times, want 1", robotsRequests.Load())
+	}
+
+	parsedServerURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	key := strings.ToLower(parsedServerURL.Scheme) + "://" + strings.ToLower(parsedServerURL.Host)
+	entry := cache.getEntry(key)
+	entry.mu.Lock()
+	compiled := entry.policy.compiled
+	entry.mu.Unlock()
+	if compiled == nil {
+		t.Fatal("robots cache did not retain a compiled policy")
+	}
+
+	allowed, err = cache.isAllowedByRobots(context.Background(), client, server.URL+"/another", time.Second)
+	if err != nil || !allowed {
+		t.Fatalf("unexpected cached path decision: allowed=%t error=%v", allowed, err)
+	}
+	entry.mu.Lock()
+	reused := entry.policy.compiled
+	entry.mu.Unlock()
+	if reused != compiled {
+		t.Fatal("robots cache recompiled an unexpired policy")
 	}
 }
 

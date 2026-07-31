@@ -9,12 +9,21 @@ import (
 
 type SEOData = seo.Data
 
+const (
+	storageURLMaxRunes         = seo.StorageURLMaxRunes
+	storageTitleMaxRunes       = seo.StorageTitleMaxRunes
+	storageH1MaxRunes          = seo.StorageH1MaxRunes
+	storageOGTitleMaxRunes     = seo.StorageTitleMaxRunes
+	storageTwitterCardMaxRunes = seo.StorageTwitterCardMaxRunes
+	storageRobotsTagMaxRunes   = seo.StorageRobotsTagMaxRunes
+)
+
 func httpStatus(code int) *int {
 	return seo.HTTPStatus(code)
 }
 
-func parsePage(resp *http.Response, targetURL string, maxBodyBytes int64) (SEOData, error) {
-	return seo.ParsePage(resp, targetURL, maxBodyBytes)
+func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenBytes int64) (SEOData, error) {
+	return seo.ParsePage(resp, targetURL, maxBodyBytes, maxTokenBytes)
 }
 
 func validateHTMLContentType(raw string) error {

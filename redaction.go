@@ -137,15 +137,47 @@ func sanitizeSEODataForStorage(data SEOData) SEOData {
 	data.ErrorMessage = sanitizeErrorMessage(data.ErrorMessage)
 	data.URL, data.SafeURLTruncated, data.SafeURLOriginalLength = limitStorageString(data.URL, storageURLMaxRunes)
 	data.RedirectURL, data.RedirectURLTruncated, data.RedirectURLOriginalLength = limitStorageString(data.RedirectURL, storageURLMaxRunes)
-	data.Title, data.TitleTruncated, data.TitleOriginalLength = limitStorageString(data.Title, storageTitleMaxRunes)
-	data.H1, data.H1Truncated, data.H1OriginalLength = limitStorageString(data.H1, storageH1MaxRunes)
-	data.OGTitle, data.OGTitleTruncated, data.OGTitleOriginalLength = limitStorageString(data.OGTitle, storageTitleMaxRunes)
-	data.OGImage, data.OGImageTruncated, data.OGImageOriginalLength = limitStorageString(data.OGImage, storageURLMaxRunes)
-	data.TwitterCard, data.TwitterCardTruncated, data.TwitterCardOriginalLength = limitStorageString(data.TwitterCard, storageTwitterCardMaxRunes)
-	data.CanonicalURL, data.CanonicalURLTruncated, data.CanonicalURLOriginalLength = limitStorageString(data.CanonicalURL, storageURLMaxRunes)
-	data.MetaRobots, data.MetaRobotsTruncated, data.MetaRobotsOriginalLength = limitStorageString(data.MetaRobots, storageRobotsTagMaxRunes)
-	data.XRobotsTag, data.XRobotsTagTruncated, data.XRobotsTagOriginalLength = limitStorageString(data.XRobotsTag, storageRobotsTagMaxRunes)
+	data.Title, data.TitleTruncated, data.TitleOriginalLength = limitStorageStringPreservingMetadata(
+		data.Title, storageTitleMaxRunes, data.TitleTruncated, data.TitleOriginalLength,
+	)
+	data.H1, data.H1Truncated, data.H1OriginalLength = limitStorageStringPreservingMetadata(
+		data.H1, storageH1MaxRunes, data.H1Truncated, data.H1OriginalLength,
+	)
+	data.OGTitle, data.OGTitleTruncated, data.OGTitleOriginalLength = limitStorageStringPreservingMetadata(
+		data.OGTitle, storageTitleMaxRunes, data.OGTitleTruncated, data.OGTitleOriginalLength,
+	)
+	data.OGImage, data.OGImageTruncated, data.OGImageOriginalLength = limitStorageStringPreservingMetadata(
+		data.OGImage, storageURLMaxRunes, data.OGImageTruncated, data.OGImageOriginalLength,
+	)
+	data.TwitterCard, data.TwitterCardTruncated, data.TwitterCardOriginalLength = limitStorageStringPreservingMetadata(
+		data.TwitterCard, storageTwitterCardMaxRunes, data.TwitterCardTruncated, data.TwitterCardOriginalLength,
+	)
+	data.CanonicalURL, data.CanonicalURLTruncated, data.CanonicalURLOriginalLength = limitStorageStringPreservingMetadata(
+		data.CanonicalURL, storageURLMaxRunes, data.CanonicalURLTruncated, data.CanonicalURLOriginalLength,
+	)
+	data.MetaRobots, data.MetaRobotsTruncated, data.MetaRobotsOriginalLength = limitStorageStringPreservingMetadata(
+		data.MetaRobots, storageRobotsTagMaxRunes, data.MetaRobotsTruncated, data.MetaRobotsOriginalLength,
+	)
+	data.XRobotsTag, data.XRobotsTagTruncated, data.XRobotsTagOriginalLength = limitStorageStringPreservingMetadata(
+		data.XRobotsTag, storageRobotsTagMaxRunes, data.XRobotsTagTruncated, data.XRobotsTagOriginalLength,
+	)
 	return data
+}
+
+func limitStorageStringPreservingMetadata(
+	value string,
+	maxRunes int,
+	alreadyTruncated bool,
+	originalLength int,
+) (string, bool, int) {
+	limitedValue, truncatedNow, measuredLength := limitStorageString(value, maxRunes)
+	if !alreadyTruncated {
+		return limitedValue, truncatedNow, measuredLength
+	}
+	if originalLength < measuredLength {
+		originalLength = measuredLength
+	}
+	return limitedValue, true, originalLength
 }
 
 func limitStorageString(value string, maxRunes int) (string, bool, int) {
