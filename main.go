@@ -87,6 +87,8 @@ func run() (exitCode int) {
 		cfg.DBMigrationTimeout.String(),
 		"audit_run_heartbeat",
 		cfg.AuditRunHeartbeatInterval.String(),
+		"heartbeat_failure_threshold",
+		cfg.HeartbeatFailureThreshold,
 		"stale_run_threshold",
 		cfg.StaleRunThreshold.String(),
 		"target_lease_duration",
@@ -145,15 +147,12 @@ func run() (exitCode int) {
 	}
 	dbMigrationCancel()
 
-	dbMaintenanceCtx, dbMaintenanceCancel := context.WithTimeout(signalCtx, cfg.DBWriteTimeout)
-	abandonedRuns, err := abandonStaleAuditRuns(dbMaintenanceCtx, dbPool, cfg)
+	abandonedRuns, err := abandonStaleAuditRuns(signalCtx, dbPool, cfg)
 	if err != nil {
-		dbMaintenanceCancel()
 		dbPool.Close()
 		slog.Error("Не вдалося позначити застарілі запуски аудиту як abandoned", "error", err)
 		return exitFatal
 	}
-	dbMaintenanceCancel()
 	if abandonedRuns > 0 {
 		slog.Warn("Застарілі running-запуски позначено як abandoned", "count", abandonedRuns)
 	}
@@ -183,25 +182,51 @@ func run() (exitCode int) {
 		dbPool.Close()
 	}()
 	runCompletion := auditRunCompletion{Status: auditRunStatusFailed}
+	workCtx, cancelWork := context.WithCancelCause(signalCtx)
+	defer cancelWork(context.Canceled)
+	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
+	heartbeatDone := startAuditRunHeartbeat(heartbeatCtx, dbPool, cfg, func(err error) {
+		slog.Error("Втрачено надійний heartbeat запуску; планування нових targets зупиняється", "error", err)
+		cancelWork(err)
+	})
 	defer func() {
-		if err := completeAuditRun(context.Background(), dbPool, cfg.RunID, runCompletion, cfg); err != nil {
-			slog.Error("Не вдалося завершити запис запуску аудиту", "error", err)
+		if signalCtx.Err() == nil {
+			if cause := context.Cause(workCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+				runCompletion.Status = auditRunStatusFailed
+				exitCode = exitFatal
+			}
+		}
+
+		terminalErr := persistAuditRunTerminalState(
+			context.Background(),
+			dbPool,
+			cfg.RunID,
+			runCompletion,
+			cfg,
+		)
+		stopHeartbeat()
+		<-heartbeatDone
+		if terminalErr != nil {
+			slog.Error("Не вдалося записати terminal status запуску аудиту", "error", terminalErr)
+			exitCode = exitFatal
+			return
+		}
+		if _, err := clearAuditRunTargetURLs(context.Background(), dbPool, cfg.RunID, cfg); err != nil {
+			slog.Error("Не вдалося очистити збережені URL завершеного запуску", "error", err)
 			exitCode = exitFatal
 		}
 	}()
-	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
-	heartbeatDone := startAuditRunHeartbeat(heartbeatCtx, dbPool, cfg)
-	defer func() {
-		stopHeartbeat()
-		<-heartbeatDone
-	}()
 
-	targetSnapshot, err := captureAuditRunTargets(signalCtx, dbPool, cfg)
+	targetSnapshot, err := captureAuditRunTargets(workCtx, dbPool, cfg)
 	if err != nil {
 		if signalCtx.Err() != nil {
 			runCompletion.Status = auditRunStatusCanceled
 			slog.Warn("Запуск скасовано до фіксації стабільного набору цілей", "error", signalCtx.Err())
 			return exitCanceled
+		}
+		if cause := context.Cause(workCtx); cause != nil {
+			slog.Error("Heartbeat завершився фатально до фіксації стабільного набору цілей", "error", cause)
+			return exitFatal
 		}
 		slog.Error("Не вдалося зафіксувати стабільний набір цілей аудиту", "error", err)
 		return exitFatal
@@ -282,11 +307,11 @@ func run() (exitCode int) {
 	defer pageCustomTransport.CloseIdleConnections()
 	defer robotsCustomTransport.CloseIdleConnections()
 
-	operationCtx, cancelOperations := context.WithCancel(context.WithoutCancel(signalCtx))
+	operationCtx, cancelOperations := context.WithCancel(context.WithoutCancel(workCtx))
 	defer cancelOperations()
 	processingDone := make(chan struct{})
 	shutdownGuardDone := guardGracefulShutdown(
-		signalCtx,
+		workCtx,
 		processingDone,
 		cfg.ShutdownTimeout,
 		cancelOperations,
@@ -295,14 +320,14 @@ func run() (exitCode int) {
 	var wg sync.WaitGroup
 	for w := 1; w <= cfg.Workers; w++ {
 		wg.Add(1)
-		go worker(signalCtx, operationCtx, w, jobs, results, pageHTTPClient, robotsHTTPClient, robotsCache, dbPool, cfg, &wg)
+		go worker(workCtx, operationCtx, w, jobs, results, pageHTTPClient, robotsHTTPClient, robotsCache, dbPool, cfg, &wg)
 	}
 
 	streamDone := make(chan urlStreamSummary, 1)
 	go func() {
 		defer close(jobs)
 		streamDone <- streamTargetURLs(
-			signalCtx,
+			workCtx,
 			cfg.URLBatchSize,
 			cfg,
 			jobs,
@@ -325,7 +350,8 @@ func run() (exitCode int) {
 	<-shutdownGuardDone
 
 	shutdownRequested := signalCtx.Err() != nil
-	streamCanceledByShutdown := shutdownRequested && errors.Is(streamSummary.Error, context.Canceled)
+	heartbeatFailure := signalCtx.Err() == nil && context.Cause(workCtx) != nil
+	streamCanceledByLifecycle := workCtx.Err() != nil && errors.Is(streamSummary.Error, context.Canceled)
 	previouslyProcessed := targetSnapshot.Successful + targetSnapshot.Failed
 	unprocessedTargets := targetSnapshot.Total - previouslyProcessed - int64(streamSummary.Queued+streamSummary.Skipped)
 	if unprocessedTargets < 0 {
@@ -338,7 +364,7 @@ func run() (exitCode int) {
 	}
 	runCompletion.SuccessfulURLs = int(targetSnapshot.Successful) + summary.Successful
 	runCompletion.FailedURLs = int(targetSnapshot.Failed) + summary.Failed + missingResults
-	if streamSummary.Error != nil && !streamCanceledByShutdown {
+	if streamSummary.Error != nil && !streamCanceledByLifecycle {
 		runCompletion.FailedURLs += int(unprocessedTargets)
 		slog.Error(
 			"Потокове читання стабільного набору цілей завершилося помилкою",
@@ -354,6 +380,19 @@ func run() (exitCode int) {
 
 	if streamSummary.Queued == 0 && previouslyProcessed < targetSnapshot.Total {
 		slog.Warn("Стабільний набір цілей не містить валідних URL", "skipped_urls", streamSummary.Skipped)
+	}
+	if heartbeatFailure {
+		runCompletion.Status = auditRunStatusFailed
+		slog.Error(
+			"Запуск завершується через послідовні помилки heartbeat",
+			"error",
+			context.Cause(workCtx),
+			"unprocessed_targets",
+			unprocessedTargets,
+			"saved_results",
+			summary.Saved,
+		)
+		return exitFatal
 	}
 	if shutdownRequested {
 		runCompletion.Status = auditRunStatusCanceled
@@ -433,7 +472,7 @@ func run() (exitCode int) {
 }
 
 func guardGracefulShutdown(
-	signalCtx context.Context,
+	lifecycleCtx context.Context,
 	processingDone <-chan struct{},
 	timeout time.Duration,
 	cancelOperations context.CancelFunc,
@@ -445,9 +484,9 @@ func guardGracefulShutdown(
 		select {
 		case <-processingDone:
 			return
-		case <-signalCtx.Done():
+		case <-lifecycleCtx.Done():
 			slog.Warn(
-				"Отримано сигнал зупинки: нові URL більше не плануються",
+				"Lifecycle запуску зупиняє планування нових URL",
 				"shutdown_timeout",
 				timeout.String(),
 			)

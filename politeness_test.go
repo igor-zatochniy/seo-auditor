@@ -65,6 +65,40 @@ func TestRobotsCacheSharesPolicyAcrossPaths(t *testing.T) {
 	}
 }
 
+func TestRobotsCacheDoesNotReuseExpiredAllowAllAfterServerFailure(t *testing.T) {
+	var robotsRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/robots.txt" {
+			http.NotFound(w, r)
+			return
+		}
+		if robotsRequests.Add(1) == 1 {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	cacheTTL := 20 * time.Millisecond
+	cache := newRobotsPolicyCache(cacheTTL, 16)
+	client := newRobotsHTTPClient(server.Client().Transport)
+
+	allowed, err := cache.isAllowedByRobots(context.Background(), client, server.URL+"/page", time.Second)
+	if err != nil || !allowed {
+		t.Fatalf("404 robots.txt should allow crawling: allowed=%t error=%v", allowed, err)
+	}
+
+	time.Sleep(2 * cacheTTL)
+	allowed, err = cache.isAllowedByRobots(context.Background(), client, server.URL+"/page", time.Second)
+	if err == nil || allowed {
+		t.Fatalf("503 refresh must fail closed: allowed=%t error=%v", allowed, err)
+	}
+	if robotsRequests.Load() != 2 {
+		t.Fatalf("robots.txt requests = %d, want 2", robotsRequests.Load())
+	}
+}
+
 func TestPoliteTransportLimitsConcurrencyPerHost(t *testing.T) {
 	firstStarted := make(chan struct{})
 	secondStarted := make(chan struct{})

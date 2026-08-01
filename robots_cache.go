@@ -43,7 +43,6 @@ type robotsCacheRecord struct {
 type robotsCacheEntry struct {
 	mu        sync.Mutex
 	policy    robotsPolicy
-	hasPolicy bool
 	err       error
 	expiresAt time.Time
 	loading   bool
@@ -113,8 +112,6 @@ func (c *robotsPolicyCache) policy(
 			}
 		}
 
-		stalePolicy := entry.policy
-		hasStalePolicy := entry.hasPolicy
 		entry.loading = true
 		entry.ready = make(chan struct{})
 		entry.mu.Unlock()
@@ -125,20 +122,10 @@ func (c *robotsPolicyCache) policy(
 		entry.mu.Lock()
 		if fetchErr == nil {
 			entry.policy = policy
-			entry.hasPolicy = true
 			entry.err = nil
 			entry.expiresAt = now.Add(c.ttl)
-		} else if hasStalePolicy {
-			slog.Warn("Оновлення robots.txt не вдалося, використовується кешована policy", "host", key, "error", fetchErr)
-			entry.policy = stalePolicy
-			entry.hasPolicy = true
-			entry.err = nil
-			entry.expiresAt = now.Add(c.errorTTL)
-			policy = stalePolicy
-			fetchErr = nil
 		} else {
 			entry.policy = robotsPolicy{}
-			entry.hasPolicy = false
 			entry.err = fetchErr
 			entry.expiresAt = now.Add(c.errorTTL)
 		}

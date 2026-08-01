@@ -28,6 +28,8 @@ const (
 	DefaultDBFetchTimeout            = appconfig.DefaultDBFetchTimeout
 	DefaultDBWriteTimeout            = appconfig.DefaultDBWriteTimeout
 	DefaultAuditRunHeartbeatInterval = appconfig.DefaultAuditRunHeartbeatInterval
+	DefaultHeartbeatFailureThreshold = appconfig.DefaultHeartbeatFailureThreshold
+	MaxHeartbeatFailureThreshold     = appconfig.MaxHeartbeatFailureThreshold
 	DefaultStaleRunThreshold         = appconfig.DefaultStaleRunThreshold
 	DefaultTargetLeaseDuration       = appconfig.DefaultTargetLeaseDuration
 	DefaultTargetFingerprintKeyID    = appconfig.DefaultTargetFingerprintKeyID

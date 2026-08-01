@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -690,7 +691,7 @@ func TestStreamTargetURLsUsesClaimedBatches(t *testing.T) {
 
 	var batchLimits []int
 	claimBatch := func(_ context.Context, limit int) ([]targetURLRecord, error) {
-		if limit != 2 {
+		if limit < 1 || limit > 2 {
 			t.Fatalf("unexpected batch limit: %d", limit)
 		}
 		batchLimits = append(batchLimits, limit)
@@ -743,8 +744,73 @@ func TestStreamTargetURLsUsesClaimedBatches(t *testing.T) {
 	if len(urls) != 2 || urls[0] != "https://example.com/one" || urls[1] != "https://example.com/three" {
 		t.Fatalf("unexpected queued URLs: %#v", urls)
 	}
-	if len(batchLimits) != 3 {
-		t.Fatalf("unexpected claim batch calls: %#v", batchLimits)
+	if len(batchLimits) < 3 {
+		t.Fatalf("too few bounded claim calls: %#v", batchLimits)
+	}
+}
+
+func TestNextTargetClaimLimitUsesWorkersAndFreeQueueCapacity(t *testing.T) {
+	jobs := make(chan AuditTarget, 6)
+	for range 4 {
+		jobs <- AuditTarget{}
+	}
+
+	if got, want := nextTargetClaimLimit(100, 3, jobs), 5; got != want {
+		t.Fatalf("nextTargetClaimLimit() = %d, want %d", got, want)
+	}
+	if got, want := nextTargetClaimLimit(4, 3, jobs), 4; got != want {
+		t.Fatalf("batch cap was not applied: got %d want %d", got, want)
+	}
+}
+
+func TestHeartbeatMonitorStopsAfterConsecutiveFailures(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	heartbeatErr := errors.New("heartbeat unavailable")
+	var updates atomic.Int32
+	fatalErrors := make(chan error, 1)
+	done := startHeartbeatMonitor(
+		ctx,
+		time.Millisecond,
+		3,
+		func() error {
+			attempt := updates.Add(1)
+			if attempt == 2 {
+				return nil
+			}
+			return heartbeatErr
+		},
+		func(err error) { fatalErrors <- err },
+	)
+
+	select {
+	case err := <-fatalErrors:
+		if !errors.Is(err, heartbeatErr) {
+			t.Fatalf("fatal heartbeat error = %v, want wrapped test error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat monitor did not report the failure threshold")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat monitor did not stop after the failure threshold")
+	}
+	if got, want := updates.Load(), int32(5); got != want {
+		t.Fatalf("heartbeat updates = %d, want %d", got, want)
+	}
+}
+
+func TestWaitForStaleRecoveryContentionStopsAfterWriteBudget(t *testing.T) {
+	contentionSince := time.Now().Add(-2 * time.Millisecond)
+	err := waitForStaleRecoveryContention(
+		context.Background(),
+		Config{DBWriteTimeout: time.Millisecond},
+		&contentionSince,
+	)
+	if err == nil || !strings.Contains(err.Error(), "database lock contention") {
+		t.Fatalf("unexpected stale recovery contention result: %v", err)
 	}
 }
 

@@ -26,6 +26,8 @@ const (
 	DefaultDBFetchTimeout            = 5 * time.Second
 	DefaultDBWriteTimeout            = 3 * time.Second
 	DefaultAuditRunHeartbeatInterval = 30 * time.Second
+	DefaultHeartbeatFailureThreshold = 3
+	MaxHeartbeatFailureThreshold     = 10
 	DefaultStaleRunThreshold         = 5 * time.Minute
 	DefaultTargetLeaseDuration       = 2 * time.Minute
 	DefaultTargetFingerprintKeyID    = "default"
@@ -72,6 +74,7 @@ type Config struct {
 	DBFetchTimeout            time.Duration
 	DBWriteTimeout            time.Duration
 	AuditRunHeartbeatInterval time.Duration
+	HeartbeatFailureThreshold int
 	StaleRunThreshold         time.Duration
 	TargetLeaseDuration       time.Duration
 	ShutdownTimeout           time.Duration
@@ -135,12 +138,26 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	heartbeatFailureThreshold, err := intFromEnv(
+		"HEARTBEAT_FAILURE_THRESHOLD",
+		DefaultHeartbeatFailureThreshold,
+		1,
+		MaxHeartbeatFailureThreshold,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	staleRunThreshold, err := durationFromEnv("STALE_RUN_THRESHOLD", DefaultStaleRunThreshold)
 	if err != nil {
 		return Config{}, err
 	}
 	if auditRunHeartbeatInterval >= staleRunThreshold {
 		return Config{}, fmt.Errorf("AUDIT_RUN_HEARTBEAT_INTERVAL must be lower than STALE_RUN_THRESHOLD")
+	}
+	if time.Duration(heartbeatFailureThreshold)*auditRunHeartbeatInterval >= staleRunThreshold {
+		return Config{}, fmt.Errorf(
+			"HEARTBEAT_FAILURE_THRESHOLD multiplied by AUDIT_RUN_HEARTBEAT_INTERVAL must be lower than STALE_RUN_THRESHOLD",
+		)
 	}
 	targetLeaseDuration, err := durationFromEnv("TARGET_LEASE_DURATION", DefaultTargetLeaseDuration)
 	if err != nil {
@@ -263,6 +280,7 @@ func Load() (Config, error) {
 		DBFetchTimeout:            dbFetchTimeout,
 		DBWriteTimeout:            dbWriteTimeout,
 		AuditRunHeartbeatInterval: auditRunHeartbeatInterval,
+		HeartbeatFailureThreshold: heartbeatFailureThreshold,
 		StaleRunThreshold:         staleRunThreshold,
 		TargetLeaseDuration:       targetLeaseDuration,
 		ShutdownTimeout:           shutdownTimeout,

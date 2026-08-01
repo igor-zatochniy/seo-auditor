@@ -133,6 +133,7 @@ func resetResumableAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cf
 				 SET status = $5,
 				     claimed_by = NULL,
 				     claimed_at = NULL,
+				     started_at = NULL,
 				     lease_until = NULL,
 				     finished_at = NULL,
 				     last_error = ''
@@ -168,7 +169,24 @@ func resetResumableAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cf
 	}
 }
 
+//lint:ignore U1000 Integration tests exercise the full terminal-state and URL-cleanup composition.
 func completeAuditRun(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	runID string,
+	completion auditRunCompletion,
+	cfg Config,
+) error {
+	if err := persistAuditRunTerminalState(ctx, dbPool, runID, completion, cfg); err != nil {
+		return err
+	}
+	if _, err := clearAuditRunTargetURLs(ctx, dbPool, runID, cfg); err != nil {
+		return fmt.Errorf("clear retained URLs for audit run %s: %w", runID, err)
+	}
+	return nil
+}
+
+func persistAuditRunTerminalState(
 	ctx context.Context,
 	dbPool *pgxpool.Pool,
 	runID string,
@@ -184,9 +202,6 @@ func completeAuditRun(
 	}
 	if err := finalizeAuditRun(ctx, dbPool, runID, completion, cfg); err != nil {
 		return fmt.Errorf("complete audit run %s: %w", runID, err)
-	}
-	if _, err := clearAuditRunTargetURLs(ctx, dbPool, runID, cfg); err != nil {
-		return fmt.Errorf("clear retained URLs for audit run %s: %w", runID, err)
 	}
 	return nil
 }
@@ -340,72 +355,276 @@ func clearRetainedTerminalAuditRunTargetURLs(
 
 func abandonStaleAuditRuns(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) (int64, error) {
 	cutoff := time.Now().Add(-effectiveStaleRunThreshold(cfg))
-	var abandonedRuns int64
-	var abandonedTargets int64
-	err := retryDBOperation(
-		ctx,
-		"abandon_stale_audit_runs",
-		retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay},
-		func() error {
-			return dbPool.QueryRow(
-				ctx,
-				`WITH abandoned_runs AS (
-				     UPDATE audit_runs
-				     SET status = $2,
-				         finished_at = CURRENT_TIMESTAMP
+	var totalAbandonedRuns int64
+	var contentionSince time.Time
+
+	for {
+		var abandonedRuns int64
+		err := withDBMutationRetry(ctx, cfg, "abandon_stale_audit_run_batch", func(queryCtx context.Context) error {
+			commandTag, err := dbPool.Exec(
+				queryCtx,
+				`WITH stale_run_batch AS (
+				     SELECT id
+				     FROM audit_runs
 				     WHERE status = $3
 				       AND heartbeat_at < $1
-				     RETURNING id
-				 ),
-				 abandoned_targets AS (
-				 UPDATE audit_run_targets AS target
-				     SET status = $4,
-				         finished_at = COALESCE(target.finished_at, CURRENT_TIMESTAMP),
-				         lease_until = NULL,
-				         last_error = $5
-				     FROM abandoned_runs
-				     WHERE target.run_id = abandoned_runs.id
-				       AND target.status NOT IN ($6, $7, $8, $4)
-				     RETURNING 1
+				     ORDER BY heartbeat_at, id
+				     LIMIT $4
+				     FOR UPDATE SKIP LOCKED
 				 )
-				 SELECT
-				     (SELECT COUNT(*) FROM abandoned_runs),
-				     (SELECT COUNT(*) FROM abandoned_targets)`,
+				 UPDATE audit_runs AS run
+				 SET status = $2,
+				     finished_at = CURRENT_TIMESTAMP
+				 FROM stale_run_batch
+				 WHERE run.id = stale_run_batch.id
+				   AND run.status = $3
+				   AND run.heartbeat_at < $1`,
 				cutoff,
 				auditRunStatusAbandoned,
 				auditRunStatusRunning,
-				auditTargetStatusAbandoned,
-				"Audit run heartbeat expired before a clean shutdown.",
+				effectiveURLBatchSize(cfg),
+			)
+			if err != nil {
+				return err
+			}
+			abandonedRuns = commandTag.RowsAffected()
+			return nil
+		})
+		if err != nil {
+			return totalAbandonedRuns, fmt.Errorf("abandon stale audit run batch: %w", err)
+		}
+		totalAbandonedRuns += abandonedRuns
+		if abandonedRuns > 0 {
+			contentionSince = time.Time{}
+			continue
+		}
+
+		remaining, err := staleAuditRunsExist(ctx, dbPool, cutoff, cfg)
+		if err != nil {
+			return totalAbandonedRuns, fmt.Errorf("check stale audit runs: %w", err)
+		}
+		if !remaining {
+			break
+		}
+		if err := waitForStaleRecoveryContention(ctx, cfg, &contentionSince); err != nil {
+			return totalAbandonedRuns, err
+		}
+	}
+
+	if err := abandonIncompleteTargetsForRecoveredRuns(ctx, dbPool, cfg); err != nil {
+		return totalAbandonedRuns, fmt.Errorf("abandon stale audit run targets: %w", err)
+	}
+	return totalAbandonedRuns, nil
+}
+
+func staleAuditRunsExist(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	cutoff time.Time,
+	cfg Config,
+) (bool, error) {
+	var exists bool
+	err := withDBReadRetry(ctx, cfg, "check_stale_audit_runs", func(queryCtx context.Context) error {
+		return dbPool.QueryRow(
+			queryCtx,
+			`SELECT EXISTS (
+			     SELECT 1
+			     FROM audit_runs
+			     WHERE status = $2
+			       AND heartbeat_at < $1
+			 )`,
+			cutoff,
+			auditRunStatusRunning,
+		).Scan(&exists)
+	})
+	return exists, err
+}
+
+func abandonIncompleteTargetsForRecoveredRuns(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	cfg Config,
+) error {
+	var contentionSince time.Time
+	for {
+		var abandonedTargets int64
+		err := withDBMutationRetry(ctx, cfg, "abandon_stale_audit_target_batch", func(queryCtx context.Context) error {
+			commandTag, err := dbPool.Exec(
+				queryCtx,
+				`WITH target_batch AS (
+				     SELECT target.run_id, target.target_id
+				     FROM audit_run_targets AS target
+				     JOIN audit_runs AS run ON run.id = target.run_id
+				     WHERE run.status = $2
+				       AND target.status NOT IN ($3, $4, $5, $6)
+				     ORDER BY target.run_id, target.target_id
+				     LIMIT $1
+				     FOR UPDATE OF target SKIP LOCKED
+				 )
+				 UPDATE audit_run_targets AS target
+				 SET status = $6,
+				     finished_at = COALESCE(target.finished_at, CURRENT_TIMESTAMP),
+				     lease_until = NULL,
+				     last_error = $7
+				 FROM target_batch
+				 WHERE target.run_id = target_batch.run_id
+				   AND target.target_id = target_batch.target_id
+				   AND EXISTS (
+				       SELECT 1
+				       FROM audit_runs AS run
+				       WHERE run.id = target.run_id
+				         AND run.status = $2
+				   )`,
+				effectiveURLBatchSize(cfg),
+				auditRunStatusAbandoned,
 				auditTargetStatusCompleted,
 				auditTargetStatusFailed,
 				auditTargetStatusCanceled,
-			).Scan(&abandonedRuns, &abandonedTargets)
-		},
-	)
-	if err != nil {
-		return 0, fmt.Errorf("abandon stale audit runs: %w", err)
+				auditTargetStatusAbandoned,
+				"Audit run heartbeat expired before a clean shutdown.",
+			)
+			if err != nil {
+				return err
+			}
+			abandonedTargets = commandTag.RowsAffected()
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if abandonedTargets > 0 {
+			contentionSince = time.Time{}
+			continue
+		}
+
+		remaining, err := incompleteAbandonedRunTargetsExist(ctx, dbPool, cfg)
+		if err != nil {
+			return err
+		}
+		if !remaining {
+			return nil
+		}
+		if err := waitForStaleRecoveryContention(ctx, cfg, &contentionSince); err != nil {
+			return err
+		}
 	}
-	return abandonedRuns, nil
 }
 
-func startAuditRunHeartbeat(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) <-chan struct{} {
+func incompleteAbandonedRunTargetsExist(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	cfg Config,
+) (bool, error) {
+	var exists bool
+	err := withDBReadRetry(ctx, cfg, "check_incomplete_abandoned_audit_targets", func(queryCtx context.Context) error {
+		return dbPool.QueryRow(
+			queryCtx,
+			`SELECT EXISTS (
+			     SELECT 1
+			     FROM audit_run_targets AS target
+			     JOIN audit_runs AS run ON run.id = target.run_id
+			     WHERE run.status = $1
+			       AND target.status NOT IN ($2, $3, $4, $5)
+			 )`,
+			auditRunStatusAbandoned,
+			auditTargetStatusCompleted,
+			auditTargetStatusFailed,
+			auditTargetStatusCanceled,
+			auditTargetStatusAbandoned,
+		).Scan(&exists)
+	})
+	return exists, err
+}
+
+func waitForStaleRecoveryContention(ctx context.Context, cfg Config, contentionSince *time.Time) error {
+	now := time.Now()
+	if contentionSince.IsZero() {
+		*contentionSince = now
+	}
+	contentionBudget := effectiveDBWriteTimeout(cfg)
+	elapsed := now.Sub(*contentionSince)
+	if elapsed >= contentionBudget {
+		return fmt.Errorf("stale recovery made no progress for %s due to database lock contention", contentionBudget)
+	}
+
+	delay := cfg.RetryBaseDelay
+	if delay <= 0 {
+		delay = 10 * time.Millisecond
+	}
+	if delay > 100*time.Millisecond {
+		delay = 100 * time.Millisecond
+	}
+	if remaining := contentionBudget - elapsed; delay > remaining {
+		delay = remaining
+	}
+	return waitForRetry(ctx, delay)
+}
+
+func startAuditRunHeartbeat(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	cfg Config,
+	onFailure func(error),
+) <-chan struct{} {
+	update := func() error {
+		heartbeatCtx, cancel := context.WithTimeout(ctx, effectiveDBWriteTimeout(cfg))
+		defer cancel()
+		return updateAuditRunHeartbeat(heartbeatCtx, dbPool, cfg)
+	}
+	return startHeartbeatMonitor(
+		ctx,
+		effectiveAuditRunHeartbeat(cfg),
+		effectiveHeartbeatFailureThreshold(cfg),
+		update,
+		onFailure,
+	)
+}
+
+func startHeartbeatMonitor(
+	ctx context.Context,
+	interval time.Duration,
+	failureThreshold int,
+	update func() error,
+	onFailure func(error),
+) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(effectiveAuditRunHeartbeat(cfg))
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		consecutiveFailures := 0
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				heartbeatCtx, cancel := context.WithTimeout(ctx, effectiveDBWriteTimeout(cfg))
-				err := updateAuditRunHeartbeat(heartbeatCtx, dbPool, cfg)
-				cancel()
+				err := update()
 				if err != nil {
-					slog.Warn("Не вдалося оновити heartbeat запуску аудиту", "error", err)
+					if ctx.Err() != nil {
+						return
+					}
+					consecutiveFailures++
+					slog.Warn(
+						"Не вдалося оновити heartbeat запуску аудиту",
+						"consecutive_failures", consecutiveFailures,
+						"failure_threshold", failureThreshold,
+						"error", err,
+					)
+					if consecutiveFailures >= failureThreshold {
+						fatalErr := fmt.Errorf(
+							"audit run heartbeat failed %d consecutive times: %w",
+							consecutiveFailures,
+							err,
+						)
+						if onFailure != nil {
+							onFailure(fatalErr)
+						}
+						return
+					}
+					continue
 				}
+				consecutiveFailures = 0
 			}
 		}
 	}()
@@ -475,7 +694,7 @@ func markAuditRunTargetStarted(ctx context.Context, dbPool *pgxpool.Pool, target
 	dbWriteCtx, cancel := context.WithTimeout(ctx, effectiveDBWriteTimeout(cfg))
 	defer cancel()
 
-	err := retryDBOperation(
+	err := retryDBMutation(
 		dbWriteCtx,
 		"mark_audit_run_target_started",
 		retryPolicy{maxRetries: cfg.DBMaxRetries, baseDelay: cfg.RetryBaseDelay, maxDelay: cfg.RetryMaxDelay},
@@ -483,7 +702,9 @@ func markAuditRunTargetStarted(ctx context.Context, dbPool *pgxpool.Pool, target
 			commandTag, err := dbPool.Exec(
 				dbWriteCtx,
 				`UPDATE audit_run_targets
-				 SET claimed_at = COALESCE(claimed_at, CURRENT_TIMESTAMP),
+				 SET attempts = attempts + 1,
+				     started_at = CURRENT_TIMESTAMP,
+				     claimed_at = COALESCE(claimed_at, CURRENT_TIMESTAMP),
 				     lease_until = CURRENT_TIMESTAMP + ($5 * INTERVAL '1 millisecond'),
 				     finished_at = NULL,
 				     last_error = ''
@@ -644,6 +865,7 @@ func markIncompleteTargetsForRunCompletion(
 					 SET status = $5,
 					     claimed_by = NULL,
 					     claimed_at = NULL,
+					     started_at = NULL,
 					     lease_until = NULL,
 					     finished_at = NULL,
 					     last_error = CASE WHEN target.last_error = '' THEN $6 ELSE target.last_error END
@@ -727,6 +949,13 @@ func effectiveAuditRunHeartbeat(cfg Config) time.Duration {
 		return cfg.AuditRunHeartbeatInterval
 	}
 	return DefaultAuditRunHeartbeatInterval
+}
+
+func effectiveHeartbeatFailureThreshold(cfg Config) int {
+	if cfg.HeartbeatFailureThreshold > 0 {
+		return cfg.HeartbeatFailureThreshold
+	}
+	return DefaultHeartbeatFailureThreshold
 }
 
 func effectiveStaleRunThreshold(cfg Config) time.Duration {

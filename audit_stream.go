@@ -46,9 +46,9 @@ func claimTargetURLBatch(
 				 )
 				 UPDATE audit_run_targets AS target
 				 SET status = $5,
-				     attempts = target.attempts + 1,
 				     claimed_by = $3,
 				     claimed_at = CURRENT_TIMESTAMP,
+				     started_at = NULL,
 				     lease_until = CURRENT_TIMESTAMP + ($7 * INTERVAL '1 millisecond'),
 				     finished_at = NULL,
 				     last_error = ''
@@ -105,7 +105,8 @@ func streamTargetURLs(
 		return summary
 	}
 	for {
-		batch, err := claimBatch(ctx, batchSize)
+		claimLimit := nextTargetClaimLimit(batchSize, cfg.Workers, jobs)
+		batch, err := claimBatch(ctx, claimLimit)
 		if err != nil {
 			summary.Error = err
 			return summary
@@ -148,4 +149,16 @@ func streamTargetURLs(
 	}
 
 	return summary
+}
+
+func nextTargetClaimLimit(batchSize, workers int, jobs chan<- AuditTarget) int {
+	if workers <= 0 {
+		workers = 1
+	}
+	freeQueueCapacity := cap(jobs) - len(jobs)
+	claimLimit := workers + freeQueueCapacity
+	if claimLimit > batchSize {
+		return batchSize
+	}
+	return max(claimLimit, 1)
 }

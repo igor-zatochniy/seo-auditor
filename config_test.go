@@ -23,6 +23,7 @@ var configEnvironmentVariables = []string{
 	"DB_FETCH_TIMEOUT",
 	"DB_WRITE_TIMEOUT",
 	"AUDIT_RUN_HEARTBEAT_INTERVAL",
+	"HEARTBEAT_FAILURE_THRESHOLD",
 	"STALE_RUN_THRESHOLD",
 	"TARGET_LEASE_DURATION",
 	"SHUTDOWN_TIMEOUT",
@@ -105,6 +106,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.AuditRunHeartbeatInterval != DefaultAuditRunHeartbeatInterval || cfg.StaleRunThreshold != DefaultStaleRunThreshold {
 		t.Fatalf("unexpected audit run heartbeat defaults: heartbeat=%s stale=%s", cfg.AuditRunHeartbeatInterval, cfg.StaleRunThreshold)
+	}
+	if cfg.HeartbeatFailureThreshold != DefaultHeartbeatFailureThreshold {
+		t.Fatalf("unexpected heartbeat failure threshold: %d", cfg.HeartbeatFailureThreshold)
 	}
 	if cfg.TargetLeaseDuration != DefaultTargetLeaseDuration {
 		t.Fatalf("unexpected target lease duration: %s", cfg.TargetLeaseDuration)
@@ -219,6 +223,30 @@ func TestLoadConfigRejectsHeartbeatAboveStaleThreshold(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected heartbeat interval at stale threshold to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsInvalidHeartbeatFailureThreshold(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("HEARTBEAT_FAILURE_THRESHOLD", "0")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected zero heartbeat failure threshold to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsHeartbeatFailureBudgetAtStaleThreshold(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("AUDIT_RUN_HEARTBEAT_INTERVAL", "30s")
+	t.Setenv("HEARTBEAT_FAILURE_THRESHOLD", "10")
+	t.Setenv("STALE_RUN_THRESHOLD", "5m")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected heartbeat failure budget at stale threshold to fail configuration loading")
 	}
 }
 
