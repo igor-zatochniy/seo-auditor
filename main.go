@@ -324,8 +324,10 @@ func run() (exitCode int) {
 	}
 
 	streamDone := make(chan urlStreamSummary, 1)
+	streamFinished := make(chan struct{})
 	go func() {
 		defer close(jobs)
+		defer close(streamFinished)
 		streamDone <- streamTargetURLs(
 			workCtx,
 			cfg.URLBatchSize,
@@ -339,8 +341,7 @@ func run() (exitCode int) {
 	}()
 
 	go func() {
-		wg.Wait()
-		close(results)
+		closeResultsAfterProducers(&wg, streamFinished, results)
 	}()
 
 	slog.Info("Починається паралельна обробка URL та збереження результатів")
@@ -469,6 +470,16 @@ func run() (exitCode int) {
 		summary.Saved,
 	)
 	return exitSuccess
+}
+
+func closeResultsAfterProducers(
+	workers *sync.WaitGroup,
+	streamFinished <-chan struct{},
+	results chan Result,
+) {
+	workers.Wait()
+	<-streamFinished
+	close(results)
 }
 
 func guardGracefulShutdown(

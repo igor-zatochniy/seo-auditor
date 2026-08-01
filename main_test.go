@@ -749,6 +749,68 @@ func TestStreamTargetURLsUsesClaimedBatches(t *testing.T) {
 	}
 }
 
+func TestCancellationWaitsForAllResultProducers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	jobs := make(chan AuditTarget)
+	results := make(chan Result)
+	streamDone := make(chan urlStreamSummary, 1)
+	streamFinished := make(chan struct{})
+	batchClaimed := make(chan struct{})
+	claimCalls := 0
+	claimBatch := func(_ context.Context, _ int) ([]targetURLRecord, error) {
+		claimCalls++
+		if claimCalls == 1 {
+			close(batchClaimed)
+			return []targetURLRecord{{ID: 1, URL: "ftp://example.com/unsupported"}}, nil
+		}
+		return nil, nil
+	}
+
+	go func() {
+		defer close(jobs)
+		defer close(streamFinished)
+		streamDone <- streamTargetURLs(
+			ctx,
+			1,
+			Config{Workers: 1, TargetFingerprintKey: []byte(testTargetFingerprintKey)},
+			jobs,
+			results,
+			claimBatch,
+		)
+	}()
+
+	var workers sync.WaitGroup
+	resultsClosed := make(chan struct{})
+	go func() {
+		closeResultsAfterProducers(&workers, streamFinished, results)
+		close(resultsClosed)
+	}()
+
+	<-batchClaimed
+	select {
+	case <-resultsClosed:
+		t.Fatal("results closed while stream producer was still active")
+	default:
+	}
+
+	cancel()
+	streamSummary := <-streamDone
+	if !errors.Is(streamSummary.Error, context.Canceled) {
+		t.Fatalf("stream error = %v, want context cancellation", streamSummary.Error)
+	}
+
+	select {
+	case <-resultsClosed:
+	case <-time.After(time.Second):
+		t.Fatal("results was not closed after all producers finished")
+	}
+	if _, open := <-results; open {
+		t.Fatal("results channel remains open")
+	}
+}
+
 func TestNextTargetClaimLimitUsesWorkersAndFreeQueueCapacity(t *testing.T) {
 	jobs := make(chan AuditTarget, 6)
 	for range 4 {
