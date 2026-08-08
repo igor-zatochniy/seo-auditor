@@ -1,11 +1,20 @@
 package robots
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
 	"unicode/utf8"
+)
+
+const (
+	DefaultMaxPolicyRules            = 1024
+	policyContextCheckInterval       = 64
+	estimatedPolicyBaseBytes   int64 = 512
+	estimatedCompiledRuleBytes int64 = 1024
+	estimatedPatternByteFactor int64 = 16
 )
 
 type rule struct {
@@ -27,7 +36,8 @@ type compiledRule struct {
 
 // Policy is an immutable robots.txt policy safe for concurrent path checks.
 type Policy struct {
-	rules []compiledRule
+	rules                []compiledRule
+	estimatedMemoryBytes int64
 }
 
 func RequestPath(parsed *url.URL) string {
@@ -43,19 +53,39 @@ func RequestPath(parsed *url.URL) string {
 
 // CompilePolicy selects the applicable user-agent group and compiles its rule matchers once.
 func CompilePolicy(content, userAgent string) (*Policy, error) {
-	groups := parseGroups(content)
+	return CompilePolicyContext(context.Background(), content, userAgent, DefaultMaxPolicyRules)
+}
+
+func CompilePolicyContext(ctx context.Context, content, userAgent string, maxRules int) (*Policy, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("robots.txt compile context is required")
+	}
+	if maxRules <= 0 {
+		return nil, fmt.Errorf("robots.txt rule limit must be positive")
+	}
+
+	groups, err := parseGroups(ctx, content, maxRules)
+	if err != nil {
+		return nil, err
+	}
 	group, ok := selectGroup(groups, userAgent)
 	if !ok || len(group.rules) == 0 {
-		return &Policy{}, nil
+		return &Policy{estimatedMemoryBytes: estimatedPolicyBaseBytes}, nil
 	}
 
 	policy := &Policy{
-		rules: make([]compiledRule, 0, len(group.rules)),
+		rules:                make([]compiledRule, 0, len(group.rules)),
+		estimatedMemoryBytes: estimatedPolicyBaseBytes,
 	}
-	for _, sourceRule := range group.rules {
+	for index, sourceRule := range group.rules {
+		if index%policyContextCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("compile robots.txt policy: %w", err)
+			}
+		}
 		matcher, err := compilePattern(sourceRule.pattern)
 		if err != nil {
-			return nil, fmt.Errorf("compile robots.txt rule %q: %w", sourceRule.pattern, err)
+			return nil, fmt.Errorf("compile robots.txt rule %d (%d bytes): %w", index+1, len(sourceRule.pattern), err)
 		}
 		if matcher == nil {
 			continue
@@ -65,9 +95,18 @@ func CompilePolicy(content, userAgent string) (*Policy, error) {
 			specificity: sourceRule.specificity,
 			matcher:     matcher,
 		})
+		policy.estimatedMemoryBytes += estimatedCompiledRuleBytes +
+			int64(len(sourceRule.pattern))*estimatedPatternByteFactor
 	}
 
 	return policy, nil
+}
+
+func (p *Policy) EstimatedMemoryBytes() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.estimatedMemoryBytes
 }
 
 // Allows normalizes and checks a request path against prepared rule matchers.
@@ -108,12 +147,18 @@ func IsPathAllowed(content, userAgent, requestPath string) bool {
 	return err == nil && policy.Allows(requestPath)
 }
 
-func parseGroups(content string) []group {
+func parseGroups(ctx context.Context, content string, maxRules int) ([]group, error) {
 	var groups []group
 	var current group
 	seenRule := false
+	ruleCount := 0
 
-	for _, line := range strings.Split(content, "\n") {
+	for lineIndex, line := range strings.Split(content, "\n") {
+		if lineIndex%policyContextCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("parse robots.txt policy: %w", err)
+			}
+		}
 		line = strings.TrimSpace(stripComment(line))
 		if line == "" {
 			continue
@@ -142,6 +187,10 @@ func parseGroups(content string) []group {
 			if key == "disallow" && value == "" {
 				continue
 			}
+			ruleCount++
+			if ruleCount > maxRules {
+				return nil, fmt.Errorf("robots.txt contains more than %d rules", maxRules)
+			}
 			current.rules = append(current.rules, rule{
 				allow:       key == "allow",
 				pattern:     value,
@@ -154,7 +203,7 @@ func parseGroups(content string) []group {
 		groups = append(groups, current)
 	}
 
-	return groups
+	return groups, nil
 }
 
 func stripComment(line string) string {

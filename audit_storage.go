@@ -213,6 +213,7 @@ func finalizeAuditRun(
 	completion auditRunCompletion,
 	cfg Config,
 ) error {
+	blockingTargetStatuses := targetStatusesBlockingRunCompletion(completion.Status)
 	return withDBMutationRetry(ctx, cfg, "complete_audit_run", func(queryCtx context.Context) error {
 		commandTag, err := dbPool.Exec(
 			queryCtx,
@@ -225,7 +226,13 @@ func finalizeAuditRun(
 			     failed_urls = $5
 			 WHERE id = $1
 			   AND status IN ($6, $2)
-			   AND worker_instance_id = $7`,
+			   AND worker_instance_id = $7
+			   AND NOT EXISTS (
+			       SELECT 1
+			       FROM audit_run_targets AS target
+			       WHERE target.run_id = audit_runs.id
+			         AND target.status = ANY($8::TEXT[])
+			   )`,
 			runID,
 			completion.Status,
 			completion.TotalURLs,
@@ -233,12 +240,13 @@ func finalizeAuditRun(
 			completion.FailedURLs,
 			auditRunStatusRunning,
 			effectiveWorkerInstanceID(cfg),
+			blockingTargetStatuses,
 		)
 		if err != nil {
 			return err
 		}
 		if commandTag.RowsAffected() != 1 {
-			return fmt.Errorf("audit run %s does not exist or has a conflicting terminal status", runID)
+			return fmt.Errorf("audit run %s does not exist, has a conflicting terminal status, or retains blocking target states", runID)
 		}
 		return nil
 	})
@@ -456,16 +464,16 @@ func abandonIncompleteTargetsForRecoveredRuns(
 				     FROM audit_run_targets AS target
 				     JOIN audit_runs AS run ON run.id = target.run_id
 				     WHERE run.status = $2
-				       AND target.status NOT IN ($3, $4, $5, $6)
+				       AND target.status IN ('pending', 'running')
 				     ORDER BY target.run_id, target.target_id
 				     LIMIT $1
 				     FOR UPDATE OF target SKIP LOCKED
 				 )
 				 UPDATE audit_run_targets AS target
-				 SET status = $6,
+				 SET status = $3,
 				     finished_at = COALESCE(target.finished_at, CURRENT_TIMESTAMP),
 				     lease_until = NULL,
-				     last_error = $7
+				     last_error = $4
 				 FROM target_batch
 				 WHERE target.run_id = target_batch.run_id
 				   AND target.target_id = target_batch.target_id
@@ -477,9 +485,6 @@ func abandonIncompleteTargetsForRecoveredRuns(
 				   )`,
 				effectiveURLBatchSize(cfg),
 				auditRunStatusAbandoned,
-				auditTargetStatusCompleted,
-				auditTargetStatusFailed,
-				auditTargetStatusCanceled,
 				auditTargetStatusAbandoned,
 				"Audit run heartbeat expired before a clean shutdown.",
 			)
@@ -524,13 +529,9 @@ func incompleteAbandonedRunTargetsExist(
 			     FROM audit_run_targets AS target
 			     JOIN audit_runs AS run ON run.id = target.run_id
 			     WHERE run.status = $1
-			       AND target.status NOT IN ($2, $3, $4, $5)
+			       AND target.status IN ('pending', 'running')
 			 )`,
 			auditRunStatusAbandoned,
-			auditTargetStatusCompleted,
-			auditTargetStatusFailed,
-			auditTargetStatusCanceled,
-			auditTargetStatusAbandoned,
 		).Scan(&exists)
 	})
 	return exists, err
@@ -794,12 +795,16 @@ func markIncompleteTargetsForRunCompletion(
 ) error {
 	switch runStatus {
 	case auditRunStatusCanceled:
-		for {
-			var updated int64
-			err := withDBMutationRetry(ctx, cfg, "cancel_incomplete_audit_target_batch", func(queryCtx context.Context) error {
-				commandTag, err := dbPool.Exec(
-					queryCtx,
-					`WITH target_batch AS (
+		return drainIncompleteTargetBatches(
+			ctx,
+			cfg,
+			"cancel incomplete audit targets",
+			func() (int64, error) {
+				var updated int64
+				err := withDBMutationRetry(ctx, cfg, "cancel_incomplete_audit_target_batch", func(queryCtx context.Context) error {
+					commandTag, err := dbPool.Exec(
+						queryCtx,
+						`WITH target_batch AS (
 					     SELECT target.target_id
 					     FROM audit_run_targets AS target
 					     WHERE target.run_id = $1
@@ -823,36 +828,48 @@ func markIncompleteTargetsForRunCompletion(
 					         AND run.status = $8
 					         AND run.worker_instance_id = $9
 					   )`,
-					runID,
-					effectiveURLBatchSize(cfg),
-					auditTargetStatusPending,
-					auditTargetStatusRunning,
-					auditTargetStatusAbandoned,
-					auditTargetStatusCanceled,
-					"Audit run was canceled before all targets finished.",
-					auditRunStatusRunning,
-					effectiveWorkerInstanceID(cfg),
-				)
+						runID,
+						effectiveURLBatchSize(cfg),
+						auditTargetStatusPending,
+						auditTargetStatusRunning,
+						auditTargetStatusAbandoned,
+						auditTargetStatusCanceled,
+						"Audit run was canceled before all targets finished.",
+						auditRunStatusRunning,
+						effectiveWorkerInstanceID(cfg),
+					)
+					if err != nil {
+						return err
+					}
+					updated = commandTag.RowsAffected()
+					return nil
+				})
 				if err != nil {
-					return err
+					return 0, err
 				}
-				updated = commandTag.RowsAffected()
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-			if updated == 0 {
-				return nil
-			}
-		}
+				return updated, nil
+			},
+			func() (bool, error) {
+				return auditRunTargetsWithStatusesExist(
+					ctx,
+					dbPool,
+					runID,
+					[]string{auditTargetStatusPending, auditTargetStatusRunning, auditTargetStatusAbandoned},
+					cfg,
+				)
+			},
+		)
 	case auditRunStatusFailed:
-		for {
-			var updated int64
-			err := withDBMutationRetry(ctx, cfg, "release_incomplete_audit_target_batch", func(queryCtx context.Context) error {
-				commandTag, err := dbPool.Exec(
-					queryCtx,
-					`WITH target_batch AS (
+		return drainIncompleteTargetBatches(
+			ctx,
+			cfg,
+			"release incomplete audit targets",
+			func() (int64, error) {
+				var updated int64
+				err := withDBMutationRetry(ctx, cfg, "release_incomplete_audit_target_batch", func(queryCtx context.Context) error {
+					commandTag, err := dbPool.Exec(
+						queryCtx,
+						`WITH target_batch AS (
 					     SELECT target.target_id
 					     FROM audit_run_targets AS target
 					     WHERE target.run_id = $1
@@ -879,28 +896,36 @@ func markIncompleteTargetsForRunCompletion(
 					         AND run.status = $7
 					         AND run.worker_instance_id = $8
 					   )`,
-					runID,
-					effectiveURLBatchSize(cfg),
-					auditTargetStatusRunning,
-					auditTargetStatusAbandoned,
-					auditTargetStatusPending,
-					"Audit run failed before all targets finished; target is available for resume.",
-					auditRunStatusRunning,
-					effectiveWorkerInstanceID(cfg),
-				)
+						runID,
+						effectiveURLBatchSize(cfg),
+						auditTargetStatusRunning,
+						auditTargetStatusAbandoned,
+						auditTargetStatusPending,
+						"Audit run failed before all targets finished; target is available for resume.",
+						auditRunStatusRunning,
+						effectiveWorkerInstanceID(cfg),
+					)
+					if err != nil {
+						return err
+					}
+					updated = commandTag.RowsAffected()
+					return nil
+				})
 				if err != nil {
-					return err
+					return 0, err
 				}
-				updated = commandTag.RowsAffected()
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-			if updated == 0 {
-				return nil
-			}
-		}
+				return updated, nil
+			},
+			func() (bool, error) {
+				return auditRunTargetsWithStatusesExist(
+					ctx,
+					dbPool,
+					runID,
+					[]string{auditTargetStatusRunning, auditTargetStatusAbandoned},
+					cfg,
+				)
+			},
+		)
 	case auditRunStatusCompleted, auditRunStatusCompletedWithErrors:
 		var incompleteTargetExists bool
 		if err := withDBReadRetry(ctx, cfg, "check_incomplete_audit_targets", func(queryCtx context.Context) error {
@@ -927,6 +952,108 @@ func markIncompleteTargetsForRunCompletion(
 		return nil
 	default:
 		return fmt.Errorf("unsupported audit run completion status %q", runStatus)
+	}
+}
+
+func drainIncompleteTargetBatches(
+	ctx context.Context,
+	cfg Config,
+	operation string,
+	updateBatch func() (int64, error),
+	remainingTargetsExist func() (bool, error),
+) error {
+	var contentionSince time.Time
+	for {
+		updated, err := updateBatch()
+		if err != nil {
+			return err
+		}
+		if updated > 0 {
+			contentionSince = time.Time{}
+			continue
+		}
+
+		remaining, err := remainingTargetsExist()
+		if err != nil {
+			return err
+		}
+		if !remaining {
+			return nil
+		}
+		if err := waitForRunCompletionContention(ctx, cfg, operation, &contentionSince); err != nil {
+			return err
+		}
+	}
+}
+
+func auditRunTargetsWithStatusesExist(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	runID string,
+	statuses []string,
+	cfg Config,
+) (bool, error) {
+	var exists bool
+	err := withDBReadRetry(ctx, cfg, "check_incomplete_audit_targets_for_completion", func(queryCtx context.Context) error {
+		return dbPool.QueryRow(
+			queryCtx,
+			`SELECT EXISTS (
+			     SELECT 1
+			     FROM audit_run_targets
+			     WHERE run_id = $1
+			       AND status = ANY($2::TEXT[])
+			 )`,
+			runID,
+			statuses,
+		).Scan(&exists)
+	})
+	return exists, err
+}
+
+func waitForRunCompletionContention(
+	ctx context.Context,
+	cfg Config,
+	operation string,
+	contentionSince *time.Time,
+) error {
+	now := time.Now()
+	if contentionSince.IsZero() {
+		*contentionSince = now
+	}
+	contentionBudget := 2 * effectiveDBWriteTimeout(cfg)
+	elapsed := now.Sub(*contentionSince)
+	if elapsed >= contentionBudget {
+		return fmt.Errorf("%s made no progress for %s due to database lock contention", operation, contentionBudget)
+	}
+
+	delay := cfg.RetryBaseDelay
+	if delay <= 0 {
+		delay = 10 * time.Millisecond
+	}
+	if delay > 100*time.Millisecond {
+		delay = 100 * time.Millisecond
+	}
+	if remaining := contentionBudget - elapsed; delay > remaining {
+		delay = remaining
+	}
+	return waitForRetry(ctx, delay)
+}
+
+func targetStatusesBlockingRunCompletion(runStatus string) []string {
+	switch runStatus {
+	case auditRunStatusCanceled:
+		return []string{auditTargetStatusPending, auditTargetStatusRunning, auditTargetStatusAbandoned}
+	case auditRunStatusFailed:
+		return []string{auditTargetStatusRunning, auditTargetStatusAbandoned}
+	case auditRunStatusCompleted, auditRunStatusCompletedWithErrors:
+		return []string{
+			auditTargetStatusPending,
+			auditTargetStatusRunning,
+			auditTargetStatusCanceled,
+			auditTargetStatusAbandoned,
+		}
+	default:
+		return []string{auditTargetStatusPending, auditTargetStatusRunning, auditTargetStatusAbandoned}
 	}
 }
 

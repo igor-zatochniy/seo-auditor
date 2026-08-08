@@ -21,6 +21,8 @@ const (
 	DefaultRobotsCacheTTL        = time.Hour
 	MaxRobotsCacheTTL            = 24 * time.Hour
 	DefaultRobotsCacheMaxEntries = 64
+	DefaultRobotsCacheMaxWeight  = int64(16 * 1024 * 1024)
+	DefaultRobotsLoadConcurrency = 2
 	MaxRetryAfterDelay           = 5 * time.Minute
 )
 

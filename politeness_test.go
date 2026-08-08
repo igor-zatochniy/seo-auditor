@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,7 +11,112 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	robotsparser "github.com/igor-zatochniy/seo-auditor/internal/robots"
 )
+
+func TestRobotsPolicyCacheEnforcesMemoryBudget(t *testing.T) {
+	compilePolicy := func(t *testing.T, prefix string, ruleCount int) robotsPolicy {
+		t.Helper()
+
+		var content strings.Builder
+		content.WriteString("User-agent: *\n")
+		for index := range ruleCount {
+			_, _ = fmt.Fprintf(&content, "Disallow: /%s/%d\n", prefix, index)
+		}
+		compiled, err := robotsparser.CompilePolicyContext(
+			context.Background(),
+			content.String(),
+			UserAgentStr,
+			DefaultRobotsPolicyMaxRules,
+		)
+		if err != nil {
+			t.Fatalf("compile test robots.txt policy: %v", err)
+		}
+		return robotsPolicy{compiled: compiled}
+	}
+
+	t.Run("rejects excessive rule count fail closed", func(t *testing.T) {
+		var content strings.Builder
+		content.WriteString("User-agent: *\n")
+		for index := 0; index <= DefaultRobotsPolicyMaxRules; index++ {
+			_, _ = fmt.Fprintf(&content, "Disallow: /private/%d\n", index)
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(content.String()))
+		}))
+		defer server.Close()
+
+		cache := newRobotsPolicyCacheWithLimits(time.Hour, 16, 4*1024*1024, 1)
+		allowed, err := cache.isAllowedByRobots(
+			context.Background(),
+			newRobotsHTTPClient(server.Client().Transport),
+			server.URL+"/private/1",
+			time.Second,
+		)
+		if err == nil {
+			t.Fatal("robots.txt with excessive rules unexpectedly compiled")
+		}
+		if allowed {
+			t.Fatal("robots.txt with excessive rules must fail closed")
+		}
+		if !strings.Contains(err.Error(), "more than") {
+			t.Fatalf("unexpected excessive-rule error: %v", err)
+		}
+	})
+
+	t.Run("rejects a policy larger than the cache budget", func(t *testing.T) {
+		policy := compilePolicy(t, "oversized", 64)
+		budget := policy.estimatedMemoryBytes() - 1
+		cache := newRobotsPolicyCacheWithLimits(time.Hour, 16, budget, 1)
+
+		cached, err := cache.policy(context.Background(), "https://oversized.example", func() (robotsPolicy, error) {
+			return policy, nil
+		})
+		if err == nil {
+			t.Fatal("oversized compiled policy unexpectedly entered the cache")
+		}
+		target, parseErr := url.Parse("https://oversized.example/private")
+		if parseErr != nil {
+			t.Fatalf("parse target URL: %v", parseErr)
+		}
+		if cached.allows(target) {
+			t.Fatal("oversized compiled policy must fail closed")
+		}
+	})
+
+	t.Run("evicts least recently used policies by total weight", func(t *testing.T) {
+		first := compilePolicy(t, "first", 64)
+		second := compilePolicy(t, "second", 64)
+		budget := first.estimatedMemoryBytes() + second.estimatedMemoryBytes() - 1
+		cache := newRobotsPolicyCacheWithLimits(time.Hour, 16, budget, 1)
+
+		if _, err := cache.policy(context.Background(), "https://first.example", func() (robotsPolicy, error) {
+			return first, nil
+		}); err != nil {
+			t.Fatalf("cache first policy: %v", err)
+		}
+		if _, err := cache.policy(context.Background(), "https://second.example", func() (robotsPolicy, error) {
+			return second, nil
+		}); err != nil {
+			t.Fatalf("cache second policy: %v", err)
+		}
+
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		if cache.weight > cache.maxWeight {
+			t.Fatalf("cache weight = %d, budget = %d", cache.weight, cache.maxWeight)
+		}
+		if _, exists := cache.entries["https://first.example"]; exists {
+			t.Fatal("least recently used policy was not evicted")
+		}
+		if _, exists := cache.entries["https://second.example"]; !exists {
+			t.Fatal("new policy was unexpectedly evicted")
+		}
+	})
+}
 
 func TestRobotsCacheSharesPolicyAcrossPaths(t *testing.T) {
 	var robotsRequests atomic.Int32

@@ -998,3 +998,63 @@ func TestGracefulShutdownGuardCancelsOperationsAfterTimeout(t *testing.T) {
 		t.Fatal("operation context was not canceled after shutdown timeout")
 	}
 }
+
+func TestCanceledCompletionWaitsForLockedIncompleteTarget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	cfg := Config{
+		DBWriteTimeout: 500 * time.Millisecond,
+		RetryBaseDelay: time.Millisecond,
+	}
+	var mu sync.Mutex
+	locked := true
+	processed := false
+	updateCalls := 0
+	firstAttempt := make(chan struct{})
+	var firstAttemptOnce sync.Once
+
+	go func() {
+		<-firstAttempt
+		mu.Lock()
+		locked = false
+		mu.Unlock()
+	}()
+
+	err := drainIncompleteTargetBatches(
+		ctx,
+		cfg,
+		"test canceled completion",
+		func() (int64, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			updateCalls++
+			if locked {
+				firstAttemptOnce.Do(func() { close(firstAttempt) })
+				return 0, nil
+			}
+			if processed {
+				return 0, nil
+			}
+			processed = true
+			return 1, nil
+		},
+		func() (bool, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return locked || !processed, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("drain incomplete target batches: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !processed {
+		t.Fatal("completion returned before the locked target was processed")
+	}
+	if updateCalls < 2 {
+		t.Fatalf("completion did not retry after lock contention: calls=%d", updateCalls)
+	}
+}

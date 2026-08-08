@@ -13,7 +13,11 @@ import (
 	robotsparser "github.com/igor-zatochniy/seo-auditor/internal/robots"
 )
 
-const robotsErrorCacheTTL = time.Minute
+const (
+	robotsErrorCacheTTL         = time.Minute
+	robotsAllowAllPolicyWeight  = int64(256)
+	DefaultRobotsPolicyMaxRules = robotsparser.DefaultMaxPolicyRules
+)
 
 type robotsPolicy struct {
 	allowAll bool
@@ -27,17 +31,31 @@ func (p robotsPolicy) allows(target *url.URL) bool {
 	return p.compiled != nil && p.compiled.AllowsURL(target)
 }
 
+func (p robotsPolicy) estimatedMemoryBytes() int64 {
+	if p.allowAll {
+		return robotsAllowAllPolicyWeight
+	}
+	if p.compiled == nil {
+		return 0
+	}
+	return p.compiled.EstimatedMemoryBytes()
+}
+
 type robotsPolicyCache struct {
 	mu         sync.Mutex
 	entries    map[string]*robotsCacheRecord
 	ttl        time.Duration
 	errorTTL   time.Duration
 	maxEntries int
+	maxWeight  int64
+	weight     int64
+	loadSlots  chan struct{}
 }
 
 type robotsCacheRecord struct {
 	entry    *robotsCacheEntry
 	lastUsed time.Time
+	weight   int64
 }
 
 type robotsCacheEntry struct {
@@ -50,15 +68,40 @@ type robotsCacheEntry struct {
 }
 
 func newRobotsPolicyCache(ttl time.Duration, maxEntries int) *robotsPolicyCache {
+	return newRobotsPolicyCacheWithLimits(
+		ttl,
+		maxEntries,
+		DefaultRobotsCacheMaxWeight,
+		DefaultRobotsLoadConcurrency,
+	)
+}
+
+func newRobotsPolicyCacheWithLimits(
+	ttl time.Duration,
+	maxEntries int,
+	maxWeight int64,
+	maxConcurrentLoads int,
+) *robotsPolicyCache {
 	errorTTL := robotsErrorCacheTTL
 	if ttl < errorTTL {
 		errorTTL = ttl
+	}
+	if maxEntries <= 0 {
+		maxEntries = 1
+	}
+	if maxWeight <= 0 {
+		maxWeight = 1
+	}
+	if maxConcurrentLoads <= 0 {
+		maxConcurrentLoads = 1
 	}
 	return &robotsPolicyCache{
 		entries:    make(map[string]*robotsCacheRecord),
 		ttl:        ttl,
 		errorTTL:   errorTTL,
 		maxEntries: maxEntries,
+		maxWeight:  maxWeight,
+		loadSlots:  make(chan struct{}, maxConcurrentLoads),
 	}
 }
 
@@ -91,7 +134,8 @@ func (c *robotsPolicyCache) policy(
 	key string,
 	fetch func() (robotsPolicy, error),
 ) (robotsPolicy, error) {
-	entry := c.getEntry(key)
+	record := c.getRecord(key)
+	entry := record.entry
 
 	for {
 		now := time.Now()
@@ -116,7 +160,20 @@ func (c *robotsPolicyCache) policy(
 		entry.ready = make(chan struct{})
 		entry.mu.Unlock()
 
-		policy, fetchErr := fetch()
+		policy, fetchErr := c.fetchWithinLoadBudget(ctx, fetch)
+		policyWeight := int64(0)
+		if fetchErr == nil {
+			policyWeight = policy.estimatedMemoryBytes()
+			if policyWeight > c.maxWeight {
+				fetchErr = fmt.Errorf(
+					"compiled robots.txt policy requires an estimated %d bytes, cache budget is %d bytes",
+					policyWeight,
+					c.maxWeight,
+				)
+				policy = robotsPolicy{}
+				policyWeight = 0
+			}
+		}
 		now = time.Now()
 
 		entry.mu.Lock()
@@ -129,6 +186,7 @@ func (c *robotsPolicyCache) policy(
 			entry.err = fetchErr
 			entry.expiresAt = now.Add(c.errorTTL)
 		}
+		c.setRecordWeight(key, record, policyWeight)
 		entry.loading = false
 		close(entry.ready)
 		entry.mu.Unlock()
@@ -136,14 +194,31 @@ func (c *robotsPolicyCache) policy(
 	}
 }
 
+func (c *robotsPolicyCache) fetchWithinLoadBudget(
+	ctx context.Context,
+	fetch func() (robotsPolicy, error),
+) (robotsPolicy, error) {
+	select {
+	case <-ctx.Done():
+		return robotsPolicy{}, ctx.Err()
+	case c.loadSlots <- struct{}{}:
+	}
+	defer func() { <-c.loadSlots }()
+	return fetch()
+}
+
 func (c *robotsPolicyCache) getEntry(key string) *robotsCacheEntry {
+	return c.getRecord(key).entry
+}
+
+func (c *robotsPolicyCache) getRecord(key string) *robotsCacheRecord {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := time.Now()
 	if record, ok := c.entries[key]; ok {
 		record.lastUsed = now
-		return record.entry
+		return record
 	}
 
 	if len(c.entries) >= c.maxEntries {
@@ -156,13 +231,47 @@ func (c *robotsPolicyCache) getEntry(key string) *robotsCacheEntry {
 			}
 		}
 		if oldestKey != "" {
+			c.weight -= c.entries[oldestKey].weight
 			delete(c.entries, oldestKey)
 		}
 	}
 
 	entry := &robotsCacheEntry{}
-	c.entries[key] = &robotsCacheRecord{entry: entry, lastUsed: now}
-	return entry
+	record := &robotsCacheRecord{entry: entry, lastUsed: now}
+	c.entries[key] = record
+	return record
+}
+
+func (c *robotsPolicyCache) setRecordWeight(key string, record *robotsCacheRecord, weight int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	current, ok := c.entries[key]
+	if !ok || current != record {
+		return
+	}
+	c.weight -= record.weight
+	record.weight = weight
+	c.weight += weight
+
+	for c.weight > c.maxWeight {
+		oldestKey := ""
+		var oldestTime time.Time
+		for candidateKey, candidate := range c.entries {
+			if candidateKey == key || candidate.weight == 0 {
+				continue
+			}
+			if oldestKey == "" || candidate.lastUsed.Before(oldestTime) {
+				oldestKey = candidateKey
+				oldestTime = candidate.lastUsed
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		c.weight -= c.entries[oldestKey].weight
+		delete(c.entries, oldestKey)
+	}
 }
 
 func isAllowedByRobots(ctx context.Context, client *http.Client, targetURL string, timeout time.Duration) (bool, error) {
@@ -226,7 +335,7 @@ func fetchRobotsPolicy(
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("read robots.txt from %s: %w", robotsURL, err)
 	}
-	compiled, err := robotsparser.CompilePolicy(string(body), UserAgentStr)
+	compiled, err := robotsparser.CompilePolicyContext(ctx, string(body), UserAgentStr, DefaultRobotsPolicyMaxRules)
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("compile robots.txt from %s: %w", robotsURL, err)
 	}

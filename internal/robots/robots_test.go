@@ -1,7 +1,10 @@
 package robots
 
 import (
+	"context"
+	"errors"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -89,5 +92,44 @@ func TestCompiledPolicyReusesPreparedMatchers(t *testing.T) {
 	}
 	if policy.rules[0].matcher != firstMatcher {
 		t.Fatal("policy replaced a prepared matcher during path checks")
+	}
+}
+
+func TestCompilePolicyContextRejectsRuleLimit(t *testing.T) {
+	var content strings.Builder
+	content.WriteString("User-agent: *\n")
+	for index := 0; index <= DefaultMaxPolicyRules; index++ {
+		content.WriteString("Disallow: /private\n")
+	}
+
+	policy, err := CompilePolicyContext(
+		context.Background(),
+		content.String(),
+		"ExampleBot/1.0",
+		DefaultMaxPolicyRules,
+	)
+	if err == nil {
+		t.Fatal("CompilePolicyContext() unexpectedly accepted excessive rules")
+	}
+	if policy != nil {
+		t.Fatal("CompilePolicyContext() returned a partial policy after exceeding the rule limit")
+	}
+}
+
+func TestCompilePolicyContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	policy, err := CompilePolicyContext(
+		ctx,
+		"User-agent: *\nDisallow: /private\n",
+		"ExampleBot/1.0",
+		DefaultMaxPolicyRules,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CompilePolicyContext() error = %v, want context.Canceled", err)
+	}
+	if policy != nil {
+		t.Fatal("CompilePolicyContext() returned a policy after cancellation")
 	}
 }

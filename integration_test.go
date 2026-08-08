@@ -1416,6 +1416,139 @@ func TestFailedAuditRunPreservesTargetForResume(t *testing.T) {
 	}
 }
 
+func TestCanceledCompletionWaitsForPostgreSQLTargetLock(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "a401aa1e-b973-48ea-a256-f9713aa15c71"
+	const requestURL = "https://completion-lock.example/page?token=runtime-secret"
+	cfg := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "completion-lock-owner",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		DBFetchTimeout:       time.Second,
+		DBWriteTimeout:       2 * time.Second,
+		URLBatchSize:         10,
+		DBMaxRetries:         0,
+		RetryBaseDelay:       10 * time.Millisecond,
+		RetryMaxDelay:        20 * time.Millisecond,
+	}
+
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if err := createAuditRun(ctx, pool, cfg); err != nil {
+		t.Fatalf("create audit run: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO audit_run_targets (
+		     run_id, target_id, request_url, status, claimed_by, claimed_at, lease_until
+		 ) VALUES ($1, 1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '2 minutes')`,
+		runID,
+		requestURL,
+		auditTargetStatusRunning,
+		cfg.WorkerInstanceID,
+	); err != nil {
+		t.Fatalf("insert running audit target: %v", err)
+	}
+	if err := finalizeAuditRun(ctx, pool, runID, auditRunCompletion{
+		Status:    auditRunStatusCanceled,
+		TotalURLs: 1,
+	}, cfg); err == nil {
+		t.Fatal("terminal update accepted a canceled run with a running target")
+	}
+	var statusBeforeCompletion string
+	if err := pool.QueryRow(ctx, "SELECT status FROM audit_runs WHERE id = $1", runID).Scan(&statusBeforeCompletion); err != nil {
+		t.Fatalf("read audit run after rejected terminal update: %v", err)
+	}
+	if statusBeforeCompletion != auditRunStatusRunning {
+		t.Fatalf("rejected terminal update changed run status to %q", statusBeforeCompletion)
+	}
+
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin target lock transaction: %v", err)
+	}
+	defer func() { _ = lockTx.Rollback(context.Background()) }()
+	var lockedTargetID int64
+	if err := lockTx.QueryRow(
+		ctx,
+		`SELECT target_id
+		 FROM audit_run_targets
+		 WHERE run_id = $1 AND target_id = 1
+		 FOR UPDATE`,
+		runID,
+	).Scan(&lockedTargetID); err != nil {
+		t.Fatalf("lock running audit target: %v", err)
+	}
+
+	completionDone := make(chan error, 1)
+	go func() {
+		completionDone <- completeAuditRun(ctx, pool, runID, auditRunCompletion{
+			Status:    auditRunStatusCanceled,
+			TotalURLs: 1,
+		}, cfg)
+	}()
+
+	select {
+	case completionErr := <-completionDone:
+		t.Fatalf("completion returned while target lock was held: %v", completionErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatalf("release target lock: %v", err)
+	}
+	select {
+	case completionErr := <-completionDone:
+		if completionErr != nil {
+			t.Fatalf("complete canceled audit run after lock release: %v", completionErr)
+		}
+	case <-ctx.Done():
+		t.Fatalf("completion did not finish after target lock release: %v", ctx.Err())
+	}
+
+	var runStatus, targetStatus, retainedURL string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT run.status, target.status, target.request_url
+		 FROM audit_runs AS run
+		 JOIN audit_run_targets AS target ON target.run_id = run.id
+		 WHERE run.id = $1 AND target.target_id = 1`,
+		runID,
+	).Scan(&runStatus, &targetStatus, &retainedURL); err != nil {
+		t.Fatalf("read canceled run state: %v", err)
+	}
+	if runStatus != auditRunStatusCanceled || targetStatus != auditTargetStatusCanceled || retainedURL != "" {
+		t.Fatalf(
+			"canceled completion left inconsistent state: run=%q target=%q request_url=%q",
+			runStatus,
+			targetStatus,
+			retainedURL,
+		)
+	}
+}
+
 func TestCompletedRunRejectsNonTerminalTargets(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
