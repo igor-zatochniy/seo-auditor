@@ -455,14 +455,23 @@ func abandonIncompleteTargetsForRecoveredRuns(
 	dbPool *pgxpool.Pool,
 	cfg Config,
 ) error {
+	highRunID, highTargetID, found, err := staleRecoveryTargetHighWatermark(ctx, dbPool, cfg)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+
 	const batchQueryPrefix = `WITH target_batch AS (
 	     SELECT target.run_id, target.target_id
 	     FROM audit_run_targets AS target
 	     JOIN audit_runs AS run ON run.id = target.run_id
 	     WHERE run.status = $2
-	       AND target.status IN ('pending', 'running')`
+	       AND target.status IN ('pending', 'running')
+	       AND (target.run_id, target.target_id) <= ($5::UUID, $6)`
 	const batchQueryAfterCursor = `
-	       AND (target.run_id, target.target_id) > ($5::UUID, $6)`
+	       AND (target.run_id, target.target_id) > ($7::UUID, $8)`
 	const batchQuerySuffix = `
 	     ORDER BY target.run_id, target.target_id
 	     LIMIT $1
@@ -484,6 +493,7 @@ func abandonIncompleteTargetsForRecoveredRuns(
 	   )
 	 RETURNING target.run_id::TEXT, target.target_id`
 
+	batchSize := effectiveStaleRecoveryTargetBatchSize(cfg)
 	var cursorRunID string
 	var cursorTargetID int64
 	hasCursor := false
@@ -498,10 +508,12 @@ func abandonIncompleteTargetsForRecoveredRuns(
 
 			query := batchQueryPrefix + batchQuerySuffix
 			arguments := []any{
-				effectiveStaleRecoveryTargetBatchSize(cfg),
+				batchSize,
 				auditRunStatusAbandoned,
 				auditTargetStatusAbandoned,
 				"Audit run heartbeat expired before a clean shutdown.",
+				highRunID,
+				highTargetID,
 			}
 			if hasCursor {
 				query = batchQueryPrefix + batchQueryAfterCursor + batchQuerySuffix
@@ -535,10 +547,46 @@ func abandonIncompleteTargetsForRecoveredRuns(
 			cursorRunID = batchLastRunID
 			cursorTargetID = batchLastTargetID
 			hasCursor = true
+			if abandonedTargets < int64(batchSize) ||
+				cursorRunID == highRunID && cursorTargetID >= highTargetID {
+				return nil
+			}
 			continue
 		}
 		return nil
 	}
+}
+
+func staleRecoveryTargetHighWatermark(
+	ctx context.Context,
+	dbPool *pgxpool.Pool,
+	cfg Config,
+) (string, int64, bool, error) {
+	var runID string
+	var targetID int64
+	var found bool
+	err := withDBReadRetry(ctx, cfg, "read_stale_recovery_target_high_watermark", func(queryCtx context.Context) error {
+		scanErr := dbPool.QueryRow(
+			queryCtx,
+			`SELECT target.run_id::TEXT, target.target_id
+			 FROM audit_run_targets AS target
+			 JOIN audit_runs AS run ON run.id = target.run_id
+			 WHERE run.status = $1
+			   AND target.status IN ('pending', 'running')
+			 ORDER BY target.run_id DESC, target.target_id DESC
+			 LIMIT 1`,
+			auditRunStatusAbandoned,
+		).Scan(&runID, &targetID)
+		if scanErr == pgx.ErrNoRows {
+			return nil
+		}
+		if scanErr != nil {
+			return scanErr
+		}
+		found = true
+		return nil
+	})
+	return runID, targetID, found, err
 }
 
 func waitForStaleRecoveryContention(ctx context.Context, cfg Config, contentionSince *time.Time) error {
