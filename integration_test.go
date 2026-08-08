@@ -1059,6 +1059,135 @@ func TestAbandonStaleAuditRunsContinuesInterruptedTargetRecovery(t *testing.T) {
 	}
 }
 
+func TestStaleRecoveryDefersLockedTargetUntilNextPass(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "fda869a8-5992-46c0-bd29-107876622aa8"
+	cfg := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "locked-stale-recovery-worker",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		URLBatchSize:         2,
+		DBFetchTimeout:       time.Second,
+		DBWriteTimeout:       time.Second,
+		StaleRunThreshold:    time.Minute,
+		RetryBaseDelay:       time.Millisecond,
+		RetryMaxDelay:        5 * time.Millisecond,
+	}
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if err := createAuditRun(ctx, pool, cfg); err != nil {
+		t.Fatalf("create locked stale audit run: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO audit_run_targets (run_id, target_id, request_url, status)
+		 VALUES
+		     ($1, 1, 'https://locked-stale.example/1', $2),
+		     ($1, 2, 'https://locked-stale.example/2', $2)`,
+		runID,
+		auditTargetStatusPending,
+	); err != nil {
+		t.Fatalf("insert locked stale targets: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE audit_runs
+		 SET status = $2,
+		     finished_at = CURRENT_TIMESTAMP
+		 WHERE id = $1`,
+		runID,
+		auditRunStatusAbandoned,
+	); err != nil {
+		t.Fatalf("mark run abandoned before target recovery: %v", err)
+	}
+
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin target lock transaction: %v", err)
+	}
+	defer func() { _ = lockTx.Rollback(context.Background()) }()
+	var lockedTargetID int64
+	if err := lockTx.QueryRow(
+		ctx,
+		`SELECT target_id
+		 FROM audit_run_targets
+		 WHERE run_id = $1 AND target_id = 1
+		 FOR UPDATE`,
+		runID,
+	).Scan(&lockedTargetID); err != nil {
+		t.Fatalf("lock stale target: %v", err)
+	}
+
+	if _, err := abandonStaleAuditRuns(ctx, pool, cfg); err != nil {
+		t.Fatalf("recover stale targets while one target is locked: %v", err)
+	}
+
+	var lockedStatus string
+	var recoveredStatus string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT
+		     MAX(status::TEXT) FILTER (WHERE target_id = 1),
+		     MAX(status::TEXT) FILTER (WHERE target_id = 2)
+		 FROM audit_run_targets
+		 WHERE run_id = $1`,
+		runID,
+	).Scan(&lockedStatus, &recoveredStatus); err != nil {
+		t.Fatalf("read partial stale recovery state: %v", err)
+	}
+	if lockedStatus != auditTargetStatusPending || recoveredStatus != auditTargetStatusAbandoned {
+		t.Fatalf(
+			"unexpected partial recovery state: locked=%q recovered=%q",
+			lockedStatus,
+			recoveredStatus,
+		)
+	}
+
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatalf("release stale target lock: %v", err)
+	}
+	if _, err := abandonStaleAuditRuns(ctx, pool, cfg); err != nil {
+		t.Fatalf("recover deferred stale target on the next pass: %v", err)
+	}
+
+	var abandonedTargets int
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*)
+		 FROM audit_run_targets
+		 WHERE run_id = $1 AND status = $2`,
+		runID,
+		auditTargetStatusAbandoned,
+	).Scan(&abandonedTargets); err != nil {
+		t.Fatalf("read completed stale recovery state: %v", err)
+	}
+	if abandonedTargets != 2 {
+		t.Fatalf("unexpected recovered target count: got %d, want 2", abandonedTargets)
+	}
+}
+
 func TestAuditRunClaimsAreExclusiveAndResumable(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {

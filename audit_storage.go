@@ -484,7 +484,6 @@ func abandonIncompleteTargetsForRecoveredRuns(
 	   )
 	 RETURNING target.run_id::TEXT, target.target_id`
 
-	var contentionSince time.Time
 	var cursorRunID string
 	var cursorTargetID int64
 	hasCursor := false
@@ -536,49 +535,10 @@ func abandonIncompleteTargetsForRecoveredRuns(
 			cursorRunID = batchLastRunID
 			cursorTargetID = batchLastTargetID
 			hasCursor = true
-			contentionSince = time.Time{}
 			continue
 		}
-
-		remaining, err := incompleteAbandonedRunTargetsExist(ctx, dbPool, cfg)
-		if err != nil {
-			return err
-		}
-		if !remaining {
-			return nil
-		}
-		if hasCursor {
-			cursorRunID = ""
-			cursorTargetID = 0
-			hasCursor = false
-			continue
-		}
-		if err := waitForStaleRecoveryContention(ctx, cfg, &contentionSince); err != nil {
-			return err
-		}
+		return nil
 	}
-}
-
-func incompleteAbandonedRunTargetsExist(
-	ctx context.Context,
-	dbPool *pgxpool.Pool,
-	cfg Config,
-) (bool, error) {
-	var exists bool
-	err := withDBReadRetry(ctx, cfg, "check_incomplete_abandoned_audit_targets", func(queryCtx context.Context) error {
-		return dbPool.QueryRow(
-			queryCtx,
-			`SELECT EXISTS (
-			     SELECT 1
-			     FROM audit_run_targets AS target
-			     JOIN audit_runs AS run ON run.id = target.run_id
-			     WHERE run.status = $1
-			       AND target.status IN ('pending', 'running')
-			 )`,
-			auditRunStatusAbandoned,
-		).Scan(&exists)
-	})
-	return exists, err
 }
 
 func waitForStaleRecoveryContention(ctx context.Context, cfg Config, contentionSince *time.Time) error {
