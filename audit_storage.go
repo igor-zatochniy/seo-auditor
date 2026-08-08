@@ -24,6 +24,8 @@ const (
 	auditTargetStatusFailed    = "failed"
 	auditTargetStatusCanceled  = "canceled"
 	auditTargetStatusAbandoned = "abandoned"
+
+	maxStaleRecoveryTargetBatchSize = 2_000
 )
 
 type auditRunCompletion struct {
@@ -453,51 +455,87 @@ func abandonIncompleteTargetsForRecoveredRuns(
 	dbPool *pgxpool.Pool,
 	cfg Config,
 ) error {
+	const batchQueryPrefix = `WITH target_batch AS (
+	     SELECT target.run_id, target.target_id
+	     FROM audit_run_targets AS target
+	     JOIN audit_runs AS run ON run.id = target.run_id
+	     WHERE run.status = $2
+	       AND target.status IN ('pending', 'running')`
+	const batchQueryAfterCursor = `
+	       AND (target.run_id, target.target_id) > ($5::UUID, $6)`
+	const batchQuerySuffix = `
+	     ORDER BY target.run_id, target.target_id
+	     LIMIT $1
+	     FOR UPDATE OF target SKIP LOCKED
+	 )
+	 UPDATE audit_run_targets AS target
+	 SET status = $3,
+	     finished_at = COALESCE(target.finished_at, CURRENT_TIMESTAMP),
+	     lease_until = NULL,
+	     last_error = $4
+	 FROM target_batch
+	 WHERE target.run_id = target_batch.run_id
+	   AND target.target_id = target_batch.target_id
+	   AND EXISTS (
+	       SELECT 1
+	       FROM audit_runs AS run
+	       WHERE run.id = target.run_id
+	         AND run.status = $2
+	   )
+	 RETURNING target.run_id::TEXT, target.target_id`
+
 	var contentionSince time.Time
+	var cursorRunID string
+	var cursorTargetID int64
+	hasCursor := false
 	for {
 		var abandonedTargets int64
+		var batchLastRunID string
+		var batchLastTargetID int64
 		err := withDBMutationRetry(ctx, cfg, "abandon_stale_audit_target_batch", func(queryCtx context.Context) error {
-			commandTag, err := dbPool.Exec(
-				queryCtx,
-				`WITH target_batch AS (
-				     SELECT target.run_id, target.target_id
-				     FROM audit_run_targets AS target
-				     JOIN audit_runs AS run ON run.id = target.run_id
-				     WHERE run.status = $2
-				       AND target.status IN ('pending', 'running')
-				     ORDER BY target.run_id, target.target_id
-				     LIMIT $1
-				     FOR UPDATE OF target SKIP LOCKED
-				 )
-				 UPDATE audit_run_targets AS target
-				 SET status = $3,
-				     finished_at = COALESCE(target.finished_at, CURRENT_TIMESTAMP),
-				     lease_until = NULL,
-				     last_error = $4
-				 FROM target_batch
-				 WHERE target.run_id = target_batch.run_id
-				   AND target.target_id = target_batch.target_id
-				   AND EXISTS (
-				       SELECT 1
-				       FROM audit_runs AS run
-				       WHERE run.id = target.run_id
-				         AND run.status = $2
-				   )`,
-				effectiveURLBatchSize(cfg),
+			abandonedTargets = 0
+			batchLastRunID = ""
+			batchLastTargetID = 0
+
+			query := batchQueryPrefix + batchQuerySuffix
+			arguments := []any{
+				effectiveStaleRecoveryTargetBatchSize(cfg),
 				auditRunStatusAbandoned,
 				auditTargetStatusAbandoned,
 				"Audit run heartbeat expired before a clean shutdown.",
-			)
+			}
+			if hasCursor {
+				query = batchQueryPrefix + batchQueryAfterCursor + batchQuerySuffix
+				arguments = append(arguments, cursorRunID, cursorTargetID)
+			}
+
+			rows, err := dbPool.Query(queryCtx, query, arguments...)
 			if err != nil {
 				return err
 			}
-			abandonedTargets = commandTag.RowsAffected()
-			return nil
+			defer rows.Close()
+
+			for rows.Next() {
+				var runID string
+				var targetID int64
+				if err := rows.Scan(&runID, &targetID); err != nil {
+					return err
+				}
+				abandonedTargets++
+				if runID > batchLastRunID || runID == batchLastRunID && targetID > batchLastTargetID {
+					batchLastRunID = runID
+					batchLastTargetID = targetID
+				}
+			}
+			return rows.Err()
 		})
 		if err != nil {
 			return err
 		}
 		if abandonedTargets > 0 {
+			cursorRunID = batchLastRunID
+			cursorTargetID = batchLastTargetID
+			hasCursor = true
 			contentionSince = time.Time{}
 			continue
 		}
@@ -508,6 +546,12 @@ func abandonIncompleteTargetsForRecoveredRuns(
 		}
 		if !remaining {
 			return nil
+		}
+		if hasCursor {
+			cursorRunID = ""
+			cursorTargetID = 0
+			hasCursor = false
+			continue
 		}
 		if err := waitForStaleRecoveryContention(ctx, cfg, &contentionSince); err != nil {
 			return err
@@ -1104,6 +1148,14 @@ func effectiveDBWriteTimeout(cfg Config) time.Duration {
 		return cfg.DBWriteTimeout
 	}
 	return DefaultDBWriteTimeout
+}
+
+func effectiveStaleRecoveryTargetBatchSize(cfg Config) int {
+	batchSize := effectiveURLBatchSize(cfg)
+	if batchSize > maxStaleRecoveryTargetBatchSize {
+		return maxStaleRecoveryTargetBatchSize
+	}
+	return batchSize
 }
 
 func validateAuditRunCompletion(completion auditRunCompletion) error {
