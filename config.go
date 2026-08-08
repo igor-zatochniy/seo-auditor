@@ -27,6 +27,7 @@ const (
 	DefaultDBMigrationTimeout        = appconfig.DefaultDBMigrationTimeout
 	DefaultDBFetchTimeout            = appconfig.DefaultDBFetchTimeout
 	DefaultDBWriteTimeout            = appconfig.DefaultDBWriteTimeout
+	DefaultReportExportTimeout       = appconfig.DefaultReportExportTimeout
 	DefaultAuditRunHeartbeatInterval = appconfig.DefaultAuditRunHeartbeatInterval
 	DefaultHeartbeatFailureThreshold = appconfig.DefaultHeartbeatFailureThreshold
 	MaxHeartbeatFailureThreshold     = appconfig.MaxHeartbeatFailureThreshold

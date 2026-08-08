@@ -23,6 +23,7 @@ Go-сервіс для етичного технічного SEO-аудиту с
 - Строга перевірка MIME type через `mime.ParseMediaType` і потокове декодування HTML charset перед tokenization.
 - Структуровані JSON-логи через `log/slog`.
 - Correlation `run_id` у кожному log record, окремий lifecycle запуску в `audit_runs` і результати в `audit_results`.
+- Автоматичний адаптивний HTML-звіт для поточного `run_id`: bounded streaming із PostgreSQL, вбудовані CSS і гарантоване HTML-екранування зовнішніх даних.
 - Обмежені HTTP/PostgreSQL retry з exponential backoff і full jitter для transient errors.
 - Multi-stage Docker build з мінімальним runtime image.
 - Non-root parser container з numeric UID/GID `10001:10001`.
@@ -44,7 +45,8 @@ Docker Compose
     ├── materializes a stable per-run target set in audit_run_targets
     ├── claims targets atomically with bounded leases
     ├── scans pages concurrently
-    └── реєструє запуск в audit_runs і upserts метрики в audit_results
+    ├── реєструє запуск в audit_runs і upserts метрики в audit_results
+    └── експортує latest та archived HTML reports
 ```
 
 Код розділено за межами відповідальності: `main.go` відповідає за lifecycle, shutdown і orchestration; `internal/config` ізолює runtime configuration та fail-fast validation; `internal/crawler` містить URL normalization, transport-level SSRF guard і HTTP client primitives; `internal/robots` відповідає за robots.txt path matching; `internal/seo` витягує HTML/SEO метрики. PostgreSQL boundary винесено з entrypoint у `audit_storage.go`, `audit_targets.go`, `audit_results.go` і `migrations.go`: ці файли відповідають за lifecycle запусків, snapshot цілей, persistence результатів і schema migrations.
@@ -98,8 +100,16 @@ Docker Compose
 ├── politeness_test.go
 ├── retry.go
 ├── retry_test.go
+├── report.go
+├── report_template.go
+├── report_test.go
+├── report_integration_test.go
+├── reports/
+│   └── .gitkeep
 ├── robots_cache.go
 ├── robots_compat.go
+├── run-audit.cmd
+├── run-audit.ps1
 ├── seo_compat.go
 ├── target_identity.go
 ├── worker.go
@@ -124,6 +134,17 @@ Docker Compose
 Скорочений приклад аудиту одного тестового URL наведено у файлі [`docs/example-result.md`](docs/example-result.md).
 
 ![Audit summary table](docs/audit-summary.svg)
+
+## HTML-звіт
+
+Після запису terminal status parser автоматично читає з PostgreSQL підсумок і результати поточного `run_id`. Експорт створює два файли:
+
+- `reports/latest-report.html`: останній завершений експорт;
+- `reports/seo-audit-YYYY-MM-DD_HH-MM-SS-<run>.html`: архівна копія з датою, часом і коротким ID запуску.
+
+Звіт містить counters запуску та таблицю з URL, HTTP-кодом, статусом, `title`, `description`, `H1`, internal/external links, зображеннями без `alt`, robots signals, word count, duration і помилками. Рядки читаються з PostgreSQL потоково, тому exporter не завантажує весь запуск у пам'ять. HTML генерується стандартним `html/template`: усі значення з БД екрануються, CSS вбудовано у файл, зовнішні scripts, fonts або stylesheets відсутні.
+
+Під час нативного запуску Windows успішно створений `latest-report.html` відкривається системним браузером. Linux parser container не має доступу до Windows desktop, тому `run-audit.cmd` використовує Docker API: запускає batch, копіює обидва звіти з named volume у локальну папку `reports/` і відкриває останній файл. Помилка export, copy або browser launch лише записується в лог чи warning і не змінює exit code аудиту. Згенеровані HTML-файли виключено з Git.
 
 ## Конфігурація
 
@@ -151,6 +172,7 @@ Docker Compose читає локальний `.env`. Для нового сер�
 | `DB_MIGRATION_TIMEOUT` | `30s` | Таймаут application-level PostgreSQL migrations і очікування migration lock. |
 | `DB_FETCH_TIMEOUT` | `5s` | Таймаут читання стабільного набору URL. |
 | `DB_WRITE_TIMEOUT` | `3s` | Таймаут запису одного результату. |
+| `REPORT_EXPORT_TIMEOUT` | `2m` | Загальний budget потокового читання PostgreSQL і атомарного запису HTML-звіту. |
 | `AUDIT_RUN_HEARTBEAT_INTERVAL` | `30s` | Інтервал оновлення `audit_runs.heartbeat_at` для активного parser instance. |
 | `HEARTBEAT_FAILURE_THRESHOLD` | `3` | Кількість послідовних помилок heartbeat, після яких parser зупиняє scheduling і завершує run як `failed`. |
 | `STALE_RUN_THRESHOLD` | `5m` | Running-запуски зі старішим heartbeat автоматично позначаються як `abandoned` на наступному startup. |
@@ -176,6 +198,14 @@ Docker Compose читає локальний `.env`. Для нового сер�
 cp .env.example .env
 docker compose up --build
 ```
+
+Для Windows і Docker daemon у Minikube рекомендований launcher, який також переносить report volume на host та відкриває звіт:
+
+```powershell
+.\run-audit.cmd
+```
+
+Якщо Docker daemon працює через Minikube, запускайте launcher у PowerShell-сесії після `minikube docker-env` (наприклад, відкритій локальним `DockerShell.cmd`). Дочірній процес успадкує налаштований `DOCKER_HOST`. Launcher також перевіряє наявність Docker Compose v2 до створення контейнерів.
 
 Parser є batch-сервісом: він завершується після обробки стабільного набору URL, а PostgreSQL продовжує працювати для перегляду результатів.
 Помилки окремих URL зберігаються у `audit_results` і позначають запуск як `completed_with_errors`, але не перезапускають весь batch. Після `SIGTERM` parser завершує in-flight задачі в межах `SHUTDOWN_TIMEOUT`, фіксує запуск як `canceled` і повертає exit code `130`.
@@ -269,7 +299,7 @@ gitleaks detect --source . --redact
 - `ALLOW_PRIVATE_TARGETS=false` залишайте стандартним значенням для публічного сканування.
 - `Retry-After` для HTTP `429/503` застосовується per host і обмежується максимумом `5m`; для конкретного URL очікування додатково обмежується залишком `HTTP_TOTAL_TIMEOUT` або `ROBOTS_TOTAL_TIMEOUT`.
 - PostgreSQL порт прив'язаний до `127.0.0.1`, тому база не відкривається назовні.
-- `Dockerfile.postgres` уникає host bind mounts; схему застосовує parser через embedded migrations, тому stack працює і з remote Docker daemon у Minikube.
+- `Dockerfile.postgres` та named volumes `pgdata`/`reports` уникають host bind mounts, тому stack працює і з remote Docker daemon у Minikube. Windows launcher копіює report files на host через Docker API.
 - Parser image запускається від numeric non-root user `10001:10001`.
 - Compose resource limits (`cpus`, `mem_limit`) утримують локальний стек у прогнозованих межах.
 - `SHUTDOWN_TIMEOUT` має залишатися меншим за Compose `stop_grace_period`.

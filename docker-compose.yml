@@ -50,6 +50,7 @@ services:
       DB_MIGRATION_TIMEOUT: ${DB_MIGRATION_TIMEOUT:-30s}
       DB_FETCH_TIMEOUT: ${DB_FETCH_TIMEOUT:-5s}
       DB_WRITE_TIMEOUT: ${DB_WRITE_TIMEOUT:-3s}
+      REPORT_EXPORT_TIMEOUT: ${REPORT_EXPORT_TIMEOUT:-2m}
       AUDIT_RUN_HEARTBEAT_INTERVAL: ${AUDIT_RUN_HEARTBEAT_INTERVAL:-30s}
       HEARTBEAT_FAILURE_THRESHOLD: ${HEARTBEAT_FAILURE_THRESHOLD:-3}
       STALE_RUN_THRESHOLD: ${STALE_RUN_THRESHOLD:-5m}
@@ -71,6 +72,8 @@ services:
         condition: service_healthy
     restart: "no"
     read_only: true
+    volumes:
+      - reports:/app/reports
     mem_limit: 256m
     cpus: 0.50
     user: "10001:10001"
@@ -84,6 +87,7 @@ services:
 
 volumes:
   pgdata:
+  reports:
 
 networks:
   seo-network:

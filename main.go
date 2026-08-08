@@ -85,6 +85,8 @@ func run() (exitCode int) {
 		cfg.RobotsTotalTimeout.String(),
 		"db_migration_timeout",
 		cfg.DBMigrationTimeout.String(),
+		"report_export_timeout",
+		cfg.ReportExportTimeout.String(),
 		"audit_run_heartbeat",
 		cfg.AuditRunHeartbeatInterval.String(),
 		"heartbeat_failure_threshold",
@@ -215,6 +217,7 @@ func run() (exitCode int) {
 			slog.Error("Не вдалося очистити збережені URL завершеного запуску", "error", err)
 			exitCode = exitFatal
 		}
+		publishAuditReport(dbPool, cfg)
 	}()
 
 	targetSnapshot, err := captureAuditRunTargets(workCtx, dbPool, cfg)

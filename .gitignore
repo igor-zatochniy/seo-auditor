@@ -17,6 +17,8 @@ credentials/
 bin/
 coverage.out
 *.test
+reports/*.html
+!reports/.gitkeep
 
 # Local deployment overrides
 k8s/**/*.local.yaml

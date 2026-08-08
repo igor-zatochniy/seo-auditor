@@ -17,7 +17,9 @@ FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc
 
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S -g 10001 app && \
-    adduser -S -D -H -u 10001 -G app app
+    adduser -S -D -H -u 10001 -G app app && \
+    mkdir -p /app/reports && \
+    chown 10001:10001 /app/reports
 
 WORKDIR /app
 

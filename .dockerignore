@@ -6,4 +6,5 @@
 bin/
 coverage.out
 *.test
+reports/*.html
 k8s/**/*.local.yaml

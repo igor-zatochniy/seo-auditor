@@ -22,6 +22,7 @@ var configEnvironmentVariables = []string{
 	"DB_MIGRATION_TIMEOUT",
 	"DB_FETCH_TIMEOUT",
 	"DB_WRITE_TIMEOUT",
+	"REPORT_EXPORT_TIMEOUT",
 	"AUDIT_RUN_HEARTBEAT_INTERVAL",
 	"HEARTBEAT_FAILURE_THRESHOLD",
 	"STALE_RUN_THRESHOLD",
@@ -68,6 +69,17 @@ func TestLoadConfigRejectsInvalidExplicitValue(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsInvalidReportExportTimeout(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("REPORT_EXPORT_TIMEOUT", "0s")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid REPORT_EXPORT_TIMEOUT to fail configuration loading")
+	}
+}
+
 func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
@@ -103,6 +115,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.DBConnectTimeout != DefaultDBConnectTimeout || cfg.DBMigrationTimeout != DefaultDBMigrationTimeout {
 		t.Fatalf("unexpected DB timeout defaults: connect=%s migration=%s", cfg.DBConnectTimeout, cfg.DBMigrationTimeout)
+	}
+	if cfg.ReportExportTimeout != DefaultReportExportTimeout {
+		t.Fatalf("unexpected report export timeout: %s", cfg.ReportExportTimeout)
 	}
 	if cfg.AuditRunHeartbeatInterval != DefaultAuditRunHeartbeatInterval || cfg.StaleRunThreshold != DefaultStaleRunThreshold {
 		t.Fatalf("unexpected audit run heartbeat defaults: heartbeat=%s stale=%s", cfg.AuditRunHeartbeatInterval, cfg.StaleRunThreshold)
