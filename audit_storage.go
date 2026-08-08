@@ -530,8 +530,8 @@ func abandonIncompleteTargetsForRecoveredRun(
 		return 0, err
 	}
 
-	const batchQueryPrefix = `WITH target_batch AS (
-	     SELECT target_id
+	const batchQueryPrefix = `WITH target_batch AS MATERIALIZED (
+	     SELECT ctid, target_id
 	     FROM audit_run_targets
 	     WHERE run_id = $1
 	       AND status IN ('pending', 'running')
@@ -549,8 +549,7 @@ func abandonIncompleteTargetsForRecoveredRun(
 	     lease_until = NULL,
 	     last_error = $4
 	 FROM target_batch
-	 WHERE target.run_id = $1
-	   AND target.target_id = target_batch.target_id
+	 WHERE target.ctid = target_batch.ctid
 	   AND EXISTS (
 	       SELECT 1
 	       FROM audit_runs
