@@ -25,7 +25,7 @@ const (
 	auditTargetStatusCanceled  = "canceled"
 	auditTargetStatusAbandoned = "abandoned"
 
-	maxStaleRecoveryTargetBatchSize = 2_000
+	maxStaleRecoveryTargetBatchSize = 500
 )
 
 type auditRunCompletion struct {
@@ -485,15 +485,10 @@ func abandonIncompleteTargetsForRecoveredRuns(
 	 FROM target_batch
 	 WHERE target.run_id = target_batch.run_id
 	   AND target.target_id = target_batch.target_id
-	   AND EXISTS (
-	       SELECT 1
-	       FROM audit_runs AS run
-	       WHERE run.id = target.run_id
-	         AND run.status = $2
-	   )
 	 RETURNING target.run_id::TEXT, target.target_id`
 
 	batchSize := effectiveStaleRecoveryTargetBatchSize(cfg)
+	var totalAbandonedTargets int64
 	var cursorRunID string
 	var cursorTargetID int64
 	hasCursor := false
@@ -541,8 +536,9 @@ func abandonIncompleteTargetsForRecoveredRuns(
 			return rows.Err()
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("after %d recovered targets: %w", totalAbandonedTargets, err)
 		}
+		totalAbandonedTargets += abandonedTargets
 		if abandonedTargets > 0 {
 			cursorRunID = batchLastRunID
 			cursorTargetID = batchLastTargetID
