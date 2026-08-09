@@ -56,6 +56,8 @@ services:
       STALE_RUN_THRESHOLD: ${STALE_RUN_THRESHOLD:-5m}
       TARGET_LEASE_DURATION: ${TARGET_LEASE_DURATION:-2m}
       SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-25s}
+      FINALIZATION_TIMEOUT: ${FINALIZATION_TIMEOUT:-30s}
+      STOP_GRACE_PERIOD: ${STOP_GRACE_PERIOD:-65s}
       URL_BATCH_SIZE: ${URL_BATCH_SIZE:-100}
       MAX_HTML_BODY_BYTES: ${MAX_HTML_BODY_BYTES:-5242880}
       MAX_HTML_TOKEN_BYTES: ${MAX_HTML_TOKEN_BYTES:-524288}
@@ -81,7 +83,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    stop_grace_period: 30s
+    stop_grace_period: ${STOP_GRACE_PERIOD:-65s}
     networks:
       - seo-network
 

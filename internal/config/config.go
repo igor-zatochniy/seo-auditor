@@ -37,6 +37,9 @@ const (
 	DefaultWorkers                   = 3
 	DefaultURLBatchSize              = 100
 	DefaultShutdownTimeout           = 25 * time.Second
+	DefaultFinalizationTimeout       = 30 * time.Second
+	DefaultStopGracePeriod           = 65 * time.Second
+	MinStopGraceMargin               = 5 * time.Second
 	MaxURLBatchSize                  = 10_000
 	MaxWorkers                       = 32
 	DefaultMaxHTMLBodyBytes          = int64(5 * 1024 * 1024)
@@ -80,6 +83,8 @@ type Config struct {
 	StaleRunThreshold         time.Duration
 	TargetLeaseDuration       time.Duration
 	ShutdownTimeout           time.Duration
+	FinalizationTimeout       time.Duration
+	StopGracePeriod           time.Duration
 	URLBatchSize              int
 	MaxHTMLBodyBytes          int64
 	MaxHTMLTokenBytes         int64
@@ -178,6 +183,22 @@ func Load() (Config, error) {
 	shutdownTimeout, err := durationFromEnv("SHUTDOWN_TIMEOUT", DefaultShutdownTimeout)
 	if err != nil {
 		return Config{}, err
+	}
+	finalizationTimeout, err := durationFromEnv("FINALIZATION_TIMEOUT", DefaultFinalizationTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	stopGracePeriod, err := durationFromEnv("STOP_GRACE_PERIOD", DefaultStopGracePeriod)
+	if err != nil {
+		return Config{}, err
+	}
+	if stopGracePeriod < shutdownTimeout ||
+		stopGracePeriod-shutdownTimeout < finalizationTimeout ||
+		stopGracePeriod-shutdownTimeout-finalizationTimeout < MinStopGraceMargin {
+		return Config{}, fmt.Errorf(
+			"STOP_GRACE_PERIOD must cover SHUTDOWN_TIMEOUT plus FINALIZATION_TIMEOUT and at least %s of margin",
+			MinStopGraceMargin,
+		)
 	}
 	urlBatchSize, err := intFromEnv("URL_BATCH_SIZE", DefaultURLBatchSize, 1, MaxURLBatchSize)
 	if err != nil {
@@ -291,6 +312,8 @@ func Load() (Config, error) {
 		StaleRunThreshold:         staleRunThreshold,
 		TargetLeaseDuration:       targetLeaseDuration,
 		ShutdownTimeout:           shutdownTimeout,
+		FinalizationTimeout:       finalizationTimeout,
+		StopGracePeriod:           stopGracePeriod,
 		URLBatchSize:              urlBatchSize,
 		MaxHTMLBodyBytes:          maxHTMLBodyBytes,
 		MaxHTMLTokenBytes:         maxHTMLTokenBytes,

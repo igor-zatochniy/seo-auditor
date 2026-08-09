@@ -97,6 +97,10 @@ func run() (exitCode int) {
 		cfg.TargetLeaseDuration.String(),
 		"shutdown_timeout",
 		cfg.ShutdownTimeout.String(),
+		"finalization_timeout",
+		cfg.FinalizationTimeout.String(),
+		"stop_grace_period",
+		cfg.StopGracePeriod.String(),
 		"per_host_interval",
 		cfg.RateLimitInterval.String(),
 		"max_concurrent_per_host",
@@ -199,8 +203,14 @@ func run() (exitCode int) {
 			}
 		}
 
-		terminalErr := persistAuditRunTerminalState(
+		finalizationCtx, cancelFinalization := context.WithTimeout(
 			context.Background(),
+			cfg.FinalizationTimeout,
+		)
+		defer cancelFinalization()
+
+		terminalErr := persistAuditRunTerminalState(
+			finalizationCtx,
 			dbPool,
 			cfg.RunID,
 			runCompletion,
@@ -213,11 +223,15 @@ func run() (exitCode int) {
 			exitCode = exitFatal
 			return
 		}
-		if _, err := clearAuditRunTargetURLs(context.Background(), dbPool, cfg.RunID, cfg); err != nil {
+		if _, err := clearAuditRunTargetURLs(finalizationCtx, dbPool, cfg.RunID, cfg); err != nil {
 			slog.Error("Не вдалося очистити збережені URL завершеного запуску", "error", err)
 			exitCode = exitFatal
 		}
-		publishAuditReport(dbPool, cfg)
+		if signalCtx.Err() == nil {
+			publishAuditReport(dbPool, cfg)
+		} else {
+			slog.Info("HTML-звіт пропущено під час завершення за системним сигналом")
+		}
 	}()
 
 	targetSnapshot, err := captureAuditRunTargets(workCtx, dbPool, cfg)

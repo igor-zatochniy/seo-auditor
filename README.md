@@ -13,7 +13,7 @@ Go-сервіс для етичного технічного SEO-аудиту с
 - Невалідні URL з snapshot не губляться в логах, а зберігаються як `failed` results з `error_code=invalid_target_url`.
 - Версіоновані PostgreSQL migrations через `goose`: parser застосовує непройдені SQL-кроки на старті, веде `schema_migrations` і бере advisory lock.
 - Таймаути для PostgreSQL, HTTP-запитів, `robots.txt` і запису результатів.
-- Двофазне graceful shutdown: припинення планування, завершення in-flight задач і примусове скасування за timeout.
+- Кероване graceful shutdown: припинення планування, завершення in-flight задач, окремий bounded budget для terminal persistence і пропуск необов'язкового HTML-експорту під час зупинки.
 - Streaming HTML parser без `ReadAll`, DOM і повної копії body text; raw response обмежений до `8 MiB`, один tokenizer token — до `1 MiB`, а `WORKERS` перевіряється проти `96 MiB` parser heap budget.
 - Базовий SSRF hardening: локальні та приватні IP-цілі заблоковані за замовчуванням.
 - Маскування всіх query values URL у логах, помилках і `safe_url`; `target_fingerprint` лишається псевдонімізованим lookup-полем, а унікальність результатів тримається на `UNIQUE(run_id, target_id)`.
@@ -177,7 +177,9 @@ Docker Compose читає локальний `.env`. Для нового сер�
 | `HEARTBEAT_FAILURE_THRESHOLD` | `3` | Кількість послідовних помилок heartbeat, після яких parser зупиняє scheduling і завершує run як `failed`. |
 | `STALE_RUN_THRESHOLD` | `5m` | Running-запуски зі старішим heartbeat автоматично позначаються як `abandoned` на наступному startup. |
 | `TARGET_LEASE_DURATION` | `2m` | Тривалість target claim; heartbeat продовжує leases активного owner. Має перевищувати heartbeat interval і сумарний robots/page request budget. |
-| `SHUTDOWN_TIMEOUT` | `25s` | Максимальний час для завершення in-flight задач і запису результатів після сигналу. |
+| `SHUTDOWN_TIMEOUT` | `25s` | Максимальний час для завершення in-flight задач і запису їх результатів після сигналу. |
+| `FINALIZATION_TIMEOUT` | `30s` | Окремий загальний budget для terminal status і очищення raw target URL після завершення pipeline. |
+| `STOP_GRACE_PERIOD` | `65s` | Спільне значення для app validation і Compose `stop_grace_period`; має залишати щонайменше `5s` понад два shutdown budgets. |
 | `URL_BATCH_SIZE` | `100` | Максимальна кількість URL, що читаються з PostgreSQL за один batch. |
 | `MAX_HTML_BODY_BYTES` | `5242880` | Максимальний розмір HTML-відповіді; абсолютна межа `8 MiB`. |
 | `MAX_HTML_TOKEN_BYTES` | `524288` | Максимальний token buffer потокового HTML parser; абсолютна межа `1 MiB`. |
@@ -208,7 +210,7 @@ docker compose up --build
 Якщо Docker daemon працює через Minikube, запускайте launcher у PowerShell-сесії після `minikube docker-env` (наприклад, відкритій локальним `DockerShell.cmd`). Дочірній процес успадкує налаштований `DOCKER_HOST`. Launcher також перевіряє наявність Docker Compose v2 до створення контейнерів.
 
 Parser є batch-сервісом: він завершується після обробки стабільного набору URL, а PostgreSQL продовжує працювати для перегляду результатів.
-Помилки окремих URL зберігаються у `audit_results` і позначають запуск як `completed_with_errors`, але не перезапускають весь batch. Після `SIGTERM` parser завершує in-flight задачі в межах `SHUTDOWN_TIMEOUT`, фіксує запуск як `canceled` і повертає exit code `130`.
+Помилки окремих URL зберігаються у `audit_results` і позначають запуск як `completed_with_errors`, але не перезапускають весь batch. Після `SIGTERM` parser завершує in-flight задачі в межах `SHUTDOWN_TIMEOUT`, а потім у межах окремого `FINALIZATION_TIMEOUT` фіксує запуск як `canceled` та очищає raw target URL. Необов'язковий HTML-звіт під час завершення за системним сигналом не створюється. Parser повертає exit code `130`.
 Активний запуск регулярно оновлює `audit_runs.heartbeat_at` і `lease_until` виданих targets. Після трьох послідовних помилок heartbeat parser припиняє видачу нових задач, завершує in-flight роботу в межах `SHUTDOWN_TIMEOUT` і фіксує run як `failed`. Heartbeat зупиняється лише після запису terminal status. PostgreSQL атомарно видає лише `pending` або допустимі прострочені targets через `FOR UPDATE SKIP LOCKED`; claim batch обмежений кількістю workers і вільними місцями bounded queue. `attempts` та `started_at` оновлюються лише під час фактичного старту worker.
 Стабільний snapshot читається keyset-порціями в одному `REPEATABLE READ` view, але записується окремими bounded batches. Resume, зміна terminal status і очищення `request_url` також виконуються ідемпотентними порціями: `DB_FETCH_TIMEOUT` та `DB_WRITE_TIMEOUT` обмежують одну SQL-операцію, а не весь набір URL.
 
@@ -302,7 +304,7 @@ gitleaks detect --source . --redact
 - `Dockerfile.postgres` та named volumes `pgdata`/`reports` уникають host bind mounts, тому stack працює і з remote Docker daemon у Minikube. Windows launcher копіює report files на host через Docker API.
 - Parser image запускається від numeric non-root user `10001:10001`.
 - Compose resource limits (`cpus`, `mem_limit`) утримують локальний стек у прогнозованих межах.
-- `SHUTDOWN_TIMEOUT` має залишатися меншим за Compose `stop_grace_period`.
+- `STOP_GRACE_PERIOD` має перевищувати суму `SHUTDOWN_TIMEOUT` і `FINALIZATION_TIMEOUT` щонайменше на `5s`; parser перевіряє цей інваріант до підключення до PostgreSQL, а Compose використовує те саме значення для `stop_grace_period`.
 
 ## Ліцензія
 

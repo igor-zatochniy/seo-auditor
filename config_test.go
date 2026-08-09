@@ -28,6 +28,8 @@ var configEnvironmentVariables = []string{
 	"STALE_RUN_THRESHOLD",
 	"TARGET_LEASE_DURATION",
 	"SHUTDOWN_TIMEOUT",
+	"FINALIZATION_TIMEOUT",
+	"STOP_GRACE_PERIOD",
 	"URL_BATCH_SIZE",
 	"MAX_HTML_BODY_BYTES",
 	"MAX_HTML_TOKEN_BYTES",
@@ -80,6 +82,30 @@ func TestLoadConfigRejectsInvalidReportExportTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsInvalidFinalizationTimeout(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("FINALIZATION_TIMEOUT", "0s")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected invalid FINALIZATION_TIMEOUT to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsInsufficientStopGracePeriod(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("SHUTDOWN_TIMEOUT", "25s")
+	t.Setenv("FINALIZATION_TIMEOUT", "30s")
+	t.Setenv("STOP_GRACE_PERIOD", "59s")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected insufficient STOP_GRACE_PERIOD to fail configuration loading")
+	}
+}
+
 func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
@@ -127,6 +153,16 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.TargetLeaseDuration != DefaultTargetLeaseDuration {
 		t.Fatalf("unexpected target lease duration: %s", cfg.TargetLeaseDuration)
+	}
+	if cfg.ShutdownTimeout != DefaultShutdownTimeout ||
+		cfg.FinalizationTimeout != DefaultFinalizationTimeout ||
+		cfg.StopGracePeriod != DefaultStopGracePeriod {
+		t.Fatalf(
+			"unexpected shutdown defaults: processing=%s finalization=%s stop_grace=%s",
+			cfg.ShutdownTimeout,
+			cfg.FinalizationTimeout,
+			cfg.StopGracePeriod,
+		)
 	}
 	if cfg.WorkerInstanceID == "" {
 		t.Fatal("expected generated worker instance ID")

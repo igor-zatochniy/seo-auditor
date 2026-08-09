@@ -6,6 +6,9 @@ const (
 	DefaultWorkers                   = appconfig.DefaultWorkers
 	DefaultURLBatchSize              = appconfig.DefaultURLBatchSize
 	DefaultShutdownTimeout           = appconfig.DefaultShutdownTimeout
+	DefaultFinalizationTimeout       = appconfig.DefaultFinalizationTimeout
+	DefaultStopGracePeriod           = appconfig.DefaultStopGracePeriod
+	MinStopGraceMargin               = appconfig.MinStopGraceMargin
 	MaxURLBatchSize                  = appconfig.MaxURLBatchSize
 	MaxWorkers                       = appconfig.MaxWorkers
 	DefaultMaxHTMLBodyBytes          = appconfig.DefaultMaxHTMLBodyBytes
