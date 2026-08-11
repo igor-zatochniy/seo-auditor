@@ -216,7 +216,9 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 
 type pageParser struct {
 	data              *Data
-	baseURL           *url.URL
+	targetURL         *url.URL
+	documentBaseURL   *url.URL
+	documentBaseSet   bool
 	title             boundedTextCollector
 	firstH1           boundedTextCollector
 	titleSeen         bool
@@ -230,17 +232,20 @@ type pageParser struct {
 	canonicalSeen     bool
 	metaRobotsSeen    bool
 	headDepth         int
+	ignoredTextDepth  int
+	relativeLinks     int
 	subHeaderCounts   [7]int
 	bodyWordCounter   wordCounter
 }
 
 func newPageParser(data *Data, targetURL string) *pageParser {
-	baseURL, _ := url.Parse(targetURL)
+	parsedTarget, _ := url.Parse(targetURL)
 	return &pageParser{
-		data:    data,
-		baseURL: baseURL,
-		title:   newBoundedTextCollector(StorageTitleMaxRunes),
-		firstH1: newBoundedTextCollector(StorageH1MaxRunes),
+		data:            data,
+		targetURL:       parsedTarget,
+		documentBaseURL: parsedTarget,
+		title:           newBoundedTextCollector(StorageTitleMaxRunes),
+		firstH1:         newBoundedTextCollector(StorageH1MaxRunes),
 	}
 }
 
@@ -270,6 +275,10 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 		p.subHeaderCounts[6]++
 	case bytes.Equal(name, []byte("meta")):
 		p.handleMeta(attributes)
+	case bytes.Equal(name, []byte("base")):
+		if attributes.hasHref {
+			p.setDocumentBase(attributes.href)
+		}
 	case bytes.Equal(name, []byte("link")):
 		if !p.canonicalSeen && attributes.hasRel && attributes.hasHref &&
 			bytes.EqualFold(bytes.TrimSpace(attributes.rel), []byte("canonical")) {
@@ -278,10 +287,13 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 				boundedBytes(attributes.href, StorageURLMaxRunes)
 		}
 	case bytes.Equal(name, []byte("script")):
+		p.ignoredTextDepth++
 		if attributes.hasType &&
 			bytes.EqualFold(bytes.TrimSpace(attributes.typeValue), []byte("application/ld+json")) {
 			p.data.HasJsonLd = true
 		}
+	case bytes.Equal(name, []byte("style")):
+		p.ignoredTextDepth++
 	case bytes.Equal(name, []byte("a")):
 		if attributes.hasHref {
 			p.countLink(attributes.href)
@@ -292,6 +304,27 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 			p.data.ImagesMissingAlt++
 		}
 	}
+}
+
+func (p *pageParser) setDocumentBase(rawHref []byte) {
+	if p.documentBaseSet || p.targetURL == nil {
+		return
+	}
+
+	parsedBase, err := url.Parse(strings.TrimSpace(string(rawHref)))
+	if err != nil {
+		return
+	}
+	resolvedBase := p.targetURL.ResolveReference(parsedBase)
+	if resolvedBase.Host == "" ||
+		!strings.EqualFold(resolvedBase.Scheme, "http") && !strings.EqualFold(resolvedBase.Scheme, "https") {
+		return
+	}
+
+	baseCopy := *resolvedBase
+	baseCopy.Fragment = ""
+	p.documentBaseURL = &baseCopy
+	p.documentBaseSet = true
 }
 
 func (p *pageParser) handleMeta(attributes tagAttributes) {
@@ -341,10 +374,7 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 
 func (p *pageParser) countLink(rawHref []byte) {
 	href := strings.TrimSpace(string(rawHref))
-	if href == "" || strings.HasPrefix(href, "#") ||
-		hasASCIIPrefixFold(href, "javascript:") ||
-		hasASCIIPrefixFold(href, "mailto:") ||
-		hasASCIIPrefixFold(href, "tel:") {
+	if href == "" || strings.HasPrefix(href, "#") {
 		return
 	}
 
@@ -352,15 +382,21 @@ func (p *pageParser) countLink(rawHref []byte) {
 	if err != nil {
 		return
 	}
-	if parsedLink.Host == "" || p.baseURL != nil && strings.EqualFold(parsedLink.Host, p.baseURL.Host) {
+	scheme := strings.ToLower(parsedLink.Scheme)
+	if scheme != "" && scheme != "http" && scheme != "https" {
+		return
+	}
+	if parsedLink.Host == "" {
+		if scheme == "" {
+			p.relativeLinks++
+		}
+		return
+	}
+	if p.targetURL != nil && strings.EqualFold(parsedLink.Host, p.targetURL.Host) {
 		p.data.InternalLinksCount++
 		return
 	}
 	p.data.ExternalLinksCount++
-}
-
-func hasASCIIPrefixFold(value, prefix string) bool {
-	return len(value) >= len(prefix) && strings.EqualFold(value[:len(prefix)], prefix)
 }
 
 func (p *pageParser) handleText(text []byte) {
@@ -370,7 +406,7 @@ func (p *pageParser) handleText(text []byte) {
 	if p.collectFirstH1 {
 		p.firstH1.Write(text)
 	}
-	if p.headDepth == 0 && !p.collectTitle {
+	if p.headDepth == 0 && !p.collectTitle && p.ignoredTextDepth == 0 {
 		p.bodyWordCounter.Write(text)
 	}
 }
@@ -384,6 +420,10 @@ func (p *pageParser) handleEndTag(name []byte) {
 	case bytes.Equal(name, []byte("head")):
 		if p.headDepth > 0 {
 			p.headDepth--
+		}
+	case bytes.Equal(name, []byte("script")), bytes.Equal(name, []byte("style")):
+		if p.ignoredTextDepth > 0 {
+			p.ignoredTextDepth--
 		}
 	}
 }
@@ -431,8 +471,20 @@ func (p *pageParser) finalize() {
 		p.data.H2ToH6Status = "No sub-headers (H2-H6)"
 	}
 
+	if p.relativeLinks > 0 {
+		if p.targetURL != nil && p.documentBaseURL != nil &&
+			strings.EqualFold(p.documentBaseURL.Host, p.targetURL.Host) {
+			p.data.InternalLinksCount += p.relativeLinks
+		} else {
+			p.data.ExternalLinksCount += p.relativeLinks
+		}
+	}
 	p.data.LinksCount = p.data.InternalLinksCount + p.data.ExternalLinksCount
-	p.data.IsSelfCanonical = IsSelfCanonical(p.data.CanonicalURL, p.data.URL)
+	p.data.IsSelfCanonical = isSelfCanonicalWithBase(
+		p.data.CanonicalURL,
+		p.targetURL,
+		p.documentBaseURL,
+	)
 	p.data.WordCount = p.bodyWordCounter.Count()
 }
 
@@ -582,13 +634,23 @@ func IsSelfCanonical(canonicalURL, targetURL string) bool {
 	if err != nil {
 		return false
 	}
+	return isSelfCanonicalWithBase(canonicalURL, targetParsed, targetParsed)
+}
 
+func isSelfCanonicalWithBase(canonicalURL string, targetParsed, baseURL *url.URL) bool {
+	if strings.TrimSpace(canonicalURL) == "" || targetParsed == nil || baseURL == nil {
+		return false
+	}
 	canonicalParsed, err := url.Parse(canonicalURL)
 	if err != nil {
 		return false
 	}
 	if !canonicalParsed.IsAbs() {
-		canonicalParsed = targetParsed.ResolveReference(canonicalParsed)
+		canonicalParsed = baseURL.ResolveReference(canonicalParsed)
+	}
+	if canonicalParsed.Host == "" ||
+		!strings.EqualFold(canonicalParsed.Scheme, "http") && !strings.EqualFold(canonicalParsed.Scheme, "https") {
+		return false
 	}
 
 	normalize := func(parsed *url.URL) string {
@@ -596,7 +658,10 @@ func IsSelfCanonical(canonicalURL, targetURL string) bool {
 		copyValue.Scheme = strings.ToLower(copyValue.Scheme)
 		copyValue.Host = strings.ToLower(copyValue.Host)
 		copyValue.Fragment = ""
-		return strings.TrimRight(copyValue.String(), "/")
+		if copyValue.Path == "" {
+			copyValue.Path = "/"
+		}
+		return copyValue.String()
 	}
 
 	return normalize(canonicalParsed) == normalize(targetParsed)

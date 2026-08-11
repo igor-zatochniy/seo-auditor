@@ -69,6 +69,19 @@ Allow: /foo/bar
 	}
 }
 
+func TestPartialProductTokenFallsBackToWildcardGroup(t *testing.T) {
+	content := `
+User-agent: SEOParser
+Allow: /
+
+User-agent: *
+Disallow: /
+`
+	if IsPathAllowed(content, "Go-SEOParser-Bot/1.0", "/page") {
+		t.Fatal("partial product token unexpectedly matched a specific robots.txt group")
+	}
+}
+
 func TestCompiledPolicyReusesPreparedMatchers(t *testing.T) {
 	policy, err := CompilePolicy(
 		"User-agent: *\nDisallow: /private/*\nAllow: /private/public$\n",

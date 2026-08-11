@@ -221,6 +221,86 @@ func TestParsePageStreamsTagDenseHTML(t *testing.T) {
 	}
 }
 
+func TestParsePageExcludesScriptAndStyleFromWordCount(t *testing.T) {
+	body := `<html><body>
+<p>one two three</p>
+<script type="application/ld+json">fake script words must not count</script>
+<style>.message { content: "fake style words"; }</style>
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.WordCount != 3 {
+		t.Fatalf("word count = %d, want 3", data.WordCount)
+	}
+	if !data.HasJsonLd {
+		t.Fatal("JSON-LD marker was not detected")
+	}
+}
+
+func TestParsePageUsesBaseHrefForCanonicalAndRelativeLinks(t *testing.T) {
+	body := `<html><head>
+<link rel="canonical" href="docs/page">
+<base href="https://example.com/">
+</head><body>
+<a href="relative">Relative link</a>
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/docs/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if !data.IsSelfCanonical {
+		t.Fatal("relative canonical was not resolved against document base URL")
+	}
+	if data.InternalLinksCount != 1 || data.ExternalLinksCount != 0 {
+		t.Fatalf("link counts = internal %d external %d, want 1 and 0", data.InternalLinksCount, data.ExternalLinksCount)
+	}
+}
+
+func TestParsePageUsesFirstCrossHostBaseAndSkipsNonWebSchemes(t *testing.T) {
+	body := `<html><head>
+<base href="https://assets.example.net/root/">
+<base href="https://example.com/">
+</head><body>
+<a href="relative">Cross-host relative</a>
+<a href="//example.com/network-path">Same-host network path</a>
+<a href="data:text/plain,hello">Data</a>
+<a href="sms:+380000000000">SMS</a>
+<a href="custom-protocol:value">Custom</a>
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.InternalLinksCount != 1 || data.ExternalLinksCount != 1 || data.LinksCount != 2 {
+		t.Fatalf(
+			"link counts = internal %d external %d total %d, want 1, 1, 2",
+			data.InternalLinksCount,
+			data.ExternalLinksCount,
+			data.LinksCount,
+		)
+	}
+}
+
 func TestParsePagePreservesNonOKStatus(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusNotFound,
@@ -314,6 +394,8 @@ func TestIsSelfCanonical(t *testing.T) {
 	}{
 		{name: "missing canonical is not self", canonical: "", target: "https://example.com/page", want: false},
 		{name: "relative canonical", canonical: "/page", target: "https://example.com/page", want: true},
+		{name: "non-root trailing slash differs", canonical: "/page/", target: "https://example.com/page", want: false},
+		{name: "root slash is equivalent", canonical: "https://example.com/", target: "https://example.com", want: true},
 		{name: "different host", canonical: "https://other.test/page", target: "https://example.com/page", want: false},
 		{name: "different path", canonical: "/other", target: "https://example.com/page", want: false},
 	}

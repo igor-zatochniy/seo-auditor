@@ -252,9 +252,8 @@ func agentMatches(agent, userAgent string) bool {
 		return true
 	}
 
-	ua := strings.ToLower(userAgent)
-	product := strings.SplitN(ua, "/", 2)[0]
-	return strings.Contains(ua, agent) || strings.Contains(product, agent)
+	product := strings.TrimSpace(strings.SplitN(userAgent, "/", 2)[0])
+	return strings.EqualFold(agent, product)
 }
 
 func ruleSpecificity(pattern string) int {

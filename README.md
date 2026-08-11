@@ -122,12 +122,12 @@ Docker Compose
 - Truncation telemetry для bounded `VARCHAR` полів: `*_truncated` та `*_original_length`.
 - `title`, `meta description` та автоматичний quality status.
 - `H1` count і структура `H2-H6`.
-- Canonical URL і self-canonical check.
+- Canonical URL і self-canonical check з урахуванням першого придатного web `<base href>` та значущого trailing slash поза коренем.
 - `meta robots`, `X-Robots-Tag` та окремий `robots_outcome`.
 - Open Graph, Twitter Card, JSON-LD і viewport.
-- Internal/external links.
+- Internal/external HTTP(S) links з урахуванням document base; explicit non-web schemes не потрапляють у метрику.
 - Image alt audit.
-- Word count і duration.
+- Word count видимого текстового контенту без вмісту `<script>`/`<style>` і duration.
 
 ## Приклад результату
 
