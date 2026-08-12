@@ -12,6 +12,7 @@ type SEOData = seo.Data
 const (
 	storageURLMaxRunes         = seo.StorageURLMaxRunes
 	storageTitleMaxRunes       = seo.StorageTitleMaxRunes
+	storageDescriptionMaxRunes = seo.StorageDescriptionMaxRunes
 	storageH1MaxRunes          = seo.StorageH1MaxRunes
 	storageOGTitleMaxRunes     = seo.StorageTitleMaxRunes
 	storageTwitterCardMaxRunes = seo.StorageTwitterCardMaxRunes
@@ -24,6 +25,10 @@ func httpStatus(code int) *int {
 
 func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenBytes int64) (SEOData, error) {
 	return seo.ParsePage(resp, targetURL, maxBodyBytes, maxTokenBytes)
+}
+
+func robotsHeaderDirectives(header http.Header) (string, bool, int) {
+	return seo.RobotsHeaderDirectives(header)
 }
 
 func validateHTMLContentType(raw string) error {

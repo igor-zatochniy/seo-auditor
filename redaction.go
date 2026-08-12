@@ -140,12 +140,14 @@ func sanitizeSEODataForStorage(data SEOData) SEOData {
 	data.Title, data.TitleTruncated, data.TitleOriginalLength = limitStorageStringPreservingMetadata(
 		data.Title, storageTitleMaxRunes, data.TitleTruncated, data.TitleOriginalLength,
 	)
+	data.Description, _, _ = limitStorageString(data.Description, storageDescriptionMaxRunes)
 	data.H1, data.H1Truncated, data.H1OriginalLength = limitStorageStringPreservingMetadata(
 		data.H1, storageH1MaxRunes, data.H1Truncated, data.H1OriginalLength,
 	)
 	data.OGTitle, data.OGTitleTruncated, data.OGTitleOriginalLength = limitStorageStringPreservingMetadata(
 		data.OGTitle, storageTitleMaxRunes, data.OGTitleTruncated, data.OGTitleOriginalLength,
 	)
+	data.OGDescription, _, _ = limitStorageString(data.OGDescription, storageDescriptionMaxRunes)
 	data.OGImage, data.OGImageTruncated, data.OGImageOriginalLength = limitStorageStringPreservingMetadata(
 		data.OGImage, storageURLMaxRunes, data.OGImageTruncated, data.OGImageOriginalLength,
 	)

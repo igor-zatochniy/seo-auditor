@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +104,8 @@ func worker(
 			results <- result
 			continue
 		}
+		baseData.XRobotsTag, baseData.XRobotsTagTruncated, baseData.XRobotsTagOriginalLength =
+			robotsHeaderDirectives(resp.Header)
 
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			redirectURL := resp.Header.Get("Location")
@@ -122,38 +123,27 @@ func worker(
 				resp.StatusCode,
 			)
 
-			results <- Result{Target: target, Data: SEOData{
-				URL:           target.RequestURL,
-				StatusCode:    httpStatus(resp.StatusCode),
-				ScanStatus:    scanStatusRedirect,
-				IsRedirect:    true,
-				RedirectURL:   redirectURL,
-				RobotsAllowed: true,
-				RobotsOutcome: robotsOutcomeAllowed,
-				Duration:      time.Since(start),
-			}}
+			baseData.StatusCode = httpStatus(resp.StatusCode)
+			baseData.ScanStatus = scanStatusRedirect
+			baseData.IsRedirect = true
+			baseData.RedirectURL = redirectURL
+			baseData.Duration = time.Since(start)
+			results <- Result{Target: target, Data: baseData}
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			data := SEOData{
-				URL:           target.RequestURL,
-				StatusCode:    httpStatus(resp.StatusCode),
-				ScanStatus:    scanStatusCompleted,
-				XRobotsTag:    strings.TrimSpace(resp.Header.Get("X-Robots-Tag")),
-				RobotsAllowed: true,
-				RobotsOutcome: robotsOutcomeAllowed,
-				Duration:      time.Since(start),
-			}
+			baseData.StatusCode = httpStatus(resp.StatusCode)
+			baseData.ScanStatus = scanStatusCompleted
+			baseData.Duration = time.Since(start)
 			resp.Body.Close()
 			reqCancel()
 			workerLogger.Info("Збережено HTTP-статус без HTML-парсингу", "target_id", target.TargetID, "url", target.SafeURL, "status", resp.StatusCode)
-			results <- Result{Target: target, Data: data}
+			results <- Result{Target: target, Data: baseData}
 			continue
 		}
 
 		baseData.StatusCode = httpStatus(resp.StatusCode)
-		baseData.XRobotsTag = strings.TrimSpace(resp.Header.Get("X-Robots-Tag"))
 		contentType := resp.Header.Get("Content-Type")
 		if contentType == "" {
 			resp.Body.Close()

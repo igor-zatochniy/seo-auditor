@@ -25,6 +25,7 @@ const (
 
 	StorageURLMaxRunes         = 2048
 	StorageTitleMaxRunes       = 500
+	StorageDescriptionMaxRunes = 4000
 	StorageH1MaxRunes          = 1000
 	StorageTwitterCardMaxRunes = 100
 	StorageRobotsTagMaxRunes   = 200
@@ -97,7 +98,7 @@ func ParsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenByte
 		StatusCode: HTTPStatus(resp.StatusCode),
 	}
 	data.XRobotsTag, data.XRobotsTagTruncated, data.XRobotsTagOriginalLength =
-		boundedString(strings.TrimSpace(resp.Header.Get("X-Robots-Tag")), StorageRobotsTagMaxRunes)
+		RobotsHeaderDirectives(resp.Header)
 
 	if resp.StatusCode != http.StatusOK {
 		return data, nil
@@ -230,7 +231,7 @@ type pageParser struct {
 	ogImageSeen       bool
 	twitterCardSeen   bool
 	canonicalSeen     bool
-	metaRobotsSeen    bool
+	metaRobots        robotsDirectiveSet
 	headDepth         int
 	ignoredTextDepth  int
 	relativeLinks     int
@@ -281,7 +282,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 		}
 	case bytes.Equal(name, []byte("link")):
 		if !p.canonicalSeen && attributes.hasRel && attributes.hasHref &&
-			bytes.EqualFold(bytes.TrimSpace(attributes.rel), []byte("canonical")) {
+			hasTokenFold(attributes.rel, []byte("canonical")) {
 			p.canonicalSeen = true
 			p.data.CanonicalURL, p.data.CanonicalURLTruncated, p.data.CanonicalURLOriginalLength =
 				boundedBytes(attributes.href, StorageURLMaxRunes)
@@ -334,7 +335,7 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 		case bytes.EqualFold(name, []byte("description")) && !p.descriptionSeen:
 			p.descriptionSeen = true
 			if attributes.hasContent {
-				p.data.Description = strings.TrimSpace(string(attributes.content))
+				p.data.Description, _, _ = boundedBytes(attributes.content, StorageDescriptionMaxRunes)
 			}
 		case bytes.EqualFold(name, []byte("twitter:card")) && !p.twitterCardSeen:
 			p.twitterCardSeen = true
@@ -342,11 +343,9 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 				p.data.TwitterCard, p.data.TwitterCardTruncated, p.data.TwitterCardOriginalLength =
 					boundedBytes(attributes.content, StorageTwitterCardMaxRunes)
 			}
-		case bytes.EqualFold(name, []byte("robots")) && !p.metaRobotsSeen:
-			p.metaRobotsSeen = true
+		case bytes.EqualFold(name, []byte("robots")):
 			if attributes.hasContent {
-				p.data.MetaRobots, p.data.MetaRobotsTruncated, p.data.MetaRobotsOriginalLength =
-					boundedBytes(attributes.content, StorageRobotsTagMaxRunes)
+				p.metaRobots.Add(string(attributes.content))
 			}
 		case bytes.EqualFold(name, []byte("viewport")):
 			p.data.HasViewport = true
@@ -364,7 +363,7 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 			boundedBytes(attributes.content, StorageTitleMaxRunes)
 	case bytes.EqualFold(property, []byte("og:description")) && !p.ogDescriptionSeen:
 		p.ogDescriptionSeen = true
-		p.data.OGDescription = strings.TrimSpace(string(attributes.content))
+		p.data.OGDescription, _, _ = boundedBytes(attributes.content, StorageDescriptionMaxRunes)
 	case bytes.EqualFold(property, []byte("og:image")) && !p.ogImageSeen:
 		p.ogImageSeen = true
 		p.data.OGImage, p.data.OGImageTruncated, p.data.OGImageOriginalLength =
@@ -429,6 +428,8 @@ func (p *pageParser) handleEndTag(name []byte) {
 }
 
 func (p *pageParser) finalize() {
+	p.data.MetaRobots, p.data.MetaRobotsTruncated, p.data.MetaRobotsOriginalLength =
+		boundedString(p.metaRobots.String(), StorageRobotsTagMaxRunes)
 	p.data.Title, p.data.TitleTruncated, p.data.TitleOriginalLength = p.title.Result()
 	titleLen := p.title.RuneCount()
 	if titleLen == 0 {
@@ -486,6 +487,74 @@ func (p *pageParser) finalize() {
 		p.documentBaseURL,
 	)
 	p.data.WordCount = p.bodyWordCounter.Count()
+}
+
+func hasTokenFold(value, expected []byte) bool {
+	for _, token := range bytes.Fields(value) {
+		if bytes.EqualFold(token, expected) {
+			return true
+		}
+	}
+	return false
+}
+
+type robotsDirectiveSet struct {
+	values []string
+	seen   map[string]struct{}
+}
+
+func (s *robotsDirectiveSet) Add(raw string) {
+	for _, candidate := range strings.Split(raw, ",") {
+		directive := strings.TrimSpace(candidate)
+		if directive == "" {
+			continue
+		}
+		if s.seen == nil {
+			s.seen = make(map[string]struct{})
+		}
+		key := strings.ToLower(directive)
+		if _, exists := s.seen[key]; exists {
+			continue
+		}
+		s.seen[key] = struct{}{}
+		s.values = append(s.values, directive)
+	}
+}
+
+func (s *robotsDirectiveSet) String() string {
+	ordered := make([]string, 0, len(s.values))
+	for priority := 0; priority <= 2; priority++ {
+		for _, directive := range s.values {
+			if robotsDirectivePriority(directive) == priority {
+				ordered = append(ordered, directive)
+			}
+		}
+	}
+	return strings.Join(ordered, ", ")
+}
+
+func robotsDirectivePriority(directive string) int {
+	normalized := strings.ToLower(strings.TrimSpace(directive))
+	value := normalized
+	if separator := strings.LastIndex(normalized, ":"); separator >= 0 {
+		value = strings.TrimSpace(normalized[separator+1:])
+	}
+	switch value {
+	case "noindex", "none":
+		return 0
+	case "nofollow":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func RobotsHeaderDirectives(header http.Header) (string, bool, int) {
+	var directives robotsDirectiveSet
+	for _, value := range header.Values("X-Robots-Tag") {
+		directives.Add(value)
+	}
+	return boundedString(directives.String(), StorageRobotsTagMaxRunes)
 }
 
 type boundedTextCollector struct {

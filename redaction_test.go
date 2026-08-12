@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRedactURLMasksSensitiveQueryValues(t *testing.T) {
@@ -74,5 +75,20 @@ func TestSanitizeSEODataForStorageRedactsURLFieldsAndTruncatesError(t *testing.T
 
 	if len(got.ErrorMessage) > maxStoredErrorLength+3 {
 		t.Fatalf("error_message was not truncated: length=%d", len(got.ErrorMessage))
+	}
+}
+
+func TestSanitizeSEODataForStorageBoundsDescriptions(t *testing.T) {
+	data := SEOData{
+		Description:   strings.Repeat("Д", storageDescriptionMaxRunes+100),
+		OGDescription: strings.Repeat("G", storageDescriptionMaxRunes+100),
+	}
+
+	got := sanitizeSEODataForStorage(data)
+	if length := utf8.RuneCountInString(got.Description); length != storageDescriptionMaxRunes {
+		t.Fatalf("description length = %d, want %d", length, storageDescriptionMaxRunes)
+	}
+	if length := utf8.RuneCountInString(got.OGDescription); length != storageDescriptionMaxRunes {
+		t.Fatalf("og_description length = %d, want %d", length, storageDescriptionMaxRunes)
 	}
 }

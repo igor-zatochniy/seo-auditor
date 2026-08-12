@@ -121,9 +121,10 @@ Docker Compose
 - Stable `target_id` зв'язок із `audit_run_targets`, `fingerprint_key_id`, nullable HTTP status code, `scan_status`, stable error code/message, redirect flag і redirect target.
 - Truncation telemetry для bounded `VARCHAR` полів: `*_truncated` та `*_original_length`.
 - `title`, `meta description` та автоматичний quality status.
+- `description` та `og:description` обмежені 4000 rune до persistence та HTML export.
 - `H1` count і структура `H2-H6`.
 - Canonical URL і self-canonical check з урахуванням першого придатного web `<base href>` та значущого trailing slash поза коренем.
-- `meta robots`, `X-Robots-Tag` та окремий `robots_outcome`.
+- Агреговані directives з усіх `meta robots` і `X-Robots-Tag`, а також окремий `robots_outcome`.
 - Open Graph, Twitter Card, JSON-LD і viewport.
 - Internal/external HTTP(S) links з урахуванням document base; explicit non-web schemes не потрапляють у метрику.
 - Image alt audit.
@@ -144,7 +145,7 @@ Docker Compose
 
 Звіт містить counters запуску та таблицю з URL, HTTP-кодом, статусом, `title`, `description`, `H1`, internal/external links, зображеннями без `alt`, robots signals, word count, duration і помилками. Рядки читаються з PostgreSQL потоково, тому exporter не завантажує весь запуск у пам'ять. HTML генерується стандартним `html/template`: усі значення з БД екрануються, CSS вбудовано у файл, зовнішні scripts, fonts або stylesheets відсутні.
 
-Під час нативного запуску Windows успішно створений `latest-report.html` відкривається системним браузером. Linux parser container не має доступу до Windows desktop, тому `run-audit.cmd` використовує Docker API: запускає batch, копіює обидва звіти з named volume у локальну папку `reports/` і відкриває останній файл. Помилка export, copy або browser launch лише записується в лог чи warning і не змінює exit code аудиту. Згенеровані HTML-файли виключено з Git.
+Під час нативного запуску Windows успішно створений `latest-report.html` відкривається системним браузером. Linux parser container не має доступу до Windows desktop, тому `run-audit.cmd` використовує Docker API: запускає batch, копіює обидва звіти з named volume у локальну папку `reports/` і відкриває `latest-report.html` лише тоді, коли поточний запуск створив свіжі archive та latest files. Попередні звіти зберігаються, але не відкриваються як результат нового запуску. Помилка export, copy або browser launch лише записується в лог чи warning і не змінює exit code аудиту. Згенеровані HTML-файли виключено з Git.
 
 ## Конфігурація
 

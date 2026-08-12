@@ -84,7 +84,7 @@ func TestParsePageExtractsSEOMetrics(t *testing.T) {
 	if data.TotalImages != 3 || data.ImagesMissingAlt != 2 {
 		t.Fatalf("unexpected image audit: total=%d missing=%d", data.TotalImages, data.ImagesMissingAlt)
 	}
-	if data.MetaRobots != "index,follow" || data.XRobotsTag != "index, follow" {
+	if data.MetaRobots != "index, follow" || data.XRobotsTag != "index, follow" {
 		t.Fatalf("unexpected robots metadata: meta=%q header=%q", data.MetaRobots, data.XRobotsTag)
 	}
 	if data.WordCount == 0 {
@@ -92,20 +92,87 @@ func TestParsePageExtractsSEOMetrics(t *testing.T) {
 	}
 }
 
+func TestParsePageAggregatesAllRobotsDirectives(t *testing.T) {
+	tests := []struct {
+		name     string
+		meta     string
+		expected string
+	}{
+		{
+			name: "index before noindex",
+			meta: `<meta name="robots" content="index,follow">
+<meta name="robots" content="noindex,nofollow">`,
+			expected: "noindex, nofollow, index, follow",
+		},
+		{
+			name: "noindex before index",
+			meta: `<meta name="robots" content="noindex,nofollow">
+<meta name="robots" content="index,follow">`,
+			expected: "noindex, nofollow, index, follow",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := "<html><head>" + tt.meta + "</head><body>Content</body></html>"
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/html; charset=utf-8"},
+					"X-Robots-Tag": []string{"index, follow", "noindex, nofollow"},
+				},
+				Body: io.NopCloser(strings.NewReader(body)),
+			}
+
+			data, err := parsePage(resp, "https://example.com", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+			if err != nil {
+				t.Fatalf("parse page: %v", err)
+			}
+			if data.MetaRobots != tt.expected {
+				t.Fatalf("meta robots = %q, want %q", data.MetaRobots, tt.expected)
+			}
+			if data.XRobotsTag != "noindex, nofollow, index, follow" {
+				t.Fatalf("X-Robots-Tag = %q", data.XRobotsTag)
+			}
+		})
+	}
+}
+
+func TestRobotsHeaderDirectivesKeepsNoindexWithinStorageBound(t *testing.T) {
+	header := http.Header{
+		"X-Robots-Tag": []string{
+			strings.Repeat("unknown", storageRobotsTagMaxRunes),
+			"googlebot: noindex",
+		},
+	}
+
+	value, truncated, originalLength := robotsHeaderDirectives(header)
+	if !truncated || originalLength <= storageRobotsTagMaxRunes {
+		t.Fatalf("robots metadata was not truncated: truncated=%t original=%d", truncated, originalLength)
+	}
+	if !strings.Contains(strings.ToLower(value), "noindex") {
+		t.Fatalf("bounded robots metadata lost noindex: %q", value)
+	}
+}
+
 func TestStorageSanitizerTruncatesOversizedHTMLMetadata(t *testing.T) {
 	longTitle := strings.Repeat("T", storageTitleMaxRunes+25)
+	longDescription := strings.Repeat("D", storageDescriptionMaxRunes+25)
+	longOGDescription := strings.Repeat("G", storageDescriptionMaxRunes+25)
 	longH1 := strings.Repeat("H", storageH1MaxRunes+25)
 	longOGTitle := strings.Repeat("O", storageTitleMaxRunes+25)
 	longTwitterCard := strings.Repeat("C", storageTwitterCardMaxRunes+25)
 	longCanonical := "https://example.com/" + strings.Repeat("canonical", 260)
-	longRobots := strings.Repeat("noindex,", 40)
+	longRobots := strings.Repeat("R", storageRobotsTagMaxRunes+25)
 	html := `<!doctype html>
 <html>
 <head>
   <title>` + longTitle + `</title>
+	<meta name="description" content="` + longDescription + `">
   <link rel="canonical" href="` + longCanonical + `">
   <meta name="robots" content="` + longRobots + `">
   <meta property="og:title" content="` + longOGTitle + `">
+	<meta property="og:description" content="` + longOGDescription + `">
   <meta property="og:image" content="https://cdn.example.com/` + strings.Repeat("image", 420) + `.png?token=secret">
   <meta name="twitter:card" content="` + longTwitterCard + `">
 </head>
@@ -138,6 +205,18 @@ func TestStorageSanitizerTruncatesOversizedHTMLMetadata(t *testing.T) {
 	}
 
 	stored := sanitizeSEODataForStorage(data)
+	if got := utf8.RuneCountInString(data.Description); got != storageDescriptionMaxRunes {
+		t.Fatalf("description parser length = %d, want %d", got, storageDescriptionMaxRunes)
+	}
+	if got := utf8.RuneCountInString(data.OGDescription); got != storageDescriptionMaxRunes {
+		t.Fatalf("og_description parser length = %d, want %d", got, storageDescriptionMaxRunes)
+	}
+	if got := utf8.RuneCountInString(stored.Description); got != storageDescriptionMaxRunes {
+		t.Fatalf("description stored length = %d, want %d", got, storageDescriptionMaxRunes)
+	}
+	if got := utf8.RuneCountInString(stored.OGDescription); got != storageDescriptionMaxRunes {
+		t.Fatalf("og_description stored length = %d, want %d", got, storageDescriptionMaxRunes)
+	}
 	assertTruncatedField(t, "title", stored.Title, stored.TitleTruncated, stored.TitleOriginalLength, storageTitleMaxRunes, storageTitleMaxRunes+25)
 	assertTruncatedField(t, "h1", stored.H1, stored.H1Truncated, stored.H1OriginalLength, storageH1MaxRunes, storageH1MaxRunes+25)
 	assertTruncatedField(t, "og_title", stored.OGTitle, stored.OGTitleTruncated, stored.OGTitleOriginalLength, storageTitleMaxRunes, storageTitleMaxRunes+25)
@@ -267,6 +346,23 @@ func TestParsePageUsesBaseHrefForCanonicalAndRelativeLinks(t *testing.T) {
 	}
 	if data.InternalLinksCount != 1 || data.ExternalLinksCount != 0 {
 		t.Fatalf("link counts = internal %d external %d, want 1 and 0", data.InternalLinksCount, data.ExternalLinksCount)
+	}
+}
+
+func TestParsePageRecognizesCanonicalRelToken(t *testing.T) {
+	body := `<html><head><link rel="alternate canonical" href="/page"></head><body>Content</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.CanonicalURL != "/page" || !data.IsSelfCanonical {
+		t.Fatalf("canonical = %q self=%t", data.CanonicalURL, data.IsSelfCanonical)
 	}
 }
 

@@ -47,6 +47,10 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
+      - name: Test Windows report launcher
+        shell: pwsh
+        run: ./run-audit_test.ps1
+
       - name: Run tests with race detector
         run: go test -race -count=1 ./...
 
