@@ -232,6 +232,7 @@ type pageParser struct {
 	ogImageSeen       bool
 	twitterCardSeen   bool
 	canonicalSeen     bool
+	canonicalSource   string
 	metaRobots        robotsDirectiveSet
 	headDepth         int
 	ignoredTextDepth  int
@@ -285,6 +286,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 		if !p.canonicalSeen && attributes.hasRel && attributes.hasHref &&
 			hasTokenFold(attributes.rel, []byte("canonical")) {
 			p.canonicalSeen = true
+			p.canonicalSource = strings.TrimSpace(string(attributes.href))
 			p.data.CanonicalURL, p.data.CanonicalURLTruncated, p.data.CanonicalURLOriginalLength =
 				boundedBytes(attributes.href, StorageURLMaxRunes)
 		}
@@ -483,7 +485,7 @@ func (p *pageParser) finalize() {
 	}
 	p.data.LinksCount = p.data.InternalLinksCount + p.data.ExternalLinksCount
 	p.data.IsSelfCanonical = isSelfCanonicalWithBase(
-		p.data.CanonicalURL,
+		p.canonicalSource,
 		p.targetURL,
 		p.documentBaseURL,
 	)

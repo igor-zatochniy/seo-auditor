@@ -426,6 +426,32 @@ func TestParsePageNormalizesDefaultPortsForCanonicalAndLinks(t *testing.T) {
 	}
 }
 
+func TestParsePageComparesSelfCanonicalBeforeStorageTruncation(t *testing.T) {
+	prefix := "https://example.com/"
+	targetURL := prefix + strings.Repeat("a", storageURLMaxRunes-len(prefix))
+	canonicalURL := targetURL + "-different"
+	body := `<html><head><link rel="canonical" href="` + canonicalURL + `"></head><body></body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, targetURL, int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if !data.CanonicalURLTruncated {
+		t.Fatal("oversized canonical was not marked as truncated")
+	}
+	if data.CanonicalURL != targetURL {
+		t.Fatal("stored canonical does not contain the expected bounded representation")
+	}
+	if data.IsSelfCanonical {
+		t.Fatal("truncated canonical was incorrectly classified as self-canonical")
+	}
+}
+
 func TestParsePagePreservesNonOKStatus(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusNotFound,

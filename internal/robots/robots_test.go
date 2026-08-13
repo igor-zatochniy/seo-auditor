@@ -197,3 +197,31 @@ func TestCompilePolicyContextHonorsCancellation(t *testing.T) {
 		t.Fatal("CompilePolicyContext() returned a policy after cancellation")
 	}
 }
+
+func BenchmarkPolicyAllowsMaxSizePolicy(b *testing.B) {
+	const commonPrefixLength = 64
+	var content strings.Builder
+	content.Grow(MaxPolicyBytes)
+	content.WriteString("User-agent: *\n")
+	commonPrefix := strings.Repeat("a", commonPrefixLength)
+	for index := 0; ; index++ {
+		rule := fmt.Sprintf("Disallow: /%s*missing-%d$\n", commonPrefix, index)
+		if content.Len()+len(rule) > MaxPolicyBytes {
+			break
+		}
+		content.WriteString(rule)
+	}
+
+	policy, err := CompilePolicy(content.String(), "ExampleBot/1.0")
+	if err != nil {
+		b.Fatalf("compile maximum-size policy: %v", err)
+	}
+	requestPath := "/" + strings.Repeat("a", 2047)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if !policy.Allows(requestPath) {
+			b.Fatal("non-matching benchmark policy unexpectedly blocked the path")
+		}
+	}
+}

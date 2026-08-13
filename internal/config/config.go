@@ -241,6 +241,12 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if rateLimitInterval >= httpTotalTimeout {
+		return Config{}, fmt.Errorf("RATE_LIMIT_INTERVAL must be lower than HTTP_TOTAL_TIMEOUT")
+	}
+	if rateLimitInterval >= robotsTotalTimeout {
+		return Config{}, fmt.Errorf("RATE_LIMIT_INTERVAL must be lower than ROBOTS_TOTAL_TIMEOUT")
+	}
 	maxConcurrentPerHost, err := intFromEnv("MAX_CONCURRENT_PER_HOST", DefaultMaxConcurrentPerHost, 1, MaxPerHostConcurrency)
 	if err != nil {
 		return Config{}, err

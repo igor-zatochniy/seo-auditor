@@ -269,6 +269,52 @@ func TestLoadConfigRejectsInvertedRobotsTimeouts(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsRateLimitOutsideTotalRequestBudgets(t *testing.T) {
+	tests := []struct {
+		name     string
+		environ  map[string]string
+		wantText string
+	}{
+		{
+			name: "HTTP budget",
+			environ: map[string]string{
+				"RATE_LIMIT_INTERVAL":  "20s",
+				"HTTP_TOTAL_TIMEOUT":   "20s",
+				"ROBOTS_TOTAL_TIMEOUT": "30s",
+			},
+			wantText: "HTTP_TOTAL_TIMEOUT",
+		},
+		{
+			name: "robots budget",
+			environ: map[string]string{
+				"RATE_LIMIT_INTERVAL":  "10s",
+				"HTTP_TOTAL_TIMEOUT":   "30s",
+				"ROBOTS_TOTAL_TIMEOUT": "10s",
+			},
+			wantText: "ROBOTS_TOTAL_TIMEOUT",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnvironment(t)
+			t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+			t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+			for key, value := range tt.environ {
+				t.Setenv(key, value)
+			}
+
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatal("expected incompatible rate limit interval to fail configuration loading")
+			}
+			if !strings.Contains(err.Error(), tt.wantText) {
+				t.Fatalf("configuration error = %q, want reference to %s", err, tt.wantText)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsInvalidReportRetentionCount(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
