@@ -9,7 +9,7 @@ Go-сервіс для етичного технічного SEO-аудиту с
 - Конкурентний worker pool з керованою кількістю goroutine через `WORKERS`.
 - Атомарна видача URL bounded batches через PostgreSQL `FOR UPDATE SKIP LOCKED`, target leases і bounded channels без завантаження всієї черги в RAM.
 - Стабільний per-run snapshot targets із прямим `target_id` зв'язком між `audit_run_targets` та `audit_results`.
-- Один активний owner для кожного `RUN_ID`: паралельний parser не може перехопити запуск, а після stale heartbeat той самий run відновлюється без повторної обробки завершених targets.
+- Один активний owner для кожного `RUN_ID`: монотонний `owner_generation` відсікає записи попереднього процесу навіть при повторному `WORKER_INSTANCE_ID`, а після stale heartbeat run відновлюється без повторної обробки завершених targets.
 - Невалідні URL з snapshot не губляться в логах, а зберігаються як `failed` results з `error_code=invalid_target_url`.
 - Версіоновані PostgreSQL migrations через `goose`: parser застосовує непройдені SQL-кроки на старті, веде `schema_migrations` і бере advisory lock.
 - Таймаути для PostgreSQL, HTTP-запитів, `robots.txt` і запису результатів.
@@ -70,7 +70,9 @@ Docker Compose
 │   ├── 006_run_heartbeat_and_target_progress.sql
 │   ├── 007_target_leases_and_resume.sql
 │   ├── 008_bounded_snapshot_finalization.sql
-│   └── 009_target_start_tracking.sql
+│   ├── 009_target_start_tracking.sql
+│   ├── 010_robots_directives.sql
+│   └── 011_owner_generation_fencing.sql
 ├── internal/
 │   ├── config/
 │   ├── crawler/
@@ -212,7 +214,7 @@ docker compose up --build
 
 Parser є batch-сервісом: він завершується після обробки стабільного набору URL, а PostgreSQL продовжує працювати для перегляду результатів.
 Помилки окремих URL зберігаються у `audit_results` і позначають запуск як `completed_with_errors`, але не перезапускають весь batch. Після `SIGTERM` parser завершує in-flight задачі в межах `SHUTDOWN_TIMEOUT`, а потім у межах окремого `FINALIZATION_TIMEOUT` фіксує запуск як `canceled` та очищає raw target URL. Необов'язковий HTML-звіт під час завершення за системним сигналом не створюється. Parser повертає exit code `130`.
-Активний запуск регулярно оновлює `audit_runs.heartbeat_at` і `lease_until` виданих targets. Після трьох послідовних помилок heartbeat parser припиняє видачу нових задач, завершує in-flight роботу в межах `SHUTDOWN_TIMEOUT` і фіксує run як `failed`. Heartbeat зупиняється лише після запису terminal status. PostgreSQL атомарно видає лише `pending` або допустимі прострочені targets через `FOR UPDATE SKIP LOCKED`; claim batch обмежений кількістю workers і вільними місцями bounded queue. `attempts` та `started_at` оновлюються лише під час фактичного старту worker.
+Активний запуск регулярно оновлює `audit_runs.heartbeat_at` і `lease_until` виданих targets. Після трьох послідовних помилок heartbeat parser припиняє видачу нових задач, завершує in-flight роботу в межах `SHUTDOWN_TIMEOUT` і фіксує run як `failed`. Heartbeat зупиняється лише після запису terminal status. Кожне отримання або відновлення ownership атомарно збільшує `owner_generation`; це покоління переноситься в target claim і перевіряється під час heartbeat, старту worker та транзакційного збереження результату. PostgreSQL атомарно видає лише `pending` або допустимі прострочені targets через `FOR UPDATE SKIP LOCKED`; claim batch обмежений кількістю workers і вільними місцями bounded queue. `attempts` та `started_at` оновлюються лише під час фактичного старту worker.
 Стабільний snapshot читається keyset-порціями в одному `REPEATABLE READ` view, але записується окремими bounded batches. Resume, зміна terminal status і очищення `request_url` також виконуються ідемпотентними порціями: `DB_FETCH_TIMEOUT` та `DB_WRITE_TIMEOUT` обмежують одну SQL-операцію, а не весь набір URL.
 
 Якщо heartbeat застарів після аварійного завершення, наступний startup позначає run як `abandoned`. Системна помилка persistence переводить run у `failed`, але залишає незавершені targets у `pending` разом із захищеним runtime payload. Повторний запуск із тим самим `RUN_ID` отримує ownership і продовжує за збереженим snapshot. Targets зі статусами `completed` і `failed` повторно не скануються. Поки попередній owner активний, другий parser із тим самим `RUN_ID` завершується з fatal configuration/runtime error до будь-яких HTTP-запитів.

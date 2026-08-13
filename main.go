@@ -172,13 +172,15 @@ func run() (exitCode int) {
 		slog.Info("Очищено URL завершених запусків після перерваної фіналізації", "count", clearedRetainedURLs)
 	}
 
-	if err := createAuditRun(signalCtx, dbPool, cfg); err != nil {
+	if err := createAuditRun(signalCtx, dbPool, &cfg); err != nil {
 		dbPool.Close()
 		slog.Error("Не вдалося зареєструвати запуск аудиту", "error", err)
 		return exitFatal
 	}
 	slog.Info(
 		"Підключення до PostgreSQL підтверджено, схема актуальна та запуск аудиту зареєстровано",
+		"owner_generation",
+		cfg.OwnerGeneration,
 		"max_conns",
 		poolConfig.MaxConns,
 	)

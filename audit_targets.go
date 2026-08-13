@@ -43,10 +43,12 @@ func auditRunTargetsCaptured(ctx context.Context, dbPool *pgxpool.Pool, cfg Conf
 			 FROM audit_runs
 			 WHERE id = $1
 			   AND status = $2
-			   AND worker_instance_id = $3`,
+			   AND worker_instance_id = $3
+			   AND owner_generation = $4`,
 			cfg.RunID,
 			auditRunStatusRunning,
 			effectiveWorkerInstanceID(cfg),
+			effectiveOwnerGeneration(cfg),
 		).Scan(&captured)
 	})
 	return captured, err
@@ -75,12 +77,14 @@ func deletePartialAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cfg
 				       WHERE run.id = $1
 				         AND run.status = $3
 				         AND run.worker_instance_id = $4
+				         AND run.owner_generation = $5
 				         AND run.targets_captured_at IS NULL
 				   )`,
 				cfg.RunID,
 				effectiveURLBatchSize(cfg),
 				auditRunStatusRunning,
 				effectiveWorkerInstanceID(cfg),
+				effectiveOwnerGeneration(cfg),
 			)
 			if err != nil {
 				return err
@@ -150,11 +154,13 @@ func copyAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) 
 			 WHERE id = $1
 			   AND status = $2
 			   AND worker_instance_id = $3
+			   AND owner_generation = $5
 			   AND targets_captured_at IS NULL`,
 			cfg.RunID,
 			auditRunStatusRunning,
 			effectiveWorkerInstanceID(cfg),
 			snapshot.Total,
+			effectiveOwnerGeneration(cfg),
 		)
 		if err != nil {
 			return err
@@ -241,6 +247,7 @@ func insertAuditRunTargetBatch(
 			     WHERE run.id = $1
 			       AND run.status = $4
 			       AND run.worker_instance_id = $5
+			       AND run.owner_generation = $6
 			       AND run.targets_captured_at IS NULL
 			 )
 			 ON CONFLICT (run_id, target_id) DO NOTHING`,
@@ -249,6 +256,7 @@ func insertAuditRunTargetBatch(
 			requestURLs,
 			auditRunStatusRunning,
 			effectiveWorkerInstanceID(cfg),
+			effectiveOwnerGeneration(cfg),
 		)
 		if err != nil {
 			return err
@@ -340,13 +348,15 @@ func summarizeAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cfg Con
 			     failed_urls = $6
 			 WHERE id = $1
 			   AND status = $2
-			   AND worker_instance_id = $3`,
+			   AND worker_instance_id = $3
+			   AND owner_generation = $7`,
 			cfg.RunID,
 			auditRunStatusRunning,
 			effectiveWorkerInstanceID(cfg),
 			snapshot.Total,
 			snapshot.Successful,
 			snapshot.Failed,
+			effectiveOwnerGeneration(cfg),
 		)
 		if err != nil {
 			return err

@@ -157,7 +157,7 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 	}
 
 	firstConfig := newConfig(firstRunID)
-	if err := createAuditRun(ctx, pool, firstConfig); err != nil {
+	if err := createAuditRun(ctx, pool, &firstConfig); err != nil {
 		t.Fatalf("create first audit run: %v", err)
 	}
 	firstTarget := createRunTarget(firstConfig, 1, targetURL)
@@ -216,7 +216,7 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 	}
 
 	secondConfig := newConfig(secondRunID)
-	if err := createAuditRun(ctx, pool, secondConfig); err != nil {
+	if err := createAuditRun(ctx, pool, &secondConfig); err != nil {
 		t.Fatalf("create second audit run: %v", err)
 	}
 	secondTarget := createRunTarget(secondConfig, 1, targetURL)
@@ -275,7 +275,7 @@ func TestAuditPipelinePersistsResult(t *testing.T) {
 	}
 
 	collisionConfig := newConfig(collisionRunID)
-	if err := createAuditRun(ctx, pool, collisionConfig); err != nil {
+	if err := createAuditRun(ctx, pool, &collisionConfig); err != nil {
 		t.Fatalf("create collision audit run: %v", err)
 	}
 	signedTargetA := createRunTarget(collisionConfig, 1, targetURL+"?token=AAAA")
@@ -453,7 +453,7 @@ func TestAuditRunTargetSnapshotIsStable(t *testing.T) {
 		t.Fatalf("seed source URLs: %v", err)
 	}
 
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create audit run: %v", err)
 	}
 	snapshot, err := captureAuditRunTargets(ctx, pool, cfg)
@@ -613,7 +613,7 @@ func TestTargetSnapshotUsesPerBatchWriteTimeout(t *testing.T) {
 		DBWriteTimeout:       800 * time.Millisecond,
 		DBFetchTimeout:       time.Second,
 	}
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create bounded snapshot audit run: %v", err)
 	}
 
@@ -664,7 +664,7 @@ func TestAuditRunCompletionUsesPerBatchWriteTimeout(t *testing.T) {
 		DBWriteTimeout:       800 * time.Millisecond,
 		DBFetchTimeout:       time.Second,
 	}
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create bounded completion audit run: %v", err)
 	}
 	for targetID := int64(1); targetID <= 8; targetID++ {
@@ -786,7 +786,7 @@ func TestAbandonStaleAuditRunsMarksRunAndTargets(t *testing.T) {
 		cleanup(cleanupCtx)
 	}()
 
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create stale audit run: %v", err)
 	}
 	if _, err := pool.Exec(
@@ -888,7 +888,7 @@ func TestAbandonLargeStaleAuditRunUsesBoundedBatches(t *testing.T) {
 		RetryBaseDelay:       10 * time.Millisecond,
 		RetryMaxDelay:        50 * time.Millisecond,
 	}
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create large stale audit run: %v", err)
 	}
 	if _, err := pool.Exec(
@@ -983,7 +983,7 @@ func TestAbandonStaleAuditRunsContinuesInterruptedTargetRecovery(t *testing.T) {
 		cleanup(cleanupCtx)
 	}()
 
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create interrupted stale audit run: %v", err)
 	}
 	if _, err := pool.Exec(
@@ -1097,7 +1097,7 @@ func TestStaleRecoveryDefersLockedTargetUntilNextPass(t *testing.T) {
 		cleanup(cleanupCtx)
 	}()
 
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create locked stale audit run: %v", err)
 	}
 	if _, err := pool.Exec(
@@ -1250,13 +1250,13 @@ func TestAuditRunClaimsAreExclusiveAndResumable(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed lease targets: %v", err)
 	}
-	if err := createAuditRun(ctx, pool, ownerConfig); err != nil {
+	if err := createAuditRun(ctx, pool, &ownerConfig); err != nil {
 		t.Fatalf("create owned audit run: %v", err)
 	}
 	if _, err := captureAuditRunTargets(ctx, pool, ownerConfig); err != nil {
 		t.Fatalf("capture owned target snapshot: %v", err)
 	}
-	if err := createAuditRun(ctx, pool, resumeConfig); err == nil {
+	if err := createAuditRun(ctx, pool, &resumeConfig); err == nil {
 		t.Fatal("expected a second parser to be rejected while the audit run owner is active")
 	}
 
@@ -1278,6 +1278,7 @@ func TestAuditRunClaimsAreExclusiveAndResumable(t *testing.T) {
 		runID,
 		firstClaim[0].ID,
 		"intruder",
+		effectiveOwnerGeneration(ownerConfig),
 		auditTargetStatusCompleted,
 		"",
 	)
@@ -1323,7 +1324,7 @@ func TestAuditRunClaimsAreExclusiveAndResumable(t *testing.T) {
 	if abandoned < 1 {
 		t.Fatalf("expected at least one abandoned run before resume, got %d", abandoned)
 	}
-	if err := createAuditRun(ctx, pool, resumeConfig); err != nil {
+	if err := createAuditRun(ctx, pool, &resumeConfig); err != nil {
 		t.Fatalf("resume abandoned audit run: %v", err)
 	}
 	if err := updateAuditRunHeartbeat(ctx, pool, ownerConfig); err == nil {
@@ -1373,6 +1374,162 @@ func TestAuditRunClaimsAreExclusiveAndResumable(t *testing.T) {
 	}
 }
 
+func TestRepeatedWorkerIDCannotPersistAfterOwnershipTakeover(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "0fa05d62-1a7d-4c7d-a209-b4c0e33d47f5"
+	const sourceURL = "https://generation-fence.example/page?token=runtime-secret"
+	cfg := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "reused-worker-id",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		DBWriteTimeout:       3 * time.Second,
+		DBFetchTimeout:       3 * time.Second,
+		TargetLeaseDuration:  2 * time.Minute,
+		StaleRunThreshold:    time.Minute,
+		DBMaxRetries:         2,
+		RetryBaseDelay:       10 * time.Millisecond,
+		RetryMaxDelay:        50 * time.Millisecond,
+	}
+	staleOwner := cfg
+	freshOwner := cfg
+
+	restoreActivePages := suspendActivePages(t, ctx, pool)
+	defer restoreActivePages()
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM pages_to_scan WHERE url = $1", sourceURL)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO pages_to_scan (url, is_active) VALUES ($1, TRUE)`,
+		sourceURL,
+	); err != nil {
+		t.Fatalf("seed generation-fence target: %v", err)
+	}
+	if err := createAuditRun(ctx, pool, &staleOwner); err != nil {
+		t.Fatalf("create first owner generation: %v", err)
+	}
+	if _, err := captureAuditRunTargets(ctx, pool, staleOwner); err != nil {
+		t.Fatalf("capture generation-fence snapshot: %v", err)
+	}
+	firstClaim, err := claimTargetURLBatch(ctx, pool, staleOwner, 1)
+	if err != nil || len(firstClaim) != 1 {
+		t.Fatalf("claim target with first generation: records=%#v error=%v", firstClaim, err)
+	}
+
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE audit_runs
+		 SET heartbeat_at = CURRENT_TIMESTAMP - INTERVAL '10 minutes'
+		 WHERE id = $1`,
+		runID,
+	); err != nil {
+		t.Fatalf("expire first owner heartbeat: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE audit_run_targets
+		 SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 minute'
+		 WHERE run_id = $1 AND target_id = $2`,
+		runID,
+		firstClaim[0].ID,
+	); err != nil {
+		t.Fatalf("expire first owner target lease: %v", err)
+	}
+	if _, err := abandonStaleAuditRuns(ctx, pool, freshOwner); err != nil {
+		t.Fatalf("abandon stale owner generation: %v", err)
+	}
+	if err := createAuditRun(ctx, pool, &freshOwner); err != nil {
+		t.Fatalf("acquire replacement owner generation: %v", err)
+	}
+	if freshOwner.OwnerGeneration <= staleOwner.OwnerGeneration {
+		t.Fatalf(
+			"ownership generation did not advance: stale=%d fresh=%d",
+			staleOwner.OwnerGeneration,
+			freshOwner.OwnerGeneration,
+		)
+	}
+	freshClaim, err := claimTargetURLBatch(ctx, pool, freshOwner, 1)
+	if err != nil || len(freshClaim) != 1 || freshClaim[0].ID != firstClaim[0].ID {
+		t.Fatalf("claim target with replacement generation: records=%#v error=%v", freshClaim, err)
+	}
+
+	target := newAuditTarget(firstClaim[0], firstClaim[0].URL, staleOwner.TargetFingerprintKey)
+	staleResults := make(chan Result, 1)
+	staleResults <- Result{Target: target, Data: SEOData{
+		URL:         sourceURL,
+		ScanStatus:  scanStatusCompleted,
+		Title:       "stale owner result",
+		TitleStatus: "OK",
+	}}
+	close(staleResults)
+	staleSummary := saveResults(ctx, pool, staleResults, staleOwner)
+	if staleSummary.PersistenceFailures != 1 || staleSummary.Saved != 0 {
+		t.Fatalf("stale owner result was not rejected: %+v", staleSummary)
+	}
+
+	var resultCount int
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT COUNT(*) FROM audit_results WHERE run_id = $1 AND target_id = $2",
+		runID,
+		target.TargetID,
+	).Scan(&resultCount); err != nil {
+		t.Fatalf("count stale owner results: %v", err)
+	}
+	if resultCount != 0 {
+		t.Fatalf("stale owner transaction became durable: result_count=%d", resultCount)
+	}
+
+	freshTarget := newAuditTarget(freshClaim[0], freshClaim[0].URL, freshOwner.TargetFingerprintKey)
+	freshResults := make(chan Result, 1)
+	freshResults <- Result{Target: freshTarget, Data: SEOData{
+		URL:         sourceURL,
+		ScanStatus:  scanStatusCompleted,
+		Title:       "fresh owner result",
+		TitleStatus: "OK",
+	}}
+	close(freshResults)
+	freshSummary := saveResults(ctx, pool, freshResults, freshOwner)
+	if freshSummary.PersistenceFailures != 0 || freshSummary.Saved != 1 {
+		t.Fatalf("replacement owner could not persist result: %+v", freshSummary)
+	}
+
+	var storedTitle string
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT title FROM audit_results WHERE run_id = $1 AND target_id = $2",
+		runID,
+		target.TargetID,
+	).Scan(&storedTitle); err != nil {
+		t.Fatalf("read replacement owner result: %v", err)
+	}
+	if storedTitle != "fresh owner result" {
+		t.Fatalf("unexpected stored result title: %q", storedTitle)
+	}
+}
+
 func TestHeartbeatMonitorCancelsWorkAfterOwnershipLoss(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -1408,7 +1565,7 @@ func TestHeartbeatMonitorCancelsWorkAfterOwnershipLoss(t *testing.T) {
 		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
 	}()
 
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create heartbeat test run: %v", err)
 	}
 	if _, err := pool.Exec(
@@ -1480,7 +1637,7 @@ func TestFailedAuditRunPreservesTargetForResume(t *testing.T) {
 		cleanup(cleanupCtx)
 	}()
 
-	if err := createAuditRun(ctx, pool, ownerConfig); err != nil {
+	if err := createAuditRun(ctx, pool, &ownerConfig); err != nil {
 		t.Fatalf("create audit run: %v", err)
 	}
 	if _, err := pool.Exec(
@@ -1533,7 +1690,7 @@ func TestFailedAuditRunPreservesTargetForResume(t *testing.T) {
 		)
 	}
 
-	if err := createAuditRun(ctx, pool, resumeConfig); err != nil {
+	if err := createAuditRun(ctx, pool, &resumeConfig); err != nil {
 		t.Fatalf("resume failed audit run: %v", err)
 	}
 	resumed, err := claimTargetURLBatch(ctx, pool, resumeConfig, 1)
@@ -1585,7 +1742,7 @@ func TestCanceledCompletionWaitsForPostgreSQLTargetLock(t *testing.T) {
 		cleanup(cleanupCtx)
 	}()
 
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create audit run: %v", err)
 	}
 	if _, err := pool.Exec(
@@ -1716,7 +1873,7 @@ func TestCompletedRunRejectsNonTerminalTargets(t *testing.T) {
 		cleanup(cleanupCtx)
 	}()
 
-	if err := createAuditRun(ctx, pool, cfg); err != nil {
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create audit run: %v", err)
 	}
 	if _, err := pool.Exec(

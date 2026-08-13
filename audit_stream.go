@@ -32,12 +32,16 @@ func claimTargetURLBatch(
 				     WHERE target.run_id = $1
 				       AND run.status = $2
 				       AND run.worker_instance_id = $3
+				       AND run.owner_generation = $8
 				       AND (
 				           target.status = $4
 				           OR (
 				               target.status = $5
 				               AND target.lease_until < CURRENT_TIMESTAMP
-				               AND target.claimed_by IS DISTINCT FROM $3
+				               AND (
+				                   target.claimed_by IS DISTINCT FROM $3
+				                   OR target.claim_generation IS DISTINCT FROM $8
+				               )
 				           )
 				       )
 				     ORDER BY target.target_id
@@ -47,6 +51,7 @@ func claimTargetURLBatch(
 				 UPDATE audit_run_targets AS target
 				 SET status = $5,
 				     claimed_by = $3,
+				     claim_generation = $8,
 				     claimed_at = CURRENT_TIMESTAMP,
 				     started_at = NULL,
 				     lease_until = CURRENT_TIMESTAMP + ($7 * INTERVAL '1 millisecond'),
@@ -63,6 +68,7 @@ func claimTargetURLBatch(
 				auditTargetStatusRunning,
 				limit,
 				effectiveTargetLeaseDuration(cfg).Milliseconds(),
+				effectiveOwnerGeneration(cfg),
 			)
 			if err != nil {
 				return err

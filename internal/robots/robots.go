@@ -153,6 +153,8 @@ func parseGroups(ctx context.Context, content string, maxRules int) ([]group, er
 	seenRule := false
 	ruleCount := 0
 
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
 	for lineIndex, line := range strings.Split(content, "\n") {
 		if lineIndex%policyContextCheckInterval == 0 {
 			if err := ctx.Err(); err != nil {

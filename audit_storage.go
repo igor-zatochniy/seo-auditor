@@ -35,76 +35,44 @@ type auditRunCompletion struct {
 	FailedURLs     int
 }
 
-func createAuditRun(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) error {
-	var created bool
-	err := withDBMutationRetry(ctx, cfg, "create_audit_run", func(queryCtx context.Context) error {
-		commandTag, err := dbPool.Exec(
-			queryCtx,
-			`INSERT INTO audit_runs (id, started_at, heartbeat_at, worker_instance_id, status)
-			 VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $2, $3)
-			 ON CONFLICT (id) DO NOTHING`,
-			cfg.RunID,
-			effectiveWorkerInstanceID(cfg),
-			auditRunStatusRunning,
-		)
-		if err != nil {
-			return err
-		}
-		created = commandTag.RowsAffected() == 1
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("create audit run %s: %w", cfg.RunID, err)
-	}
-	if created {
-		return nil
+func createAuditRun(ctx context.Context, dbPool *pgxpool.Pool, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("audit run configuration is required")
 	}
 
-	var currentStatus string
-	if err := withDBReadRetry(ctx, cfg, "read_resumable_audit_run", func(queryCtx context.Context) error {
-		return dbPool.QueryRow(
+	var ownerGeneration int64
+	err := withDBMutationRetry(ctx, *cfg, "acquire_audit_run", func(queryCtx context.Context) error {
+		scanErr := dbPool.QueryRow(
 			queryCtx,
-			`SELECT status
-			 FROM audit_runs
-			 WHERE id = $1`,
-			cfg.RunID,
-		).Scan(&currentStatus)
-	}); err != nil {
-		return fmt.Errorf("read audit run %s for resume: %w", cfg.RunID, err)
-	}
-	if currentStatus != auditRunStatusAbandoned && currentStatus != auditRunStatusFailed {
-		return fmt.Errorf("audit run %s already exists and is not resumable", cfg.RunID)
-	}
-
-	if err := resetResumableAuditRunTargets(ctx, dbPool, cfg); err != nil {
-		return fmt.Errorf("reset audit run %s targets for resume: %w", cfg.RunID, err)
-	}
-	err = withDBMutationRetry(ctx, cfg, "resume_audit_run", func(queryCtx context.Context) error {
-		commandTag, err := dbPool.Exec(
-			queryCtx,
-			`UPDATE audit_runs
+			`INSERT INTO audit_runs (
+			     id, started_at, heartbeat_at, worker_instance_id, owner_generation, status
+			 ) VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $2, 1, $3)
+			 ON CONFLICT (id) DO UPDATE
 			 SET finished_at = NULL,
 			     heartbeat_at = CURRENT_TIMESTAMP,
-			     worker_instance_id = $2,
-			     status = $3
-			 WHERE id = $1
-			   AND status IN ($4, $5)`,
+			     worker_instance_id = EXCLUDED.worker_instance_id,
+			     owner_generation = audit_runs.owner_generation + 1,
+			     status = EXCLUDED.status
+			 WHERE audit_runs.status IN ($4, $5)
+			 RETURNING owner_generation`,
 			cfg.RunID,
-			effectiveWorkerInstanceID(cfg),
+			effectiveWorkerInstanceID(*cfg),
 			auditRunStatusRunning,
 			auditRunStatusAbandoned,
 			auditRunStatusFailed,
-		)
-		if err != nil {
-			return err
+		).Scan(&ownerGeneration)
+		if scanErr == pgx.ErrNoRows {
+			return fmt.Errorf("audit run %s already exists and is not resumable", cfg.RunID)
 		}
-		if commandTag.RowsAffected() != 1 {
-			return fmt.Errorf("audit run %s was resumed by another worker", cfg.RunID)
-		}
-		return nil
+		return scanErr
 	})
 	if err != nil {
-		return fmt.Errorf("resume audit run %s: %w", cfg.RunID, err)
+		return fmt.Errorf("acquire audit run %s: %w", cfg.RunID, err)
+	}
+	cfg.OwnerGeneration = ownerGeneration
+
+	if err := resetResumableAuditRunTargets(ctx, dbPool, *cfg); err != nil {
+		return fmt.Errorf("reset audit run %s targets after acquisition: %w", cfg.RunID, err)
 	}
 	return nil
 }
@@ -134,6 +102,7 @@ func resetResumableAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cf
 				 UPDATE audit_run_targets AS target
 				 SET status = $5,
 				     claimed_by = NULL,
+				     claim_generation = NULL,
 				     claimed_at = NULL,
 				     started_at = NULL,
 				     lease_until = NULL,
@@ -146,15 +115,18 @@ func resetResumableAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cf
 				       SELECT 1
 				       FROM audit_runs AS run
 				       WHERE run.id = $1
-				         AND run.status IN ($6, $7)
+				         AND run.status = $6
+				         AND run.worker_instance_id = $7
+				         AND run.owner_generation = $8
 				   )`,
 				cfg.RunID,
 				effectiveURLBatchSize(cfg),
 				auditTargetStatusAbandoned,
 				auditTargetStatusCanceled,
 				auditTargetStatusPending,
-				auditRunStatusAbandoned,
-				auditRunStatusFailed,
+				auditRunStatusRunning,
+				effectiveWorkerInstanceID(cfg),
+				effectiveOwnerGeneration(cfg),
 			)
 			if err != nil {
 				return err
@@ -229,6 +201,7 @@ func finalizeAuditRun(
 			 WHERE id = $1
 			   AND status IN ($6, $2)
 			   AND worker_instance_id = $7
+			   AND owner_generation = $9
 			   AND NOT EXISTS (
 			       SELECT 1
 			       FROM audit_run_targets AS target
@@ -243,6 +216,7 @@ func finalizeAuditRun(
 			auditRunStatusRunning,
 			effectiveWorkerInstanceID(cfg),
 			blockingTargetStatuses,
+			effectiveOwnerGeneration(cfg),
 		)
 		if err != nil {
 			return err
@@ -763,10 +737,12 @@ func updateAuditRunHeartbeat(ctx context.Context, dbPool *pgxpool.Pool, cfg Conf
 				 SET heartbeat_at = CURRENT_TIMESTAMP
 				 WHERE id = $1
 				   AND status = $3
-				   AND worker_instance_id = $2`,
+				   AND worker_instance_id = $2
+				   AND owner_generation = $4`,
 				cfg.RunID,
 				effectiveWorkerInstanceID(cfg),
 				auditRunStatusRunning,
+				effectiveOwnerGeneration(cfg),
 			)
 			if err != nil {
 				return err
@@ -781,11 +757,13 @@ func updateAuditRunHeartbeat(ctx context.Context, dbPool *pgxpool.Pool, cfg Conf
 				 SET lease_until = CURRENT_TIMESTAMP + ($3 * INTERVAL '1 millisecond')
 				 WHERE run_id = $1
 				   AND status = $4
-				   AND claimed_by = $2`,
+				   AND claimed_by = $2
+				   AND claim_generation = $5`,
 				cfg.RunID,
 				effectiveWorkerInstanceID(cfg),
 				effectiveTargetLeaseDuration(cfg).Milliseconds(),
 				auditTargetStatusRunning,
+				effectiveOwnerGeneration(cfg),
 			); err != nil {
 				return err
 			}
@@ -824,12 +802,14 @@ func markAuditRunTargetStarted(ctx context.Context, dbPool *pgxpool.Pool, target
 				   AND target_id = $2
 				   AND status = $3
 				   AND claimed_by = $4
+				   AND claim_generation = $7
 				   AND EXISTS (
 				       SELECT 1
 				       FROM audit_runs
 				       WHERE id = $1
 				         AND status = $6
 				         AND worker_instance_id = $4
+				         AND owner_generation = $7
 				   )`,
 				cfg.RunID,
 				target.TargetID,
@@ -837,6 +817,7 @@ func markAuditRunTargetStarted(ctx context.Context, dbPool *pgxpool.Pool, target
 				effectiveWorkerInstanceID(cfg),
 				effectiveTargetLeaseDuration(cfg).Milliseconds(),
 				auditRunStatusRunning,
+				effectiveOwnerGeneration(cfg),
 			)
 			if err != nil {
 				return err
@@ -859,6 +840,7 @@ func markAuditRunTargetFinished(
 	runID string,
 	targetID int64,
 	workerInstanceID string,
+	ownerGeneration int64,
 	status string,
 	lastError string,
 ) error {
@@ -873,12 +855,14 @@ func markAuditRunTargetFinished(
 		   AND target_id = $2
 		   AND status = $5
 		   AND claimed_by = $6
+		   AND claim_generation = $8
 		   AND EXISTS (
 		       SELECT 1
 		       FROM audit_runs
 		       WHERE id = $1
 		         AND status = $7
 		         AND worker_instance_id = $6
+		         AND owner_generation = $8
 		   )`,
 		runID,
 		targetID,
@@ -887,6 +871,7 @@ func markAuditRunTargetFinished(
 		auditTargetStatusRunning,
 		workerInstanceID,
 		auditRunStatusRunning,
+		ownerGeneration,
 	)
 	if err != nil {
 		return err
@@ -938,6 +923,7 @@ func markIncompleteTargetsForRunCompletion(
 					       WHERE run.id = $1
 					         AND run.status = $8
 					         AND run.worker_instance_id = $9
+					         AND run.owner_generation = $10
 					   )`,
 						runID,
 						effectiveURLBatchSize(cfg),
@@ -948,6 +934,7 @@ func markIncompleteTargetsForRunCompletion(
 						"Audit run was canceled before all targets finished.",
 						auditRunStatusRunning,
 						effectiveWorkerInstanceID(cfg),
+						effectiveOwnerGeneration(cfg),
 					)
 					if err != nil {
 						return err
@@ -992,6 +979,7 @@ func markIncompleteTargetsForRunCompletion(
 					 UPDATE audit_run_targets AS target
 					 SET status = $5,
 					     claimed_by = NULL,
+					     claim_generation = NULL,
 					     claimed_at = NULL,
 					     started_at = NULL,
 					     lease_until = NULL,
@@ -1006,6 +994,7 @@ func markIncompleteTargetsForRunCompletion(
 					       WHERE run.id = $1
 					         AND run.status = $7
 					         AND run.worker_instance_id = $8
+					         AND run.owner_generation = $9
 					   )`,
 						runID,
 						effectiveURLBatchSize(cfg),
@@ -1015,6 +1004,7 @@ func markIncompleteTargetsForRunCompletion(
 						"Audit run failed before all targets finished; target is available for resume.",
 						auditRunStatusRunning,
 						effectiveWorkerInstanceID(cfg),
+						effectiveOwnerGeneration(cfg),
 					)
 					if err != nil {
 						return err
@@ -1180,6 +1170,13 @@ func effectiveWorkerInstanceID(cfg Config) string {
 		return cfg.WorkerInstanceID
 	}
 	return "local-worker"
+}
+
+func effectiveOwnerGeneration(cfg Config) int64 {
+	if cfg.OwnerGeneration > 0 {
+		return cfg.OwnerGeneration
+	}
+	return 1
 }
 
 func effectiveAuditRunHeartbeat(cfg Config) time.Duration {

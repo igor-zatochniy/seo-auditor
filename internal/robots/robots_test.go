@@ -82,6 +82,29 @@ Disallow: /
 	}
 }
 
+func TestSupportedRobotsLineEndingsHaveIdenticalVerdicts(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "LF", content: "User-agent: *\nDisallow: /private\nAllow: /private/open\n"},
+		{name: "CRLF", content: "User-agent: *\r\nDisallow: /private\r\nAllow: /private/open\r\n"},
+		{name: "CR", content: "User-agent: *\rDisallow: /private\rAllow: /private/open\r"},
+		{name: "mixed", content: "User-agent: *\rDisallow: /private\nAllow: /private/open\r\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if IsPathAllowed(tt.content, "ExampleBot/1.0", "/private/data") {
+				t.Fatal("valid robots.txt line endings lost the Disallow rule")
+			}
+			if !IsPathAllowed(tt.content, "ExampleBot/1.0", "/private/open") {
+				t.Fatal("valid robots.txt line endings lost the more specific Allow rule")
+			}
+		})
+	}
+}
+
 func TestCompiledPolicyReusesPreparedMatchers(t *testing.T) {
 	policy, err := CompilePolicy(
 		"User-agent: *\nDisallow: /private/*\nAllow: /private/public$\n",

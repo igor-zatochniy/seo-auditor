@@ -64,6 +64,7 @@ var (
 type Config struct {
 	RunID                     string
 	WorkerInstanceID          string
+	OwnerGeneration           int64
 	TargetFingerprintKey      []byte
 	TargetFingerprintKeyID    string
 	LogLevel                  slog.Level

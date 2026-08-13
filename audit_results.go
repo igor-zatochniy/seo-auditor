@@ -222,6 +222,7 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 					cfg.RunID,
 					target.TargetID,
 					effectiveWorkerInstanceID(cfg),
+					effectiveOwnerGeneration(cfg),
 					finalAuditTargetStatus(d, resultFailed),
 					d.ErrorMessage,
 				); err != nil {
