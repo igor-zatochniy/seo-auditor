@@ -397,6 +397,35 @@ func TestParsePageUsesFirstCrossHostBaseAndSkipsNonWebSchemes(t *testing.T) {
 	}
 }
 
+func TestParsePageNormalizesDefaultPortsForCanonicalAndLinks(t *testing.T) {
+	body := `<html><head>
+<link rel="canonical" href="https://example.com:443/page">
+</head><body>
+<a href="https://example.com:443/about">Default HTTPS port</a>
+<a href="https://example.com:8443/admin">Non-default port</a>
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if !data.IsSelfCanonical {
+		t.Fatal("canonical with the explicit default HTTPS port was not self-canonical")
+	}
+	if data.InternalLinksCount != 1 || data.ExternalLinksCount != 1 {
+		t.Fatalf(
+			"link counts = internal %d external %d, want 1 and 1",
+			data.InternalLinksCount,
+			data.ExternalLinksCount,
+		)
+	}
+}
+
 func TestParsePagePreservesNonOKStatus(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusNotFound,
@@ -492,6 +521,9 @@ func TestIsSelfCanonical(t *testing.T) {
 		{name: "relative canonical", canonical: "/page", target: "https://example.com/page", want: true},
 		{name: "non-root trailing slash differs", canonical: "/page/", target: "https://example.com/page", want: false},
 		{name: "root slash is equivalent", canonical: "https://example.com/", target: "https://example.com", want: true},
+		{name: "default HTTPS port is equivalent", canonical: "https://example.com:443/page", target: "https://example.com/page", want: true},
+		{name: "default HTTP port is equivalent", canonical: "http://example.com:80/page", target: "http://example.com/page", want: true},
+		{name: "non-default port differs", canonical: "https://example.com:8443/page", target: "https://example.com/page", want: false},
 		{name: "different host", canonical: "https://other.test/page", target: "https://example.com/page", want: false},
 		{name: "different path", canonical: "/other", target: "https://example.com/page", want: false},
 	}

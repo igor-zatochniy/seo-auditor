@@ -3,6 +3,7 @@ package robots
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -105,7 +106,7 @@ func TestSupportedRobotsLineEndingsHaveIdenticalVerdicts(t *testing.T) {
 	}
 }
 
-func TestCompiledPolicyReusesPreparedMatchers(t *testing.T) {
+func TestCompiledPolicyReusesPreparedPatterns(t *testing.T) {
 	policy, err := CompilePolicy(
 		"User-agent: *\nDisallow: /private/*\nAllow: /private/public$\n",
 		"ExampleBot/1.0",
@@ -117,7 +118,7 @@ func TestCompiledPolicyReusesPreparedMatchers(t *testing.T) {
 		t.Fatalf("compiled rules = %d, want 2", len(policy.rules))
 	}
 
-	firstMatcher := policy.rules[0].matcher
+	firstPattern := policy.rules[0].pattern
 	for range 100 {
 		if policy.Allows("/private/data") {
 			t.Fatal("compiled policy unexpectedly allowed private path")
@@ -126,29 +127,57 @@ func TestCompiledPolicyReusesPreparedMatchers(t *testing.T) {
 			t.Fatal("compiled policy unexpectedly blocked explicitly allowed path")
 		}
 	}
-	if policy.rules[0].matcher != firstMatcher {
-		t.Fatal("policy replaced a prepared matcher during path checks")
+	if policy.rules[0].pattern != firstPattern {
+		t.Fatal("policy replaced a prepared pattern during path checks")
 	}
 }
 
-func TestCompilePolicyContextRejectsRuleLimit(t *testing.T) {
+func TestPreparedWildcardPatternPreservesAnchoredMatching(t *testing.T) {
+	policy, err := CompilePolicy(
+		"User-agent: *\nDisallow: /files/*report$\n",
+		"ExampleBot/1.0",
+	)
+	if err != nil {
+		t.Fatalf("CompilePolicy() error = %v", err)
+	}
+	if policy.Allows("/files/report-draft-report") {
+		t.Fatal("anchored wildcard pattern did not match its final occurrence")
+	}
+	if !policy.Allows("/files/report-draft-report/appendix") {
+		t.Fatal("anchored wildcard pattern matched a path with a trailing suffix")
+	}
+}
+
+func TestCompilePolicyContextAcceptsMoreThan1024Rules(t *testing.T) {
 	var content strings.Builder
 	content.WriteString("User-agent: *\n")
-	for index := 0; index <= DefaultMaxPolicyRules; index++ {
-		content.WriteString("Disallow: /private\n")
+	for index := range 2048 {
+		content.WriteString("Disallow: /private/")
+		content.WriteString(fmt.Sprintf("%d\n", index))
 	}
 
 	policy, err := CompilePolicyContext(
 		context.Background(),
 		content.String(),
 		"ExampleBot/1.0",
-		DefaultMaxPolicyRules,
 	)
+	if err != nil {
+		t.Fatalf("CompilePolicyContext() rejected a byte-bounded policy: %v", err)
+	}
+	if policy.Allows("/private/2047") {
+		t.Fatal("policy lost a rule after the former 1024-rule boundary")
+	}
+}
+
+func TestCompilePolicyContextRejectsContentAboveByteLimit(t *testing.T) {
+	content := strings.Repeat("x", MaxPolicyBytes+1)
+
+	policy, err := CompilePolicyContext(context.Background(), content, "ExampleBot/1.0")
 	if err == nil {
-		t.Fatal("CompilePolicyContext() unexpectedly accepted excessive rules")
+		t.Fatal("CompilePolicyContext() unexpectedly accepted content above the byte limit")
 	}
 	if policy != nil {
-		t.Fatal("CompilePolicyContext() returned a partial policy after exceeding the rule limit")
+		t.Fatal("CompilePolicyContext() returned a policy for oversized content")
 	}
 }
 
@@ -160,7 +189,6 @@ func TestCompilePolicyContextHonorsCancellation(t *testing.T) {
 		ctx,
 		"User-agent: *\nDisallow: /private\n",
 		"ExampleBot/1.0",
-		DefaultMaxPolicyRules,
 	)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("CompilePolicyContext() error = %v, want context.Canceled", err)

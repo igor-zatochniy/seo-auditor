@@ -26,6 +26,8 @@ const (
 	DefaultDBFetchTimeout            = 5 * time.Second
 	DefaultDBWriteTimeout            = 3 * time.Second
 	DefaultReportExportTimeout       = 2 * time.Minute
+	DefaultReportRetentionCount      = 100
+	MaxReportRetentionCount          = 10_000
 	DefaultAuditRunHeartbeatInterval = 30 * time.Second
 	DefaultHeartbeatFailureThreshold = 3
 	MaxHeartbeatFailureThreshold     = 10
@@ -79,6 +81,7 @@ type Config struct {
 	DBFetchTimeout            time.Duration
 	DBWriteTimeout            time.Duration
 	ReportExportTimeout       time.Duration
+	ReportRetentionCount      int
 	AuditRunHeartbeatInterval time.Duration
 	HeartbeatFailureThreshold int
 	StaleRunThreshold         time.Duration
@@ -143,6 +146,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	reportExportTimeout, err := durationFromEnv("REPORT_EXPORT_TIMEOUT", DefaultReportExportTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	reportRetentionCount, err := intFromEnv(
+		"REPORT_RETENTION_COUNT",
+		DefaultReportRetentionCount,
+		1,
+		MaxReportRetentionCount,
+	)
 	if err != nil {
 		return Config{}, err
 	}
@@ -308,6 +320,7 @@ func Load() (Config, error) {
 		DBFetchTimeout:            dbFetchTimeout,
 		DBWriteTimeout:            dbWriteTimeout,
 		ReportExportTimeout:       reportExportTimeout,
+		ReportRetentionCount:      reportRetentionCount,
 		AuditRunHeartbeatInterval: auditRunHeartbeatInterval,
 		HeartbeatFailureThreshold: heartbeatFailureThreshold,
 		StaleRunThreshold:         staleRunThreshold,

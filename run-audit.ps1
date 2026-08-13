@@ -19,6 +19,54 @@ function Get-FreshAuditArchive {
         Select-Object -First 1
 }
 
+function Remove-ExpiredAuditArchives {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReportDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 10000)]
+        [int]$RetentionCount
+    )
+
+    if (-not (Test-Path -LiteralPath $ReportDirectory -PathType Container)) {
+        return
+    }
+
+    $archives = Get-ChildItem -LiteralPath $ReportDirectory -Filter "seo-audit-*.html" -File |
+        Sort-Object -Property `
+            @{ Expression = { $_.LastWriteTimeUtc }; Descending = $true }, `
+            @{ Expression = { $_.Name }; Descending = $true }
+    $archives |
+        Select-Object -Skip $RetentionCount |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+}
+
+function Get-ContainerReportRetentionCount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerID
+    )
+
+    $defaultRetentionCount = 100
+    $containerEnvironment = & docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $ContainerID
+    if ($LASTEXITCODE -ne 0) {
+        return $defaultRetentionCount
+    }
+
+    $entry = $containerEnvironment |
+        Where-Object { $_ -like "REPORT_RETENTION_COUNT=*" } |
+        Select-Object -First 1
+    $retentionCount = 0
+    if ($null -eq $entry -or
+        -not [int]::TryParse(($entry -split "=", 2)[1], [ref]$retentionCount) -or
+        $retentionCount -lt 1 -or
+        $retentionCount -gt 10000) {
+        return $defaultRetentionCount
+    }
+    return $retentionCount
+}
+
 function Open-CurrentAuditReport {
     param(
         [Parameter(Mandatory = $true)]
@@ -90,6 +138,10 @@ function Invoke-Audit {
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "Не вдалося скопіювати HTML-звіти з Docker volume. Результат аудиту не змінено."
             } else {
+                $retentionCount = Get-ContainerReportRetentionCount -ContainerID $containerID.Trim()
+                Remove-ExpiredAuditArchives `
+                    -ReportDirectory $reportDirectory `
+                    -RetentionCount $retentionCount
                 $null = Open-CurrentAuditReport `
                     -ReportDirectory $reportDirectory `
                     -LatestReport $latestReport `

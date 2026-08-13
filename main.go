@@ -18,7 +18,6 @@ const (
 	UserAgentStr = "Go-SEOParser-Bot/1.0"
 
 	QueueBufferPerWorker = 2
-	MaxRobotsBodyBytes   = int64(512 * 1024)
 	MaxRobotsRedirects   = 5
 )
 
@@ -288,16 +287,9 @@ func run() (exitCode int) {
 		DefaultHostStateCacheSize,
 		MaxRetryAfterDelay,
 	)
-	pagePoliteTransport := &politeRoundTripper{
+	pageRetryingTransport := &retryRoundTripper{
 		base:     pageCustomTransport,
 		policies: hostPolicies,
-	}
-	robotsPoliteTransport := &politeRoundTripper{
-		base:     robotsCustomTransport,
-		policies: hostPolicies,
-	}
-	pageRetryingTransport := &retryRoundTripper{
-		base: pagePoliteTransport,
 		policy: retryPolicy{
 			maxRetries:     cfg.HTTPMaxRetries,
 			attemptTimeout: cfg.HTTPAttemptTimeout,
@@ -306,7 +298,8 @@ func run() (exitCode int) {
 		},
 	}
 	robotsRetryingTransport := &retryRoundTripper{
-		base: robotsPoliteTransport,
+		base:     robotsCustomTransport,
+		policies: hostPolicies,
 		policy: retryPolicy{
 			maxRetries:     cfg.HTTPMaxRetries,
 			attemptTimeout: cfg.RobotsAttemptTimeout,

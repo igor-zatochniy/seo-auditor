@@ -66,6 +66,17 @@ try {
     Assert-Condition ($openedPaths.Count -eq 1) "The browser callback did not run exactly once."
     Assert-Condition ($openedPaths[0] -eq (Get-Item -LiteralPath $latestReport).FullName) "The launcher opened an unexpected report path."
 
+    $secondOldArchive = Join-Path $reportDirectory "seo-audit-2026-08-10_10-00-00-second-old.html"
+    Set-Content -LiteralPath $secondOldArchive -Value "second old archive"
+    (Get-Item -LiteralPath $secondOldArchive).LastWriteTimeUtc = $oldTimestamp.AddMinutes(-1)
+    Remove-ExpiredAuditArchives -ReportDirectory $reportDirectory -RetentionCount 2
+
+    $retainedArchives = Get-ChildItem -LiteralPath $reportDirectory -Filter "seo-audit-*.html" -File
+    Assert-Condition ($retainedArchives.Count -eq 2) "Host report retention did not keep exactly two archives."
+    Assert-Condition (Test-Path -LiteralPath $freshArchive -PathType Leaf) "Host report retention removed the current archive."
+    Assert-Condition (-not (Test-Path -LiteralPath $secondOldArchive -PathType Leaf)) "Host report retention kept the oldest archive."
+    Assert-Condition (Test-Path -LiteralPath $latestReport -PathType Leaf) "Host report retention removed latest-report.html."
+
     Write-Host "Windows report launcher tests passed."
 } finally {
     Remove-Item -LiteralPath $reportDirectory -Recurse -Force -ErrorAction SilentlyContinue

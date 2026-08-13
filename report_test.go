@@ -153,6 +153,41 @@ func TestWriteAuditReportFilesKeepsLatestWhenRenderingFails(t *testing.T) {
 	}
 }
 
+func TestPruneAuditReportArchivesKeepsCurrentAndNewestReports(t *testing.T) {
+	reportDir := t.TempDir()
+	oldest := filepath.Join(reportDir, "seo-audit-2026-08-01_10-00-00-oldest.html")
+	newest := filepath.Join(reportDir, "seo-audit-2026-08-02_10-00-00-newest.html")
+	current := filepath.Join(reportDir, "seo-audit-2026-08-03_10-00-00-current.html")
+	unrelated := filepath.Join(reportDir, "manual-report.html")
+	for _, path := range []string{oldest, newest, current, unrelated} {
+		if err := os.WriteFile(path, []byte(filepath.Base(path)), 0o644); err != nil {
+			t.Fatalf("write report fixture %s: %v", path, err)
+		}
+	}
+	baseTime := time.Date(2026, time.August, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(oldest, baseTime, baseTime); err != nil {
+		t.Fatalf("age oldest report: %v", err)
+	}
+	if err := os.Chtimes(newest, baseTime.Add(time.Hour), baseTime.Add(time.Hour)); err != nil {
+		t.Fatalf("age newest report: %v", err)
+	}
+	if err := os.Chtimes(current, baseTime.Add(-time.Hour), baseTime.Add(-time.Hour)); err != nil {
+		t.Fatalf("age current report: %v", err)
+	}
+
+	if err := pruneAuditReportArchives(reportDir, current, 2); err != nil {
+		t.Fatalf("pruneAuditReportArchives returned error: %v", err)
+	}
+	for _, path := range []string{current, newest, unrelated} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected retained file %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(oldest); !os.IsNotExist(err) {
+		t.Fatalf("oldest archive was not pruned: %v", err)
+	}
+}
+
 func TestOpenReportInBrowserForOSUsesWindowsFileHandler(t *testing.T) {
 	var command string
 	var arguments []string

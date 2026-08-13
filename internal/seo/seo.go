@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -391,7 +392,7 @@ func (p *pageParser) countLink(rawHref []byte) {
 		}
 		return
 	}
-	if p.targetURL != nil && strings.EqualFold(parsedLink.Host, p.targetURL.Host) {
+	if p.targetURL != nil && sameNormalizedHost(parsedLink, p.targetURL) {
 		p.data.InternalLinksCount++
 		return
 	}
@@ -474,7 +475,7 @@ func (p *pageParser) finalize() {
 
 	if p.relativeLinks > 0 {
 		if p.targetURL != nil && p.documentBaseURL != nil &&
-			strings.EqualFold(p.documentBaseURL.Host, p.targetURL.Host) {
+			sameNormalizedHost(p.documentBaseURL, p.targetURL) {
 			p.data.InternalLinksCount += p.relativeLinks
 		} else {
 			p.data.ExternalLinksCount += p.relativeLinks
@@ -725,7 +726,7 @@ func isSelfCanonicalWithBase(canonicalURL string, targetParsed, baseURL *url.URL
 	normalize := func(parsed *url.URL) string {
 		copyValue := *parsed
 		copyValue.Scheme = strings.ToLower(copyValue.Scheme)
-		copyValue.Host = strings.ToLower(copyValue.Host)
+		copyValue.Host = normalizedAuthority(&copyValue)
 		copyValue.Fragment = ""
 		if copyValue.Path == "" {
 			copyValue.Path = "/"
@@ -734,4 +735,36 @@ func isSelfCanonicalWithBase(canonicalURL string, targetParsed, baseURL *url.URL
 	}
 
 	return normalize(canonicalParsed) == normalize(targetParsed)
+}
+
+func sameNormalizedHost(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return normalizedAuthority(left) == normalizedAuthority(right)
+}
+
+func normalizedAuthority(parsed *url.URL) string {
+	if parsed == nil {
+		return ""
+	}
+	hostname := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	port := parsed.Port()
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		if port == "80" {
+			port = ""
+		}
+	case "https":
+		if port == "443" {
+			port = ""
+		}
+	}
+	if port != "" {
+		return net.JoinHostPort(hostname, port)
+	}
+	if strings.Contains(hostname, ":") {
+		return "[" + hostname + "]"
+	}
+	return hostname
 }

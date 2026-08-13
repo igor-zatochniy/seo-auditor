@@ -28,7 +28,6 @@ func TestRobotsPolicyCacheEnforcesMemoryBudget(t *testing.T) {
 			context.Background(),
 			content.String(),
 			UserAgentStr,
-			DefaultRobotsPolicyMaxRules,
 		)
 		if err != nil {
 			t.Fatalf("compile test robots.txt policy: %v", err)
@@ -36,10 +35,10 @@ func TestRobotsPolicyCacheEnforcesMemoryBudget(t *testing.T) {
 		return robotsPolicy{compiled: compiled}
 	}
 
-	t.Run("rejects excessive rule count fail closed", func(t *testing.T) {
+	t.Run("accepts more than 1024 rules within the byte and cache budgets", func(t *testing.T) {
 		var content strings.Builder
 		content.WriteString("User-agent: *\n")
-		for index := 0; index <= DefaultRobotsPolicyMaxRules; index++ {
+		for index := range 2048 {
 			_, _ = fmt.Fprintf(&content, "Disallow: /private/%d\n", index)
 		}
 
@@ -56,14 +55,11 @@ func TestRobotsPolicyCacheEnforcesMemoryBudget(t *testing.T) {
 			server.URL+"/private/1",
 			time.Second,
 		)
-		if err == nil {
-			t.Fatal("robots.txt with excessive rules unexpectedly compiled")
+		if err != nil {
+			t.Fatalf("byte-bounded robots.txt was rejected: %v", err)
 		}
 		if allowed {
-			t.Fatal("robots.txt with excessive rules must fail closed")
-		}
-		if !strings.Contains(err.Error(), "more than") {
-			t.Fatalf("unexpected excessive-rule error: %v", err)
+			t.Fatal("policy lost a Disallow rule after the former 1024-rule boundary")
 		}
 	})
 

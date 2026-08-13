@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	robotsErrorCacheTTL         = time.Minute
-	robotsAllowAllPolicyWeight  = int64(256)
-	DefaultRobotsPolicyMaxRules = robotsparser.DefaultMaxPolicyRules
+	robotsErrorCacheTTL        = time.Minute
+	robotsAllowAllPolicyWeight = int64(256)
+	MaxRobotsBodyBytes         = int64(robotsparser.MaxPolicyBytes)
 )
 
 type robotsPolicy struct {
@@ -335,7 +335,7 @@ func fetchRobotsPolicy(
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("read robots.txt from %s: %w", robotsURL, err)
 	}
-	compiled, err := robotsparser.CompilePolicyContext(ctx, string(body), UserAgentStr, DefaultRobotsPolicyMaxRules)
+	compiled, err := robotsparser.CompilePolicyContext(ctx, string(body), UserAgentStr)
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("compile robots.txt from %s: %w", robotsURL, err)
 	}

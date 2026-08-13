@@ -23,8 +23,9 @@ type retryPolicy struct {
 }
 
 type retryRoundTripper struct {
-	base   http.RoundTripper
-	policy retryPolicy
+	base     http.RoundTripper
+	policy   retryPolicy
+	policies *hostPolicyManager
 }
 
 func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -32,33 +33,56 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if !isIdempotentRequest(req) || t.policy.maxRetries == 0 {
-		return base.RoundTrip(req)
+	maxRetries := 0
+	if isIdempotentRequest(req) {
+		maxRetries = t.policy.maxRetries
 	}
 
 	for attempt := 0; ; attempt++ {
+		var lease *hostLease
+		if t.policies != nil {
+			var err error
+			lease, err = t.policies.acquire(req.Context(), req.URL)
+			if err != nil {
+				return nil, fmt.Errorf("acquire host request slot: %w", err)
+			}
+		}
+
 		attemptCtx, attemptCancel := attemptContext(req.Context(), t.policy.attemptTimeout)
 		attemptRequest, err := cloneRequestForRetry(req, attempt, attemptCtx)
 		if err != nil {
 			attemptCancel()
+			releaseHostLease(lease)
 			return nil, err
 		}
 		resp, requestErr := base.RoundTrip(attemptRequest)
+		if t.policies != nil && resp != nil {
+			t.policies.observeRetryAfter(req.URL, resp.StatusCode, resp.Header.Get("Retry-After"))
+		}
 		retryable := shouldRetryHTTP(resp, requestErr) ||
 			isRetryableAttemptTimeout(requestErr, req.Context(), attemptCtx)
-		if !retryable || attempt >= t.policy.maxRetries {
+		if !retryable || attempt >= maxRetries {
 			if requestErr != nil {
 				if resp != nil && resp.Body != nil {
 					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 					_ = resp.Body.Close()
 				}
 				attemptCancel()
+				releaseHostLease(lease)
 				return resp, requestErr
 			}
 			if resp != nil && resp.Body != nil {
-				resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: attemptCancel}
+				responseBody := resp.Body
+				if lease != nil {
+					responseBody = &releaseOnCloseBody{ReadCloser: responseBody, release: lease.release}
+				}
+				resp.Body = &cancelOnCloseBody{
+					ReadCloser: responseBody,
+					cancel:     attemptCancel,
+				}
 			} else {
 				attemptCancel()
+				releaseHostLease(lease)
 			}
 			return resp, requestErr
 		}
@@ -68,6 +92,7 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			_ = resp.Body.Close()
 		}
 		attemptCancel()
+		releaseHostLease(lease)
 
 		delay := retryDelay(t.policy, attempt)
 		if resp != nil {
@@ -90,6 +115,12 @@ func (t *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		if err := waitForRetry(req.Context(), delay); err != nil {
 			return nil, err
 		}
+	}
+}
+
+func releaseHostLease(lease *hostLease) {
+	if lease != nil {
+		lease.release()
 	}
 }
 

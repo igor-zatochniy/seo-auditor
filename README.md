@@ -145,9 +145,9 @@ Docker Compose
 - `reports/latest-report.html`: останній завершений експорт;
 - `reports/seo-audit-YYYY-MM-DD_HH-MM-SS-<run>.html`: архівна копія з датою, часом і коротким ID запуску.
 
-Звіт містить counters запуску та таблицю з URL, HTTP-кодом, статусом, `title`, `description`, `H1`, internal/external links, зображеннями без `alt`, robots signals, word count, duration і помилками. Рядки читаються з PostgreSQL потоково, тому exporter не завантажує весь запуск у пам'ять. HTML генерується стандартним `html/template`: усі значення з БД екрануються, CSS вбудовано у файл, зовнішні scripts, fonts або stylesheets відсутні.
+Звіт містить counters запуску та таблицю з URL, HTTP-кодом, статусом, `title`, `description`, `H1`, internal/external links, зображеннями без `alt`, robots signals, word count, duration і помилками. Рядки читаються з PostgreSQL потоково, тому exporter не завантажує весь запуск у пам'ять. HTML генерується стандартним `html/template`: усі значення з БД екрануються, CSS вбудовано у файл, зовнішні scripts, fonts або stylesheets відсутні. Після успішного експорту зберігаються лише останні `REPORT_RETENTION_COUNT` archive reports; `latest-report.html` до цього ліміту не входить.
 
-Під час нативного запуску Windows успішно створений `latest-report.html` відкривається системним браузером. Linux parser container не має доступу до Windows desktop, тому `run-audit.cmd` використовує Docker API: запускає batch, копіює обидва звіти з named volume у локальну папку `reports/` і відкриває `latest-report.html` лише тоді, коли поточний запуск створив свіжі archive та latest files. Попередні звіти зберігаються, але не відкриваються як результат нового запуску. Помилка export, copy або browser launch лише записується в лог чи warning і не змінює exit code аудиту. Згенеровані HTML-файли виключено з Git.
+Під час нативного запуску Windows успішно створений `latest-report.html` відкривається системним браузером. Linux parser container не має доступу до Windows desktop, тому `run-audit.cmd` використовує Docker API: запускає batch, копіює звіти з named volume у локальну папку `reports/`, застосовує той самий retention limit на host і відкриває `latest-report.html` лише тоді, коли поточний запуск створив свіжі archive та latest files. Попередні звіти не відкриваються як результат нового запуску. Помилка export, pruning, copy або browser launch лише записується в лог чи warning і не змінює exit code аудиту. Згенеровані HTML-файли виключено з Git.
 
 ## Конфігурація
 
@@ -176,6 +176,7 @@ Docker Compose читає локальний `.env`. Для нового сер�
 | `DB_FETCH_TIMEOUT` | `5s` | Таймаут читання стабільного набору URL. |
 | `DB_WRITE_TIMEOUT` | `3s` | Таймаут запису одного результату. |
 | `REPORT_EXPORT_TIMEOUT` | `2m` | Загальний budget потокового читання PostgreSQL і атомарного запису HTML-звіту. |
+| `REPORT_RETENTION_COUNT` | `100` | Максимальна кількість archive HTML-звітів; pruning виконується лише після успішного експорту нового звіту. |
 | `AUDIT_RUN_HEARTBEAT_INTERVAL` | `30s` | Інтервал оновлення `audit_runs.heartbeat_at` для активного parser instance. |
 | `HEARTBEAT_FAILURE_THRESHOLD` | `3` | Кількість послідовних помилок heartbeat, після яких parser зупиняє scheduling і завершує run як `failed`. |
 | `STALE_RUN_THRESHOLD` | `5m` | Running-запуски зі старішим heartbeat автоматично позначаються як `abandoned` на наступному startup. |
@@ -186,7 +187,7 @@ Docker Compose читає локальний `.env`. Для нового сер�
 | `URL_BATCH_SIZE` | `100` | Максимальна кількість URL, що читаються з PostgreSQL за один batch. |
 | `MAX_HTML_BODY_BYTES` | `5242880` | Максимальний розмір HTML-відповіді; абсолютна межа `8 MiB`. |
 | `MAX_HTML_TOKEN_BYTES` | `524288` | Максимальний token buffer потокового HTML parser; абсолютна межа `1 MiB`. |
-| `RATE_LIMIT_INTERVAL` | `500ms` | Мінімальний інтервал між HTTP-запитами до одного host. |
+| `RATE_LIMIT_INTERVAL` | `500ms` | Мінімальний інтервал між HTTP-спробами до одного host; очікування входить у total budget, але не в attempt timeout. |
 | `MAX_CONCURRENT_PER_HOST` | `1` | Максимальна кількість одночасних HTTP-запитів до одного host. |
 | `ROBOTS_CACHE_TTL` | `1h` | TTL кешованої robots policy; дозволений максимум становить `24h`. |
 | `ALLOW_PRIVATE_TARGETS` | `false` | Дозвіл на локальні та приватні IP-цілі. |

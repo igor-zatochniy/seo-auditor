@@ -23,6 +23,7 @@ var configEnvironmentVariables = []string{
 	"DB_FETCH_TIMEOUT",
 	"DB_WRITE_TIMEOUT",
 	"REPORT_EXPORT_TIMEOUT",
+	"REPORT_RETENTION_COUNT",
 	"AUDIT_RUN_HEARTBEAT_INTERVAL",
 	"HEARTBEAT_FAILURE_THRESHOLD",
 	"STALE_RUN_THRESHOLD",
@@ -145,6 +146,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	if cfg.ReportExportTimeout != DefaultReportExportTimeout {
 		t.Fatalf("unexpected report export timeout: %s", cfg.ReportExportTimeout)
 	}
+	if cfg.ReportRetentionCount != DefaultReportRetentionCount {
+		t.Fatalf("unexpected report retention count: %d", cfg.ReportRetentionCount)
+	}
 	if cfg.AuditRunHeartbeatInterval != DefaultAuditRunHeartbeatInterval || cfg.StaleRunThreshold != DefaultStaleRunThreshold {
 		t.Fatalf("unexpected audit run heartbeat defaults: heartbeat=%s stale=%s", cfg.AuditRunHeartbeatInterval, cfg.StaleRunThreshold)
 	}
@@ -262,6 +266,17 @@ func TestLoadConfigRejectsInvertedRobotsTimeouts(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected inverted robots timeouts to fail configuration loading")
+	}
+}
+
+func TestLoadConfigRejectsInvalidReportRetentionCount(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("REPORT_RETENTION_COUNT", "0")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected zero REPORT_RETENTION_COUNT to fail configuration loading")
 	}
 }
 

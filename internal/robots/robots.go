@@ -4,17 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 )
 
 const (
-	DefaultMaxPolicyRules            = 1024
+	MaxPolicyBytes                   = 512 * 1024
 	policyContextCheckInterval       = 64
 	estimatedPolicyBaseBytes   int64 = 512
-	estimatedCompiledRuleBytes int64 = 1024
-	estimatedPatternByteFactor int64 = 16
+	estimatedCompiledRuleBytes int64 = 64
+	estimatedPatternByteFactor int64 = 2
 )
 
 type rule struct {
@@ -31,7 +30,8 @@ type group struct {
 type compiledRule struct {
 	allow       bool
 	specificity int
-	matcher     *regexp.Regexp
+	pattern     string
+	endAnchored bool
 }
 
 // Policy is an immutable robots.txt policy safe for concurrent path checks.
@@ -53,18 +53,18 @@ func RequestPath(parsed *url.URL) string {
 
 // CompilePolicy selects the applicable user-agent group and compiles its rule matchers once.
 func CompilePolicy(content, userAgent string) (*Policy, error) {
-	return CompilePolicyContext(context.Background(), content, userAgent, DefaultMaxPolicyRules)
+	return CompilePolicyContext(context.Background(), content, userAgent)
 }
 
-func CompilePolicyContext(ctx context.Context, content, userAgent string, maxRules int) (*Policy, error) {
+func CompilePolicyContext(ctx context.Context, content, userAgent string) (*Policy, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("robots.txt compile context is required")
 	}
-	if maxRules <= 0 {
-		return nil, fmt.Errorf("robots.txt rule limit must be positive")
+	if len(content) > MaxPolicyBytes {
+		return nil, fmt.Errorf("robots.txt exceeds policy limit of %d bytes", MaxPolicyBytes)
 	}
 
-	groups, err := parseGroups(ctx, content, maxRules)
+	groups, err := parseGroups(ctx, content)
 	if err != nil {
 		return nil, err
 	}
@@ -83,20 +83,18 @@ func CompilePolicyContext(ctx context.Context, content, userAgent string, maxRul
 				return nil, fmt.Errorf("compile robots.txt policy: %w", err)
 			}
 		}
-		matcher, err := compilePattern(sourceRule.pattern)
-		if err != nil {
-			return nil, fmt.Errorf("compile robots.txt rule %d (%d bytes): %w", index+1, len(sourceRule.pattern), err)
-		}
-		if matcher == nil {
+		pattern, endAnchored, ok := preparePattern(sourceRule.pattern)
+		if !ok {
 			continue
 		}
 		policy.rules = append(policy.rules, compiledRule{
 			allow:       sourceRule.allow,
 			specificity: sourceRule.specificity,
-			matcher:     matcher,
+			pattern:     pattern,
+			endAnchored: endAnchored,
 		})
 		policy.estimatedMemoryBytes += estimatedCompiledRuleBytes +
-			int64(len(sourceRule.pattern))*estimatedPatternByteFactor
+			int64(len(pattern))*estimatedPatternByteFactor
 	}
 
 	return policy, nil
@@ -130,7 +128,7 @@ func (p *Policy) allowsNormalized(requestPath string) bool {
 	allowed := true
 	bestSpecificity := -1
 	for _, rule := range p.rules {
-		if !rule.matcher.MatchString(requestPath) {
+		if !patternMatches(rule.pattern, requestPath, rule.endAnchored) {
 			continue
 		}
 		if rule.specificity > bestSpecificity || (rule.specificity == bestSpecificity && rule.allow) {
@@ -147,11 +145,10 @@ func IsPathAllowed(content, userAgent, requestPath string) bool {
 	return err == nil && policy.Allows(requestPath)
 }
 
-func parseGroups(ctx context.Context, content string, maxRules int) ([]group, error) {
+func parseGroups(ctx context.Context, content string) ([]group, error) {
 	var groups []group
 	var current group
 	seenRule := false
-	ruleCount := 0
 
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
@@ -188,10 +185,6 @@ func parseGroups(ctx context.Context, content string, maxRules int) ([]group, er
 			seenRule = true
 			if key == "disallow" && value == "" {
 				continue
-			}
-			ruleCount++
-			if ruleCount > maxRules {
-				return nil, fmt.Errorf("robots.txt contains more than %d rules", maxRules)
 			}
 			current.rules = append(current.rules, rule{
 				allow:       key == "allow",
@@ -284,21 +277,47 @@ func ruleSpecificity(pattern string) int {
 	return specificity
 }
 
-func compilePattern(pattern string) (*regexp.Regexp, error) {
+func preparePattern(pattern string) (string, bool, bool) {
 	if pattern == "" {
-		return nil, nil
+		return "", false, false
 	}
 	endAnchored := strings.HasSuffix(pattern, "$")
 	if endAnchored {
 		pattern = strings.TrimSuffix(pattern, "$")
 	}
+	return normalizeMatchOctets(pattern), endAnchored, true
+}
 
-	pattern = normalizeMatchOctets(pattern)
-	expr := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*")
-	if endAnchored {
-		expr += "$"
+func patternMatches(pattern, requestPath string, endAnchored bool) bool {
+	if !endAnchored {
+		pattern += "*"
 	}
-	return regexp.Compile(expr)
+
+	patternIndex := 0
+	pathIndex := 0
+	starIndex := -1
+	starPathIndex := 0
+	for pathIndex < len(requestPath) {
+		switch {
+		case patternIndex < len(pattern) && pattern[patternIndex] == requestPath[pathIndex]:
+			patternIndex++
+			pathIndex++
+		case patternIndex < len(pattern) && pattern[patternIndex] == '*':
+			starIndex = patternIndex
+			patternIndex++
+			starPathIndex = pathIndex
+		case starIndex >= 0:
+			patternIndex = starIndex + 1
+			starPathIndex++
+			pathIndex = starPathIndex
+		default:
+			return false
+		}
+	}
+	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+		patternIndex++
+	}
+	return patternIndex == len(pattern)
 }
 
 func normalizeMatchOctets(value string) string {

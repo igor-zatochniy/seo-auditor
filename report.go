@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +80,13 @@ func publishAuditReport(dbPool *pgxpool.Pool, cfg Config) {
 		slog.Error("Не вдалося експортувати HTML-звіт аудиту", "error", err)
 		return
 	}
+	retentionCount := cfg.ReportRetentionCount
+	if retentionCount <= 0 {
+		retentionCount = DefaultReportRetentionCount
+	}
+	if err := pruneAuditReportArchives(reportsDirectory, paths.Archive, retentionCount); err != nil {
+		slog.Warn("Не вдалося очистити застарілі HTML-звіти", "error", err)
+	}
 	slog.Info(
 		"HTML-звіт аудиту створено",
 		"latest_report", paths.Latest,
@@ -88,6 +96,64 @@ func publishAuditReport(dbPool *pgxpool.Pool, cfg Config) {
 	if err := openReportInBrowser(paths.Latest); err != nil {
 		slog.Warn("Не вдалося відкрити HTML-звіт у системному браузері", "report", paths.Latest, "error", err)
 	}
+}
+
+func pruneAuditReportArchives(reportDir, currentArchive string, retentionCount int) error {
+	if retentionCount < 1 {
+		return fmt.Errorf("report retention count must be positive")
+	}
+
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		return fmt.Errorf("list report directory: %w", err)
+	}
+	type archiveFile struct {
+		path    string
+		name    string
+		modTime time.Time
+		current bool
+	}
+	archives := make([]archiveFile, 0, len(entries))
+	currentArchive = filepath.Clean(currentArchive)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "seo-audit-") || !strings.HasSuffix(name, ".html") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("read archive report metadata for %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		path := filepath.Join(reportDir, name)
+		archives = append(archives, archiveFile{
+			path:    path,
+			name:    name,
+			modTime: info.ModTime(),
+			current: filepath.Clean(path) == currentArchive,
+		})
+	}
+
+	sort.Slice(archives, func(left, right int) bool {
+		if archives[left].current != archives[right].current {
+			return archives[left].current
+		}
+		if archives[left].modTime.Equal(archives[right].modTime) {
+			return archives[left].name > archives[right].name
+		}
+		return archives[left].modTime.After(archives[right].modTime)
+	})
+	if len(archives) <= retentionCount {
+		return nil
+	}
+	for _, archive := range archives[retentionCount:] {
+		if err := os.Remove(archive.path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove expired archive report %s: %w", archive.name, err)
+		}
+	}
+	return nil
 }
 
 func exportAuditReport(
