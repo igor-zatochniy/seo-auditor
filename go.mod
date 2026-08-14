@@ -1,6 +1,6 @@
 module github.com/igor-zatochniy/seo-auditor
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
