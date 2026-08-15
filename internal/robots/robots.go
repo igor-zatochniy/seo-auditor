@@ -121,6 +121,9 @@ func (p *Policy) AllowsURL(parsed *url.URL) bool {
 }
 
 func (p *Policy) allowsNormalized(requestPath string) bool {
+	if isRobotsTXTRequestPath(requestPath) {
+		return true
+	}
 	if p == nil || len(p.rules) == 0 {
 		return true
 	}
@@ -138,6 +141,11 @@ func (p *Policy) allowsNormalized(requestPath string) bool {
 	}
 
 	return allowed
+}
+
+func isRobotsTXTRequestPath(requestPath string) bool {
+	path, _, _ := strings.Cut(requestPath, "?")
+	return path == "/robots.txt"
 }
 
 func IsPathAllowed(content, userAgent, requestPath string) bool {

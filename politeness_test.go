@@ -146,7 +146,10 @@ func TestRobotsCacheSharesPolicyAcrossPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse test server URL: %v", err)
 	}
-	key := strings.ToLower(parsedServerURL.Scheme) + "://" + strings.ToLower(parsedServerURL.Host)
+	key, err := robotsPolicyCacheKey(parsedServerURL)
+	if err != nil {
+		t.Fatalf("build robots cache key: %v", err)
+	}
 	entry := cache.getEntry(key)
 	entry.mu.Lock()
 	compiled := entry.policy.compiled
@@ -164,6 +167,41 @@ func TestRobotsCacheSharesPolicyAcrossPaths(t *testing.T) {
 	entry.mu.Unlock()
 	if reused != compiled {
 		t.Fatal("robots cache recompiled an unexpired policy")
+	}
+}
+
+func TestIDNAliasesShareHostPolicyAndRobotsCacheKeys(t *testing.T) {
+	unicodeURL, err := url.Parse("https://bücher.de/page")
+	if err != nil {
+		t.Fatalf("parse Unicode URL: %v", err)
+	}
+	punycodeURL, err := url.Parse("https://xn--bcher-kva.de/page")
+	if err != nil {
+		t.Fatalf("parse Punycode URL: %v", err)
+	}
+
+	unicodeHostKey, err := hostPolicyKey(unicodeURL)
+	if err != nil {
+		t.Fatalf("build Unicode host policy key: %v", err)
+	}
+	punycodeHostKey, err := hostPolicyKey(punycodeURL)
+	if err != nil {
+		t.Fatalf("build Punycode host policy key: %v", err)
+	}
+	if unicodeHostKey != punycodeHostKey {
+		t.Fatalf("host policy keys differ: %q and %q", unicodeHostKey, punycodeHostKey)
+	}
+
+	unicodeCacheKey, err := robotsPolicyCacheKey(unicodeURL)
+	if err != nil {
+		t.Fatalf("build Unicode robots cache key: %v", err)
+	}
+	punycodeCacheKey, err := robotsPolicyCacheKey(punycodeURL)
+	if err != nil {
+		t.Fatalf("build Punycode robots cache key: %v", err)
+	}
+	if unicodeCacheKey != punycodeCacheKey {
+		t.Fatalf("robots cache keys differ: %q and %q", unicodeCacheKey, punycodeCacheKey)
 	}
 }
 

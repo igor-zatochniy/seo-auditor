@@ -9,11 +9,61 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 type TransportConfig struct {
 	Workers             int
 	AllowPrivateTargets bool
+}
+
+// NormalizeHostname converts equivalent DNS representations to one comparison key.
+func NormalizeHostname(host string) (string, error) {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" {
+		return "", fmt.Errorf("empty hostname")
+	}
+
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return strings.ToLower(ip.Unmap().String()), nil
+	}
+
+	asciiHost, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		return "", fmt.Errorf("normalize hostname %q: %w", host, err)
+	}
+	return strings.ToLower(strings.TrimSuffix(asciiHost, ".")), nil
+}
+
+// NormalizeAuthority canonicalizes a URL authority without changing the URL shown to users.
+func NormalizeAuthority(parsed *url.URL) (string, error) {
+	if parsed == nil {
+		return "", fmt.Errorf("URL is required")
+	}
+	host, err := NormalizeHostname(parsed.Hostname())
+	if err != nil {
+		return "", err
+	}
+
+	port := parsed.Port()
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		if port == "80" {
+			port = ""
+		}
+	case "https":
+		if port == "443" {
+			port = ""
+		}
+	}
+	if port != "" {
+		return net.JoinHostPort(host, port), nil
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]", nil
+	}
+	return host, nil
 }
 
 var blockedTargetIPPrefixes = []netip.Prefix{

@@ -324,6 +324,40 @@ func TestParsePageExcludesScriptAndStyleFromWordCount(t *testing.T) {
 	}
 }
 
+func TestParsePageCountsBodyWordsWhenHeadEndTagIsOmitted(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "explicit body",
+			body: `<html><head><title>Example</title><body><p>one two three</p></body></html>`,
+		},
+		{
+			name: "implicit body",
+			body: `<html><head><title>Example</title><p>one two three</p></html>`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(tt.body)),
+			}
+
+			data, err := parsePage(resp, "https://example.com", int64(len(tt.body)+1), DefaultMaxHTMLTokenBytes)
+			if err != nil {
+				t.Fatalf("parse page: %v", err)
+			}
+			if data.WordCount != 3 {
+				t.Fatalf("word count = %d, want 3", data.WordCount)
+			}
+		})
+	}
+}
+
 func TestParsePageUsesBaseHrefForCanonicalAndRelativeLinks(t *testing.T) {
 	body := `<html><head>
 <link rel="canonical" href="docs/page">
@@ -423,6 +457,44 @@ func TestParsePageNormalizesDefaultPortsForCanonicalAndLinks(t *testing.T) {
 			data.InternalLinksCount,
 			data.ExternalLinksCount,
 		)
+	}
+}
+
+func TestParsePageNormalizesIDNForCanonicalAndLinks(t *testing.T) {
+	tests := []struct {
+		name      string
+		targetURL string
+		aliasHost string
+	}{
+		{name: "target punycode", targetURL: "https://xn--bcher-kva.de/page", aliasHost: "bücher.de"},
+		{name: "target unicode", targetURL: "https://bücher.de/page", aliasHost: "xn--bcher-kva.de"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `<html><head><link rel="canonical" href="https://` + tt.aliasHost + `/page"></head><body>` +
+				`<a href="https://` + tt.aliasHost + `/about">About</a></body></html>`
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+
+			data, err := parsePage(resp, tt.targetURL, int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+			if err != nil {
+				t.Fatalf("parse page: %v", err)
+			}
+			if !data.IsSelfCanonical {
+				t.Fatal("IDN alias canonical was not classified as self-canonical")
+			}
+			if data.InternalLinksCount != 1 || data.ExternalLinksCount != 0 {
+				t.Fatalf(
+					"link counts = internal %d external %d, want 1 and 0",
+					data.InternalLinksCount,
+					data.ExternalLinksCount,
+				)
+			}
+		})
 	}
 }
 

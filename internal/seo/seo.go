@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
@@ -253,6 +253,10 @@ func newPageParser(data *Data, targetURL string) *pageParser {
 }
 
 func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
+	if p.headDepth > 0 && startsBodyContent(name) {
+		p.headDepth = 0
+	}
+
 	switch {
 	case bytes.Equal(name, []byte("title")):
 		if !p.titleSeen {
@@ -410,6 +414,15 @@ func (p *pageParser) handleText(text []byte) {
 	}
 	if p.headDepth == 0 && !p.collectTitle && p.ignoredTextDepth == 0 {
 		p.bodyWordCounter.Write(text)
+	}
+}
+
+func startsBodyContent(name []byte) bool {
+	switch string(name) {
+	case "base", "basefont", "bgsound", "head", "html", "link", "meta", "noframes", "noscript", "script", "style", "template", "title":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -750,23 +763,9 @@ func normalizedAuthority(parsed *url.URL) string {
 	if parsed == nil {
 		return ""
 	}
-	hostname := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	port := parsed.Port()
-	switch strings.ToLower(parsed.Scheme) {
-	case "http":
-		if port == "80" {
-			port = ""
-		}
-	case "https":
-		if port == "443" {
-			port = ""
-		}
+	authority, err := crawler.NormalizeAuthority(parsed)
+	if err == nil {
+		return authority
 	}
-	if port != "" {
-		return net.JoinHostPort(hostname, port)
-	}
-	if strings.Contains(hostname, ":") {
-		return "[" + hostname + "]"
-	}
-	return hostname
+	return strings.ToLower(strings.TrimSuffix(parsed.Host, "."))
 }

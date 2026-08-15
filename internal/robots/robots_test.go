@@ -59,6 +59,22 @@ func TestUTF8RuleMatchesPercentEncodedRequestPath(t *testing.T) {
 	}
 }
 
+func TestRobotsTXTIsImplicitlyAllowed(t *testing.T) {
+	policy, err := CompilePolicy("User-agent: *\nDisallow: /\n", "ExampleBot/1.0")
+	if err != nil {
+		t.Fatalf("CompilePolicy() error = %v", err)
+	}
+
+	for _, requestPath := range []string{"/robots.txt", "/robots.txt?cache=bust", "/%72obots.txt"} {
+		if !policy.Allows(requestPath) {
+			t.Fatalf("robots.txt resource %q was not implicitly allowed", requestPath)
+		}
+	}
+	if policy.Allows("/robots.txt/backup") {
+		t.Fatal("implicit allowance unexpectedly covered a different path")
+	}
+}
+
 func TestRuleSpecificityCountsPercentEncodedOctets(t *testing.T) {
 	content := `
 User-agent: *

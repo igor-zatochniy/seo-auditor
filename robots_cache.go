@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	robotsparser "github.com/igor-zatochniy/seo-auditor/internal/robots"
 )
 
@@ -116,7 +117,10 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 		return false, fmt.Errorf("parse target URL for robots.txt: %w", err)
 	}
 
-	key := strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
+	key, err := robotsPolicyCacheKey(parsed)
+	if err != nil {
+		return false, err
+	}
 	robotsCtx, robotsCancel := context.WithTimeout(ctx, totalTimeout)
 	defer robotsCancel()
 
@@ -127,6 +131,14 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 		return false, err
 	}
 	return policy.allows(parsed), nil
+}
+
+func robotsPolicyCacheKey(parsed *url.URL) (string, error) {
+	authority, err := crawler.NormalizeAuthority(parsed)
+	if err != nil {
+		return "", fmt.Errorf("normalize robots.txt cache authority: %w", err)
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + authority, nil
 }
 
 func (c *robotsPolicyCache) policy(

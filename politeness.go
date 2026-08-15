@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"golang.org/x/time/rate"
 )
 
@@ -189,9 +190,12 @@ func (m *hostPolicyManager) observeRetryAfter(target *url.URL, statusCode int, v
 }
 
 func hostPolicyKey(target *url.URL) (string, error) {
-	host := strings.ToLower(strings.TrimSuffix(target.Hostname(), "."))
-	if host == "" {
+	if target == nil {
 		return "", fmt.Errorf("cannot apply host policy to URL without host")
+	}
+	host, err := crawler.NormalizeHostname(target.Hostname())
+	if err != nil {
+		return "", fmt.Errorf("cannot apply host policy: %w", err)
 	}
 	return host, nil
 }
