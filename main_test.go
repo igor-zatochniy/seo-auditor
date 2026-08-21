@@ -358,6 +358,152 @@ func TestParsePageCountsBodyWordsWhenHeadEndTagIsOmitted(t *testing.T) {
 	}
 }
 
+func TestParsePageAcceptsHeadOnlyMetadataBeforeBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "explicit head",
+			body: `<html><head><link rel="canonical" href="/page">` +
+				`<meta name="robots" content="index,follow"></head><body>Content</body></html>`,
+		},
+		{
+			name: "implicit head",
+			body: `<html><link rel="canonical" href="/page">` +
+				`<meta name="robots" content="index,follow"><body>Content</body></html>`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(tt.body)),
+			}
+
+			data, err := parsePage(resp, "https://example.com/page", int64(len(tt.body)+1), DefaultMaxHTMLTokenBytes)
+			if err != nil {
+				t.Fatalf("parse page: %v", err)
+			}
+			if data.CanonicalURL != "/page" || !data.IsSelfCanonical {
+				t.Fatalf("canonical = %q self=%t, want /page and true", data.CanonicalURL, data.IsSelfCanonical)
+			}
+			if data.MetaRobots != "index, follow" {
+				t.Fatalf("meta robots = %q, want %q", data.MetaRobots, "index, follow")
+			}
+		})
+	}
+}
+
+func TestParsePageIgnoresHeadOnlyMetadataInBody(t *testing.T) {
+	body := `<html><head></head><body>
+<title>Body title</title>
+<link rel="canonical" href="/page">
+<meta name="description" content="Body description">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width">
+<meta property="og:title" content="Body Open Graph title">
+Visible content
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.Title != "" || data.CanonicalURL != "" || data.IsSelfCanonical {
+		t.Fatalf(
+			"body metadata leaked into title/canonical: title=%q canonical=%q self=%t",
+			data.Title,
+			data.CanonicalURL,
+			data.IsSelfCanonical,
+		)
+	}
+	if data.Description != "" || data.MetaRobots != "" || data.HasViewport || data.OGTitle != "" {
+		t.Fatalf(
+			"body metadata leaked into SEO fields: description=%q robots=%q viewport=%t og_title=%q",
+			data.Description,
+			data.MetaRobots,
+			data.HasViewport,
+			data.OGTitle,
+		)
+	}
+	if data.WordCount != 2 {
+		t.Fatalf("word count = %d, want 2", data.WordCount)
+	}
+}
+
+func TestParsePageIgnoresTemplateContentAcrossSEOMetrics(t *testing.T) {
+	body := `<html><head>
+<template>
+  <title>Template title</title>
+  <link rel="canonical" href="https://other.example/page">
+  <meta name="description" content="Template description">
+  <meta name="robots" content="noindex">
+  <meta name="viewport" content="width=device-width">
+  <script type="application/ld+json">{"name":"Template data"}</script>
+  <h1>Fake heading</h1>
+  <a href="https://external.example/">Fake link</a>
+  <img src="fake.jpg">
+  hidden template words
+</template>
+</head><body>
+  <h1>Real heading</h1>
+  <a href="/about">Internal link</a>
+  <img src="real.jpg" alt="Real image">
+  <p>real visible words</p>
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.Title != "" || data.Description != "" || data.CanonicalURL != "" || data.MetaRobots != "" {
+		t.Fatalf(
+			"template metadata leaked into SEO fields: title=%q description=%q canonical=%q robots=%q",
+			data.Title,
+			data.Description,
+			data.CanonicalURL,
+			data.MetaRobots,
+		)
+	}
+	if data.HasViewport || data.HasJsonLd {
+		t.Fatalf("template feature flags leaked: viewport=%t json_ld=%t", data.HasViewport, data.HasJsonLd)
+	}
+	if data.H1 != "Real heading" || data.H1Count != 1 {
+		t.Fatalf("H1 = %q count=%d, want real heading and 1", data.H1, data.H1Count)
+	}
+	if data.InternalLinksCount != 1 || data.ExternalLinksCount != 0 || data.LinksCount != 1 {
+		t.Fatalf(
+			"link counts = internal %d external %d total %d, want 1, 0, 1",
+			data.InternalLinksCount,
+			data.ExternalLinksCount,
+			data.LinksCount,
+		)
+	}
+	if data.TotalImages != 1 || data.ImagesMissingAlt != 0 {
+		t.Fatalf(
+			"image counts = total %d missing_alt %d, want 1 and 0",
+			data.TotalImages,
+			data.ImagesMissingAlt,
+		)
+	}
+	if data.WordCount != 7 {
+		t.Fatalf("word count = %d, want 7", data.WordCount)
+	}
+}
+
 func TestParsePageUsesBaseHrefForCanonicalAndRelativeLinks(t *testing.T) {
 	body := `<html><head>
 <link rel="canonical" href="docs/page">

@@ -234,12 +234,21 @@ type pageParser struct {
 	canonicalSeen     bool
 	canonicalSource   string
 	metaRobots        robotsDirectiveSet
-	headDepth         int
+	documentPhase     documentPhase
+	templateDepth     int
 	ignoredTextDepth  int
+	ignoredTitleDepth int
 	relativeLinks     int
 	subHeaderCounts   [7]int
 	bodyWordCounter   wordCounter
 }
+
+type documentPhase uint8
+
+const (
+	documentPhaseHead documentPhase = iota
+	documentPhaseBody
+)
 
 func newPageParser(data *Data, targetURL string) *pageParser {
 	parsedTarget, _ := url.Parse(targetURL)
@@ -253,18 +262,27 @@ func newPageParser(data *Data, targetURL string) *pageParser {
 }
 
 func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
-	if p.headDepth > 0 && startsBodyContent(name) {
-		p.headDepth = 0
+	if bytes.Equal(name, []byte("template")) {
+		p.templateDepth++
+		return
+	}
+	if p.templateDepth > 0 {
+		return
+	}
+	if p.documentPhase == documentPhaseHead && startsBodyContent(name) {
+		p.documentPhase = documentPhaseBody
 	}
 
 	switch {
 	case bytes.Equal(name, []byte("title")):
+		if p.documentPhase != documentPhaseHead {
+			p.ignoredTitleDepth++
+			return
+		}
 		if !p.titleSeen {
 			p.titleSeen = true
 			p.collectTitle = true
 		}
-	case bytes.Equal(name, []byte("head")):
-		p.headDepth++
 	case bytes.Equal(name, []byte("h1")):
 		p.data.H1Count++
 		if p.data.H1Count == 1 {
@@ -281,13 +299,16 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	case bytes.Equal(name, []byte("h6")):
 		p.subHeaderCounts[6]++
 	case bytes.Equal(name, []byte("meta")):
-		p.handleMeta(attributes)
+		if p.documentPhase == documentPhaseHead {
+			p.handleMeta(attributes)
+		}
 	case bytes.Equal(name, []byte("base")):
-		if attributes.hasHref {
+		if p.documentPhase == documentPhaseHead && attributes.hasHref {
 			p.setDocumentBase(attributes.href)
 		}
 	case bytes.Equal(name, []byte("link")):
-		if !p.canonicalSeen && attributes.hasRel && attributes.hasHref &&
+		if p.documentPhase == documentPhaseHead && !p.canonicalSeen &&
+			attributes.hasRel && attributes.hasHref &&
 			hasTokenFold(attributes.rel, []byte("canonical")) {
 			p.canonicalSeen = true
 			p.canonicalSource = strings.TrimSpace(string(attributes.href))
@@ -406,13 +427,17 @@ func (p *pageParser) countLink(rawHref []byte) {
 }
 
 func (p *pageParser) handleText(text []byte) {
+	if p.templateDepth > 0 {
+		return
+	}
 	if p.collectTitle {
 		p.title.Write(text)
 	}
 	if p.collectFirstH1 {
 		p.firstH1.Write(text)
 	}
-	if p.headDepth == 0 && !p.collectTitle && p.ignoredTextDepth == 0 {
+	if p.documentPhase == documentPhaseBody && !p.collectTitle &&
+		p.ignoredTextDepth == 0 && p.ignoredTitleDepth == 0 {
 		p.bodyWordCounter.Write(text)
 	}
 }
@@ -427,15 +452,27 @@ func startsBodyContent(name []byte) bool {
 }
 
 func (p *pageParser) handleEndTag(name []byte) {
+	if bytes.Equal(name, []byte("template")) {
+		if p.templateDepth > 0 {
+			p.templateDepth--
+		}
+		return
+	}
+	if p.templateDepth > 0 {
+		return
+	}
+
 	switch {
 	case bytes.Equal(name, []byte("title")):
-		p.collectTitle = false
+		if p.collectTitle {
+			p.collectTitle = false
+		} else if p.ignoredTitleDepth > 0 {
+			p.ignoredTitleDepth--
+		}
 	case bytes.Equal(name, []byte("h1")):
 		p.collectFirstH1 = false
 	case bytes.Equal(name, []byte("head")):
-		if p.headDepth > 0 {
-			p.headDepth--
-		}
+		p.documentPhase = documentPhaseBody
 	case bytes.Equal(name, []byte("script")), bytes.Equal(name, []byte("style")):
 		if p.ignoredTextDepth > 0 {
 			p.ignoredTextDepth--
