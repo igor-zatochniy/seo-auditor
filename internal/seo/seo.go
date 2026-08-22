@@ -168,20 +168,22 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 }
 
 type tagAttributes struct {
-	name        []byte
-	property    []byte
-	content     []byte
-	rel         []byte
-	href        []byte
-	typeValue   []byte
-	alt         []byte
-	hasName     bool
-	hasProperty bool
-	hasContent  bool
-	hasRel      bool
-	hasHref     bool
-	hasType     bool
-	hasAlt      bool
+	name              []byte
+	property          []byte
+	content           []byte
+	rel               []byte
+	href              []byte
+	typeValue         []byte
+	alt               []byte
+	shadowRootMode    []byte
+	hasName           bool
+	hasProperty       bool
+	hasContent        bool
+	hasRel            bool
+	hasHref           bool
+	hasType           bool
+	hasAlt            bool
+	hasShadowRootMode bool
 }
 
 func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttributes {
@@ -210,6 +212,9 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 		case bytes.Equal(key, []byte("alt")):
 			attributes.alt = value
 			attributes.hasAlt = true
+		case bytes.Equal(key, []byte("shadowrootmode")):
+			attributes.shadowRootMode = value
+			attributes.hasShadowRootMode = true
 		}
 		hasAttributes = moreAttributes
 	}
@@ -217,30 +222,32 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 }
 
 type pageParser struct {
-	data              *Data
-	targetURL         *url.URL
-	documentBaseURL   *url.URL
-	documentBaseSet   bool
-	title             boundedTextCollector
-	firstH1           boundedTextCollector
-	titleSeen         bool
-	collectTitle      bool
-	collectFirstH1    bool
-	descriptionSeen   bool
-	ogTitleSeen       bool
-	ogDescriptionSeen bool
-	ogImageSeen       bool
-	twitterCardSeen   bool
-	canonicalSeen     bool
-	canonicalSource   string
-	metaRobots        robotsDirectiveSet
-	documentPhase     documentPhase
-	templateDepth     int
-	ignoredTextDepth  int
-	ignoredTitleDepth int
-	relativeLinks     int
-	subHeaderCounts   [7]int
-	bodyWordCounter   wordCounter
+	data               *Data
+	targetURL          *url.URL
+	documentBaseURL    *url.URL
+	documentBaseSet    bool
+	title              boundedTextCollector
+	firstH1            boundedTextCollector
+	titleSeen          bool
+	collectTitle       bool
+	collectFirstH1     bool
+	descriptionSeen    bool
+	ogTitleSeen        bool
+	ogDescriptionSeen  bool
+	ogImageSeen        bool
+	twitterCardSeen    bool
+	canonicalSeen      bool
+	canonicalSource    string
+	metaRobots         robotsDirectiveSet
+	documentPhase      documentPhase
+	templateStack      []templateMode
+	inertTemplateDepth int
+	shadowRootDepth    int
+	ignoredTextDepth   int
+	ignoredTitleDepth  int
+	relativeLinks      int
+	subHeaderCounts    [7]int
+	bodyWordCounter    wordCounter
 }
 
 type documentPhase uint8
@@ -248,6 +255,13 @@ type documentPhase uint8
 const (
 	documentPhaseHead documentPhase = iota
 	documentPhaseBody
+)
+
+type templateMode uint8
+
+const (
+	templateModeInert templateMode = iota
+	templateModeShadowRoot
 )
 
 func newPageParser(data *Data, targetURL string) *pageParser {
@@ -263,19 +277,19 @@ func newPageParser(data *Data, targetURL string) *pageParser {
 
 func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	if bytes.Equal(name, []byte("template")) {
-		p.templateDepth++
+		p.startTemplate(attributes)
 		return
 	}
-	if p.templateDepth > 0 {
+	if p.inertTemplateDepth > 0 {
 		return
 	}
-	if p.documentPhase == documentPhaseHead && startsBodyContent(name) {
+	if p.documentPhase == documentPhaseHead && p.shadowRootDepth == 0 && startsBodyContent(name) {
 		p.documentPhase = documentPhaseBody
 	}
 
 	switch {
 	case bytes.Equal(name, []byte("title")):
-		if p.documentPhase != documentPhaseHead {
+		if !p.inDocumentHead() {
 			p.ignoredTitleDepth++
 			return
 		}
@@ -299,15 +313,17 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	case bytes.Equal(name, []byte("h6")):
 		p.subHeaderCounts[6]++
 	case bytes.Equal(name, []byte("meta")):
-		if p.documentPhase == documentPhaseHead {
+		if p.inDocumentHead() {
 			p.handleMeta(attributes)
+		} else if p.shadowRootDepth == 0 {
+			p.handleRobotsMeta(attributes)
 		}
 	case bytes.Equal(name, []byte("base")):
-		if p.documentPhase == documentPhaseHead && attributes.hasHref {
+		if p.inDocumentHead() && attributes.hasHref {
 			p.setDocumentBase(attributes.href)
 		}
 	case bytes.Equal(name, []byte("link")):
-		if p.documentPhase == documentPhaseHead && !p.canonicalSeen &&
+		if p.inDocumentHead() && !p.canonicalSeen &&
 			attributes.hasRel && attributes.hasHref &&
 			hasTokenFold(attributes.rel, []byte("canonical")) {
 			p.canonicalSeen = true
@@ -317,7 +333,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 		}
 	case bytes.Equal(name, []byte("script")):
 		p.ignoredTextDepth++
-		if attributes.hasType &&
+		if p.shadowRootDepth == 0 && attributes.hasType &&
 			bytes.EqualFold(bytes.TrimSpace(attributes.typeValue), []byte("application/ld+json")) {
 			p.data.HasJsonLd = true
 		}
@@ -332,6 +348,48 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 		if !attributes.hasAlt || len(bytes.TrimSpace(attributes.alt)) == 0 {
 			p.data.ImagesMissingAlt++
 		}
+	}
+}
+
+func (p *pageParser) inDocumentHead() bool {
+	return p.documentPhase == documentPhaseHead && p.shadowRootDepth == 0
+}
+
+func (p *pageParser) startTemplate(attributes tagAttributes) {
+	mode := templateModeInert
+	if p.documentPhase == documentPhaseBody && p.inertTemplateDepth == 0 &&
+		attributes.hasShadowRootMode {
+		shadowRootMode := bytes.TrimSpace(attributes.shadowRootMode)
+		if bytes.EqualFold(shadowRootMode, []byte("open")) ||
+			bytes.EqualFold(shadowRootMode, []byte("closed")) {
+			mode = templateModeShadowRoot
+		}
+	}
+
+	p.templateStack = append(p.templateStack, mode)
+	if mode == templateModeShadowRoot {
+		p.shadowRootDepth++
+		return
+	}
+	p.inertTemplateDepth++
+}
+
+func (p *pageParser) endTemplate() {
+	if len(p.templateStack) == 0 {
+		return
+	}
+
+	lastIndex := len(p.templateStack) - 1
+	mode := p.templateStack[lastIndex]
+	p.templateStack = p.templateStack[:lastIndex]
+	if mode == templateModeShadowRoot {
+		if p.shadowRootDepth > 0 {
+			p.shadowRootDepth--
+		}
+		return
+	}
+	if p.inertTemplateDepth > 0 {
+		p.inertTemplateDepth--
 	}
 }
 
@@ -357,6 +415,8 @@ func (p *pageParser) setDocumentBase(rawHref []byte) {
 }
 
 func (p *pageParser) handleMeta(attributes tagAttributes) {
+	p.handleRobotsMeta(attributes)
+
 	if attributes.hasName {
 		name := bytes.TrimSpace(attributes.name)
 		switch {
@@ -370,10 +430,6 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 			if attributes.hasContent {
 				p.data.TwitterCard, p.data.TwitterCardTruncated, p.data.TwitterCardOriginalLength =
 					boundedBytes(attributes.content, StorageTwitterCardMaxRunes)
-			}
-		case bytes.EqualFold(name, []byte("robots")):
-			if attributes.hasContent {
-				p.metaRobots.Add(string(attributes.content))
 			}
 		case bytes.EqualFold(name, []byte("viewport")):
 			p.data.HasViewport = true
@@ -397,6 +453,14 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 		p.data.OGImage, p.data.OGImageTruncated, p.data.OGImageOriginalLength =
 			boundedBytes(attributes.content, StorageURLMaxRunes)
 	}
+}
+
+func (p *pageParser) handleRobotsMeta(attributes tagAttributes) {
+	if !attributes.hasName || !attributes.hasContent ||
+		!bytes.EqualFold(bytes.TrimSpace(attributes.name), []byte("robots")) {
+		return
+	}
+	p.metaRobots.Add(string(attributes.content))
 }
 
 func (p *pageParser) countLink(rawHref []byte) {
@@ -427,8 +491,13 @@ func (p *pageParser) countLink(rawHref []byte) {
 }
 
 func (p *pageParser) handleText(text []byte) {
-	if p.templateDepth > 0 {
+	if p.inertTemplateDepth > 0 {
 		return
+	}
+	if p.documentPhase == documentPhaseHead && p.shadowRootDepth == 0 &&
+		!p.collectTitle && p.ignoredTitleDepth == 0 && p.ignoredTextDepth == 0 &&
+		len(bytes.TrimSpace(text)) > 0 {
+		p.documentPhase = documentPhaseBody
 	}
 	if p.collectTitle {
 		p.title.Write(text)
@@ -453,12 +522,10 @@ func startsBodyContent(name []byte) bool {
 
 func (p *pageParser) handleEndTag(name []byte) {
 	if bytes.Equal(name, []byte("template")) {
-		if p.templateDepth > 0 {
-			p.templateDepth--
-		}
+		p.endTemplate()
 		return
 	}
-	if p.templateDepth > 0 {
+	if p.inertTemplateDepth > 0 {
 		return
 	}
 

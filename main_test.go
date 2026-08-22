@@ -358,6 +358,23 @@ func TestParsePageCountsBodyWordsWhenHeadEndTagIsOmitted(t *testing.T) {
 	}
 }
 
+func TestParsePageCountsDirectTextAfterImplicitHead(t *testing.T) {
+	body := `<html><head><title>Page</title>one two three</html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.WordCount != 3 {
+		t.Fatalf("word count = %d, want 3", data.WordCount)
+	}
+}
+
 func TestParsePageAcceptsHeadOnlyMetadataBeforeBody(t *testing.T) {
 	tests := []struct {
 		name string
@@ -397,7 +414,7 @@ func TestParsePageAcceptsHeadOnlyMetadataBeforeBody(t *testing.T) {
 	}
 }
 
-func TestParsePageIgnoresHeadOnlyMetadataInBody(t *testing.T) {
+func TestParsePageReadsBodyRobotsAndIgnoresOtherBodyMetadata(t *testing.T) {
 	body := `<html><head></head><body>
 <title>Body title</title>
 <link rel="canonical" href="/page">
@@ -425,14 +442,16 @@ Visible content
 			data.IsSelfCanonical,
 		)
 	}
-	if data.Description != "" || data.MetaRobots != "" || data.HasViewport || data.OGTitle != "" {
+	if data.Description != "" || data.HasViewport || data.OGTitle != "" {
 		t.Fatalf(
-			"body metadata leaked into SEO fields: description=%q robots=%q viewport=%t og_title=%q",
+			"head-only body metadata leaked into SEO fields: description=%q viewport=%t og_title=%q",
 			data.Description,
-			data.MetaRobots,
 			data.HasViewport,
 			data.OGTitle,
 		)
+	}
+	if data.MetaRobots != "noindex" {
+		t.Fatalf("body meta robots = %q, want noindex", data.MetaRobots)
 	}
 	if data.WordCount != 2 {
 		t.Fatalf("word count = %d, want 2", data.WordCount)
@@ -452,6 +471,10 @@ func TestParsePageIgnoresTemplateContentAcrossSEOMetrics(t *testing.T) {
   <a href="https://external.example/">Fake link</a>
   <img src="fake.jpg">
   hidden template words
+  <template shadowrootmode="open">
+    <h1>Nested shadow heading</h1>
+    nested shadow words
+  </template>
 </template>
 </head><body>
   <h1>Real heading</h1>
@@ -501,6 +524,92 @@ func TestParsePageIgnoresTemplateContentAcrossSEOMetrics(t *testing.T) {
 	}
 	if data.WordCount != 7 {
 		t.Fatalf("word count = %d, want 7", data.WordCount)
+	}
+}
+
+func TestParsePageIncludesDeclarativeShadowDOMContent(t *testing.T) {
+	for _, mode := range []string{"open", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			body := `<html><head>
+<title>Docs</title>
+<meta name="robots" content="index,follow">
+</head><body><docs-page>
+<template shadowrootmode="` + mode + `">
+  <title>Shadow title</title>
+  <link rel="canonical" href="https://other.example/page">
+  <meta name="description" content="Shadow description">
+  <meta name="robots" content="noindex">
+  <script type="application/ld+json">{"name":"Shadow data"}</script>
+  <h1>Documentation</h1>
+  <p>Important visible documentation text</p>
+  <a href="/install">Install</a>
+  <img src="/hero.jpg" alt="">
+  <template><h1>Inert nested heading</h1>hidden nested words</template>
+</template>
+</docs-page></body></html>`
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+
+			data, err := parsePage(resp, "https://example.com/docs", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+			if err != nil {
+				t.Fatalf("parse page: %v", err)
+			}
+			if data.Title != "Docs" || data.Description != "" || data.CanonicalURL != "" {
+				t.Fatalf(
+					"shadow metadata leaked into document fields: title=%q description=%q canonical=%q",
+					data.Title,
+					data.Description,
+					data.CanonicalURL,
+				)
+			}
+			if data.MetaRobots != "index, follow" || data.HasJsonLd {
+				t.Fatalf("shadow directives leaked: robots=%q json_ld=%t", data.MetaRobots, data.HasJsonLd)
+			}
+			if data.H1 != "Documentation" || data.H1Count != 1 {
+				t.Fatalf("H1 = %q count=%d, want Documentation and 1", data.H1, data.H1Count)
+			}
+			if data.InternalLinksCount != 1 || data.ExternalLinksCount != 0 || data.LinksCount != 1 {
+				t.Fatalf(
+					"link counts = internal %d external %d total %d, want 1, 0, 1",
+					data.InternalLinksCount,
+					data.ExternalLinksCount,
+					data.LinksCount,
+				)
+			}
+			if data.TotalImages != 1 || data.ImagesMissingAlt != 1 {
+				t.Fatalf(
+					"image counts = total %d missing_alt %d, want 1 and 1",
+					data.TotalImages,
+					data.ImagesMissingAlt,
+				)
+			}
+			if data.WordCount != 6 {
+				t.Fatalf("word count = %d, want 6", data.WordCount)
+			}
+		})
+	}
+}
+
+func TestParsePageTreatsInvalidShadowRootModeAsInert(t *testing.T) {
+	body := `<html><body>
+<template shadowrootmode="invalid"><h1>Hidden heading</h1>hidden words</template>
+<p>Visible content</p>
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.H1Count != 0 || data.WordCount != 2 {
+		t.Fatalf("invalid shadow root leaked content: h1_count=%d word_count=%d", data.H1Count, data.WordCount)
 	}
 }
 
