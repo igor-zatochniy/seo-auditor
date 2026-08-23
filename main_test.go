@@ -155,6 +155,73 @@ func TestRobotsHeaderDirectivesKeepsNoindexWithinStorageBound(t *testing.T) {
 	}
 }
 
+func TestRobotsHeaderDirectivesPreservesScopeAndCommaSensitiveRules(t *testing.T) {
+	tests := []struct {
+		name     string
+		header   string
+		expected string
+	}{
+		{
+			name:     "googlebot scoped rules",
+			header:   "googlebot: nofollow, noindex",
+			expected: "googlebot: noindex, googlebot: nofollow",
+		},
+		{
+			name:     "arbitrary crawler scope",
+			header:   "otherbot: noindex, nofollow",
+			expected: "otherbot: noindex, otherbot: nofollow",
+		},
+		{
+			name:     "parameterized generic rule",
+			header:   "max-snippet:20, noindex",
+			expected: "noindex, max-snippet:20",
+		},
+		{
+			name:     "generic unavailable after with comma",
+			header:   "unavailable_after: Fri, 25 Jun 2010 15:00:00 PST",
+			expected: "unavailable_after: Fri, 25 Jun 2010 15:00:00 PST",
+		},
+		{
+			name:   "scoped unavailable after followed by rule",
+			header: "googlebot: unavailable_after: Fri, 25 Jun 2010 15:00:00 PST, noindex",
+			expected: "googlebot: noindex, " +
+				"googlebot: unavailable_after: Fri, 25 Jun 2010 15:00:00 PST",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value, truncated, _ := robotsHeaderDirectives(http.Header{"X-Robots-Tag": []string{tt.header}})
+			if truncated {
+				t.Fatal("robots header was unexpectedly truncated")
+			}
+			if value != tt.expected {
+				t.Fatalf("X-Robots-Tag = %q, want %q", value, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParsePagePreservesCommaInScopedMetaUnavailableAfter(t *testing.T) {
+	body := `<html><head>
+<meta name="googlebot" content="unavailable_after: Fri, 25 Jun 2010 15:00:00 PST">
+</head><body>Content</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	want := "googlebot: unavailable_after: Fri, 25 Jun 2010 15:00:00 PST"
+	if data.MetaRobots != want {
+		t.Fatalf("meta robots = %q, want %q", data.MetaRobots, want)
+	}
+}
+
 func TestStorageSanitizerTruncatesOversizedHTMLMetadata(t *testing.T) {
 	longTitle := strings.Repeat("T", storageTitleMaxRunes+25)
 	longDescription := strings.Repeat("D", storageDescriptionMaxRunes+25)

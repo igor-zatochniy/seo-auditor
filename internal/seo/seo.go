@@ -640,7 +640,7 @@ func (s *robotsDirectiveSet) AddScoped(scope, raw string) {
 }
 
 func (s *robotsDirectiveSet) addScoped(scope, raw string) {
-	for _, candidate := range strings.Split(raw, ",") {
+	for _, candidate := range splitRobotsDirectives(raw) {
 		directive := strings.TrimSpace(candidate)
 		if directive == "" {
 			continue
@@ -658,6 +658,82 @@ func (s *robotsDirectiveSet) addScoped(scope, raw string) {
 		s.seen[key] = struct{}{}
 		s.values = append(s.values, directive)
 	}
+}
+
+func splitRobotsDirectives(raw string) []string {
+	var directives []string
+	start := 0
+	for index := 0; index < len(raw); index++ {
+		if raw[index] != ',' {
+			continue
+		}
+
+		current := strings.TrimSpace(raw[start:index])
+		remainder := strings.TrimSpace(raw[index+1:])
+		if robotsDirectiveName(current) == "unavailable_after" &&
+			len(remainder) > 0 && remainder[0] >= '0' && remainder[0] <= '9' {
+			continue
+		}
+		if current != "" {
+			directives = append(directives, current)
+		}
+		start = index + 1
+	}
+	if directive := strings.TrimSpace(raw[start:]); directive != "" {
+		directives = append(directives, directive)
+	}
+	return directives
+}
+
+func robotsDirectiveName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if separator := strings.IndexAny(name, ":, \t\r\n"); separator >= 0 {
+		name = name[:separator]
+	}
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func isSupportedRobotsDirective(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "all", "index", "follow", "noindex", "nofollow", "none", "nosnippet",
+		"indexifembedded", "max-snippet", "max-image-preview", "max-video-preview",
+		"notranslate", "noimageindex", "unavailable_after", "noarchive", "nocache",
+		"nositelinkssearchbox":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitXRobotsTagScope(raw string) (string, string) {
+	value := strings.TrimSpace(raw)
+	separator := strings.IndexByte(value, ':')
+	if separator < 0 {
+		return "", value
+	}
+
+	candidateScope := strings.TrimSpace(value[:separator])
+	rules := strings.TrimSpace(value[separator+1:])
+	if candidateScope == "" || rules == "" || isSupportedRobotsDirective(candidateScope) ||
+		!isHTTPToken(candidateScope) || !isSupportedRobotsDirective(robotsDirectiveName(rules)) {
+		return "", value
+	}
+	return strings.ToLower(candidateScope), rules
+}
+
+func isHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *robotsDirectiveSet) String() string {
@@ -691,7 +767,12 @@ func robotsDirectivePriority(directive string) int {
 func RobotsHeaderDirectives(header http.Header) (string, bool, int) {
 	var directives robotsDirectiveSet
 	for _, value := range header.Values("X-Robots-Tag") {
-		directives.Add(value)
+		scope, rules := splitXRobotsTagScope(value)
+		if scope == "" {
+			directives.Add(rules)
+			continue
+		}
+		directives.AddScoped(scope, rules)
 	}
 	return boundedString(directives.String(), StorageRobotsTagMaxRunes)
 }
