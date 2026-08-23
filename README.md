@@ -126,11 +126,15 @@ Docker Compose
 - `description` та `og:description` обмежені 4000 rune до persistence та HTML export.
 - `H1` count і структура `H2-H6`.
 - Canonical URL і self-canonical check з урахуванням першого придатного web `<base href>` та значущого trailing slash поза коренем.
-- Агреговані directives з усіх `meta robots` і `X-Robots-Tag`, а також окремий `robots_outcome`.
+- Агреговані directives з generic `meta robots`, scoped `googlebot`/`googlebot-news` і `X-Robots-Tag`; crawler scope зберігається у значенні, також записується окремий `robots_outcome`.
 - Open Graph, Twitter Card, JSON-LD і viewport.
 - Internal/external HTTP(S) links з урахуванням document base; explicit non-web schemes не потрапляють у метрику.
 - Image alt audit.
-- Word count видимого текстового контенту без вмісту `<script>`/`<style>` і duration.
+- Word count текстового контенту з HTML source без вмісту `<script>`, `<style>` та inert `<template>`, а також duration.
+
+### Межі статичного аналізу
+
+Parser аналізує HTML, повернутий сервером, без виконання JavaScript, CSS layout або повного browser tree construction. Контент declarative Shadow DOM з `shadowrootmode="open|closed"` враховується як source-level approximation. Slot assignment, приховування fallback-вмісту та видимість light DOM без відповідного `<slot>` не моделюються; для точної перевірки rendered HTML слід використовувати URL Inspection Tool або еквівалентний browser renderer.
 
 ## Приклад результату
 

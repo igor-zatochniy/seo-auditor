@@ -456,11 +456,19 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 }
 
 func (p *pageParser) handleRobotsMeta(attributes tagAttributes) {
-	if !attributes.hasName || !attributes.hasContent ||
-		!bytes.EqualFold(bytes.TrimSpace(attributes.name), []byte("robots")) {
+	if !attributes.hasName || !attributes.hasContent {
 		return
 	}
-	p.metaRobots.Add(string(attributes.content))
+
+	name := bytes.TrimSpace(attributes.name)
+	switch {
+	case bytes.EqualFold(name, []byte("robots")):
+		p.metaRobots.Add(string(attributes.content))
+	case bytes.EqualFold(name, []byte("googlebot")):
+		p.metaRobots.AddScoped("googlebot", string(attributes.content))
+	case bytes.EqualFold(name, []byte("googlebot-news")):
+		p.metaRobots.AddScoped("googlebot-news", string(attributes.content))
+	}
 }
 
 func (p *pageParser) countLink(rawHref []byte) {
@@ -624,10 +632,21 @@ type robotsDirectiveSet struct {
 }
 
 func (s *robotsDirectiveSet) Add(raw string) {
+	s.addScoped("", raw)
+}
+
+func (s *robotsDirectiveSet) AddScoped(scope, raw string) {
+	s.addScoped(strings.ToLower(strings.TrimSpace(scope)), raw)
+}
+
+func (s *robotsDirectiveSet) addScoped(scope, raw string) {
 	for _, candidate := range strings.Split(raw, ",") {
 		directive := strings.TrimSpace(candidate)
 		if directive == "" {
 			continue
+		}
+		if scope != "" {
+			directive = scope + ": " + directive
 		}
 		if s.seen == nil {
 			s.seen = make(map[string]struct{})

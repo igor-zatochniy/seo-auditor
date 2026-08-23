@@ -458,6 +458,30 @@ Visible content
 	}
 }
 
+func TestParsePagePreservesScopedGoogleRobotsMetadata(t *testing.T) {
+	body := `<html><head>
+<meta name="robots" content="index,follow">
+<meta name="googlebot" content="noindex,nofollow">
+</head><body>
+<meta name="GOOGLEBOT-NEWS" content="nosnippet">
+Content
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(body)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	want := "googlebot: noindex, googlebot: nofollow, index, follow, googlebot-news: nosnippet"
+	if data.MetaRobots != want {
+		t.Fatalf("meta robots = %q, want %q", data.MetaRobots, want)
+	}
+}
+
 func TestParsePageIgnoresTemplateContentAcrossSEOMetrics(t *testing.T) {
 	body := `<html><head>
 <template>
@@ -539,6 +563,7 @@ func TestParsePageIncludesDeclarativeShadowDOMContent(t *testing.T) {
   <link rel="canonical" href="https://other.example/page">
   <meta name="description" content="Shadow description">
   <meta name="robots" content="noindex">
+  <meta name="googlebot" content="nofollow">
   <script type="application/ld+json">{"name":"Shadow data"}</script>
   <h1>Documentation</h1>
   <p>Important visible documentation text</p>
