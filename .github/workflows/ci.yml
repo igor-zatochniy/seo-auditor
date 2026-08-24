@@ -82,6 +82,22 @@ jobs:
           image --format table --exit-code 1 --ignore-unfixed
           --severity HIGH,CRITICAL --skip-version-check seo-auditor:ci
 
+      - name: Build PostgreSQL Docker image
+        run: docker build --pull --file Dockerfile.postgres --tag seo-auditor-postgres:ci .
+
+      - name: Verify PostgreSQL version
+        run: >-
+          docker run --rm seo-auditor-postgres:ci sh -ec
+          'test "$(postgres --version)" = "postgres (PostgreSQL) 16.15"'
+
+      - name: Scan PostgreSQL Docker image
+        run: >-
+          docker run --rm
+          --volume /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.65.0@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
+          image --format table --exit-code 1 --ignore-unfixed
+          --severity HIGH,CRITICAL --skip-version-check seo-auditor-postgres:ci
+
       - name: Generate SBOM
         uses: anchore/sbom-action@aa0e114b2e19480f157109b9922bda359bd98b90 # v0.20.8
         with:
