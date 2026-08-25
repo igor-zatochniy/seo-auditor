@@ -214,7 +214,44 @@ func TestCompilePolicyContextHonorsCancellation(t *testing.T) {
 	}
 }
 
-func BenchmarkPolicyAllowsMaxSizePolicy(b *testing.B) {
+func TestPolicyAllowsContextHonorsCancellation(t *testing.T) {
+	policy, err := CompilePolicy("User-agent: *\nDisallow: /private\n", "ExampleBot/1.0")
+	if err != nil {
+		t.Fatalf("CompilePolicy() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	allowed, err := policy.AllowsContext(ctx, "/private/page")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AllowsContext() error = %v, want context.Canceled", err)
+	}
+	if allowed {
+		t.Fatal("AllowsContext() allowed a path after cancellation")
+	}
+}
+
+func TestPolicyAllowsContextEnforcesComplexityBudget(t *testing.T) {
+	rules := make([]compiledRule, 2_000)
+	pattern := "/" + strings.Repeat("a", 64) + "*missing"
+	for index := range rules {
+		rules[index] = compiledRule{pattern: pattern, specificity: len(pattern)}
+	}
+	policy := &Policy{rules: rules}
+
+	allowed, err := policy.AllowsContext(
+		context.Background(),
+		"/"+strings.Repeat("a", 2_047),
+	)
+	if !errors.Is(err, ErrPolicyMatchComplexity) {
+		t.Fatalf("AllowsContext() error = %v, want ErrPolicyMatchComplexity", err)
+	}
+	if allowed {
+		t.Fatal("complex policy unexpectedly allowed the path")
+	}
+}
+
+func BenchmarkPolicyAllowsComplexityLimit(b *testing.B) {
 	const commonPrefixLength = 64
 	var content strings.Builder
 	content.Grow(MaxPolicyBytes)
@@ -236,8 +273,12 @@ func BenchmarkPolicyAllowsMaxSizePolicy(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if !policy.Allows(requestPath) {
-			b.Fatal("non-matching benchmark policy unexpectedly blocked the path")
+		allowed, err := policy.AllowsContext(context.Background(), requestPath)
+		if !errors.Is(err, ErrPolicyMatchComplexity) {
+			b.Fatalf("policy match error = %v, want ErrPolicyMatchComplexity", err)
+		}
+		if allowed {
+			b.Fatal("complex benchmark policy unexpectedly allowed the path")
 		}
 	}
 }

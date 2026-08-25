@@ -2,6 +2,7 @@ package robots
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -9,12 +10,16 @@ import (
 )
 
 const (
-	MaxPolicyBytes                   = 512 * 1024
-	policyContextCheckInterval       = 64
-	estimatedPolicyBaseBytes   int64 = 512
-	estimatedCompiledRuleBytes int64 = 64
-	estimatedPatternByteFactor int64 = 2
+	MaxPolicyBytes                        = 512 * 1024
+	MaxPolicyMatchOperations              = 2_000_000
+	policyContextCheckInterval            = 64
+	policyMatchContextCheckInterval       = 256
+	estimatedPolicyBaseBytes        int64 = 512
+	estimatedCompiledRuleBytes      int64 = 64
+	estimatedPatternByteFactor      int64 = 2
 )
+
+var ErrPolicyMatchComplexity = errors.New("robots.txt policy match complexity exceeds limit")
 
 type rule struct {
 	allow       bool
@@ -109,29 +114,66 @@ func (p *Policy) EstimatedMemoryBytes() int64 {
 
 // Allows normalizes and checks a request path against prepared rule matchers.
 func (p *Policy) Allows(requestPath string) bool {
-	return p.allowsNormalized(normalizeMatchOctets(requestPath))
+	allowed, err := p.AllowsContext(context.Background(), requestPath)
+	return err == nil && allowed
+}
+
+// AllowsContext checks a request path within the caller's cancellation and complexity budgets.
+func (p *Policy) AllowsContext(ctx context.Context, requestPath string) (bool, error) {
+	if ctx == nil {
+		return false, fmt.Errorf("robots.txt match context is required")
+	}
+	return p.allowsNormalizedContext(ctx, normalizeMatchOctets(requestPath))
 }
 
 // AllowsURL checks a parsed URL without normalizing its request path twice.
 func (p *Policy) AllowsURL(parsed *url.URL) bool {
-	if parsed == nil {
-		return false
-	}
-	return p.allowsNormalized(RequestPath(parsed))
+	allowed, err := p.AllowsURLContext(context.Background(), parsed)
+	return err == nil && allowed
 }
 
-func (p *Policy) allowsNormalized(requestPath string) bool {
+// AllowsURLContext checks a parsed URL without normalizing its request path twice.
+func (p *Policy) AllowsURLContext(ctx context.Context, parsed *url.URL) (bool, error) {
+	if ctx == nil {
+		return false, fmt.Errorf("robots.txt match context is required")
+	}
+	if parsed == nil {
+		return false, nil
+	}
+	return p.allowsNormalizedContext(ctx, RequestPath(parsed))
+}
+
+func (p *Policy) allowsNormalizedContext(ctx context.Context, requestPath string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("match robots.txt policy: %w", err)
+	}
 	if isRobotsTXTRequestPath(requestPath) {
-		return true
+		return true, nil
 	}
 	if p == nil || len(p.rules) == 0 {
-		return true
+		return true, nil
 	}
 
 	allowed := true
 	bestSpecificity := -1
-	for _, rule := range p.rules {
-		if !patternMatches(rule.pattern, requestPath, rule.endAnchored) {
+	remainingOperations := MaxPolicyMatchOperations
+	for index, rule := range p.rules {
+		if index%policyContextCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return false, fmt.Errorf("match robots.txt policy: %w", err)
+			}
+		}
+		matched, err := patternMatchesContext(
+			ctx,
+			rule.pattern,
+			requestPath,
+			rule.endAnchored,
+			&remainingOperations,
+		)
+		if err != nil {
+			return false, fmt.Errorf("match robots.txt policy: %w", err)
+		}
+		if !matched {
 			continue
 		}
 		if rule.specificity > bestSpecificity || (rule.specificity == bestSpecificity && rule.allow) {
@@ -140,7 +182,7 @@ func (p *Policy) allowsNormalized(requestPath string) bool {
 		}
 	}
 
-	return allowed
+	return allowed, nil
 }
 
 func isRobotsTXTRequestPath(requestPath string) bool {
@@ -296,7 +338,13 @@ func preparePattern(pattern string) (string, bool, bool) {
 	return normalizeMatchOctets(pattern), endAnchored, true
 }
 
-func patternMatches(pattern, requestPath string, endAnchored bool) bool {
+func patternMatchesContext(
+	ctx context.Context,
+	pattern string,
+	requestPath string,
+	endAnchored bool,
+	remainingOperations *int,
+) (bool, error) {
 	if !endAnchored {
 		pattern += "*"
 	}
@@ -306,6 +354,9 @@ func patternMatches(pattern, requestPath string, endAnchored bool) bool {
 	starIndex := -1
 	starPathIndex := 0
 	for pathIndex < len(requestPath) {
+		if err := consumeMatchOperation(ctx, remainingOperations); err != nil {
+			return false, err
+		}
 		switch {
 		case patternIndex < len(pattern) && pattern[patternIndex] == requestPath[pathIndex]:
 			patternIndex++
@@ -319,13 +370,27 @@ func patternMatches(pattern, requestPath string, endAnchored bool) bool {
 			starPathIndex++
 			pathIndex = starPathIndex
 		default:
-			return false
+			return false, nil
 		}
 	}
 	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+		if err := consumeMatchOperation(ctx, remainingOperations); err != nil {
+			return false, err
+		}
 		patternIndex++
 	}
-	return patternIndex == len(pattern)
+	return patternIndex == len(pattern), nil
+}
+
+func consumeMatchOperation(ctx context.Context, remainingOperations *int) error {
+	if *remainingOperations <= 0 {
+		return ErrPolicyMatchComplexity
+	}
+	*remainingOperations--
+	if *remainingOperations%policyMatchContextCheckInterval == 0 {
+		return ctx.Err()
+	}
+	return nil
 }
 
 func normalizeMatchOctets(value string) string {

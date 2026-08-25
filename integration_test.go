@@ -1973,8 +1973,14 @@ func TestMigrationsUpgradeLegacyAuditResults(t *testing.T) {
 	}
 
 	const runID = "48025f74-f8d1-4055-b548-b7d19d92965c"
-	const legacyURL = "https://example.com/report?token=real-secret&view=full#secret-fragment"
-	const sanitizedLegacyURL = "https://example.com/report?[QUERY_REDACTED]"
+	const legacyURLPrefix = "https://example.com/report/"
+	const legacyURLSuffix = "?token=real-secret&view=full#secret-fragment"
+	legacyURL := legacyURLPrefix +
+		strings.Repeat("a", 2048-len(legacyURLPrefix)-len(legacyURLSuffix)) +
+		legacyURLSuffix
+	if len(legacyURL) != 2048 {
+		t.Fatalf("legacy URL length = %d, want 2048", len(legacyURL))
+	}
 	if _, err := migrationDB.ExecContext(
 		ctx,
 		`INSERT INTO audit_runs (id, started_at, finished_at, status, total_urls, successful_urls, failed_urls)
@@ -2005,15 +2011,21 @@ func TestMigrationsUpgradeLegacyAuditResults(t *testing.T) {
 	var targetID int64
 	var title string
 	var fingerprintKeyID string
+	var safeURL string
 	if err := migrationDB.QueryRowContext(
 		ctx,
-		`SELECT target_id, title, fingerprint_key_id
+		`SELECT target_id, title, fingerprint_key_id, safe_url
 		 FROM audit_results
-		 WHERE run_id = $1::UUID AND safe_url = $2`,
+		 WHERE run_id = $1::UUID`,
 		runID,
-		sanitizedLegacyURL,
-	).Scan(&targetID, &title, &fingerprintKeyID); err != nil {
+	).Scan(&targetID, &title, &fingerprintKeyID, &safeURL); err != nil {
 		t.Fatalf("read upgraded audit result: %v", err)
+	}
+	if !strings.HasPrefix(safeURL, "https://redacted.invalid/legacy/audit_results/") {
+		t.Fatalf("legacy URL was not replaced with a safe identity: %q", safeURL)
+	}
+	if strings.Contains(safeURL, "real-secret") || len(safeURL) > 2048 {
+		t.Fatalf("legacy safe URL is unsafe or oversized: %q", safeURL)
 	}
 	if targetID >= 0 {
 		t.Fatalf("legacy result target_id should be synthetic and negative, got %d", targetID)

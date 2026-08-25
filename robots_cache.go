@@ -26,10 +26,18 @@ type robotsPolicy struct {
 }
 
 func (p robotsPolicy) allows(target *url.URL) bool {
+	allowed, err := p.allowsContext(context.Background(), target)
+	return err == nil && allowed
+}
+
+func (p robotsPolicy) allowsContext(ctx context.Context, target *url.URL) (bool, error) {
 	if p.allowAll {
-		return true
+		return true, nil
 	}
-	return p.compiled != nil && p.compiled.AllowsURL(target)
+	if p.compiled == nil {
+		return false, nil
+	}
+	return p.compiled.AllowsURLContext(ctx, target)
 }
 
 func (p robotsPolicy) estimatedMemoryBytes() int64 {
@@ -130,7 +138,7 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 	if err != nil {
 		return false, err
 	}
-	return policy.allows(parsed), nil
+	return policy.allowsContext(robotsCtx, parsed)
 }
 
 func robotsPolicyCacheKey(parsed *url.URL) (string, error) {
@@ -298,7 +306,7 @@ func isAllowedByRobots(ctx context.Context, client *http.Client, targetURL strin
 	if err != nil {
 		return false, err
 	}
-	return policy.allows(parsed), nil
+	return policy.allowsContext(robotsCtx, parsed)
 }
 
 func fetchRobotsPolicy(

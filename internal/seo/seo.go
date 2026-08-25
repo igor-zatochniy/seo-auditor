@@ -557,7 +557,7 @@ func (p *pageParser) handleEndTag(name []byte) {
 
 func (p *pageParser) finalize() {
 	p.data.MetaRobots, p.data.MetaRobotsTruncated, p.data.MetaRobotsOriginalLength =
-		boundedString(p.metaRobots.String(), StorageRobotsTagMaxRunes)
+		p.metaRobots.Result(StorageRobotsTagMaxRunes)
 	p.data.Title, p.data.TitleTruncated, p.data.TitleOriginalLength = p.title.Result()
 	titleLen := p.title.RuneCount()
 	if titleLen == 0 {
@@ -626,9 +626,19 @@ func hasTokenFold(value, expected []byte) bool {
 	return false
 }
 
+const robotsDirectivePriorityCount = 3
+
+type robotsDirectiveBucket struct {
+	values      []string
+	seen        map[string]struct{}
+	storedRunes int
+}
+
 type robotsDirectiveSet struct {
-	values []string
-	seen   map[string]struct{}
+	buckets        [robotsDirectivePriorityCount]robotsDirectiveBucket
+	directiveCount int
+	originalRunes  int
+	truncated      bool
 }
 
 func (s *robotsDirectiveSet) Add(raw string) {
@@ -648,16 +658,53 @@ func (s *robotsDirectiveSet) addScoped(scope, raw string) {
 		if scope != "" {
 			directive = scope + ": " + directive
 		}
-		if s.seen == nil {
-			s.seen = make(map[string]struct{})
+
+		priority := robotsDirectivePriority(directive)
+		bucket := &s.buckets[priority]
+		separatorRunes := 0
+		if len(bucket.values) > 0 {
+			separatorRunes = 2
 		}
-		key := strings.ToLower(directive)
-		if _, exists := s.seen[key]; exists {
+		remainingRunes := StorageRobotsTagMaxRunes - bucket.storedRunes - separatorRunes
+		if remainingRunes <= 0 {
+			s.recordTruncatedDirective(utf8.RuneCountInString(directive))
 			continue
 		}
-		s.seen[key] = struct{}{}
-		s.values = append(s.values, directive)
+
+		stored, truncated, originalRunes := boundedString(directive, remainingRunes)
+		key := strings.ToLower(stored)
+		if bucket.seen == nil {
+			bucket.seen = make(map[string]struct{})
+		}
+		if _, exists := bucket.seen[key]; exists {
+			continue
+		}
+
+		bucket.seen[key] = struct{}{}
+		bucket.values = append(bucket.values, stored)
+		bucket.storedRunes += separatorRunes + utf8.RuneCountInString(stored)
+
+		globalSeparatorRunes := 0
+		if s.directiveCount > 0 {
+			globalSeparatorRunes = 2
+		}
+		if !truncated {
+			originalRunes = utf8.RuneCountInString(directive)
+		}
+		s.originalRunes += globalSeparatorRunes + originalRunes
+		s.directiveCount++
+		s.truncated = s.truncated || truncated
 	}
+}
+
+func (s *robotsDirectiveSet) recordTruncatedDirective(directiveRunes int) {
+	separatorRunes := 0
+	if s.directiveCount > 0 {
+		separatorRunes = 2
+	}
+	s.originalRunes += separatorRunes + directiveRunes
+	s.directiveCount++
+	s.truncated = true
 }
 
 func splitRobotsDirectives(raw string) []string {
@@ -737,15 +784,23 @@ func isHTTPToken(value string) bool {
 }
 
 func (s *robotsDirectiveSet) String() string {
-	ordered := make([]string, 0, len(s.values))
-	for priority := 0; priority <= 2; priority++ {
-		for _, directive := range s.values {
-			if robotsDirectivePriority(directive) == priority {
-				ordered = append(ordered, directive)
-			}
-		}
+	retainedCount := 0
+	for priority := range robotsDirectivePriorityCount {
+		retainedCount += len(s.buckets[priority].values)
+	}
+	ordered := make([]string, 0, retainedCount)
+	for priority := range robotsDirectivePriorityCount {
+		ordered = append(ordered, s.buckets[priority].values...)
 	}
 	return strings.Join(ordered, ", ")
+}
+
+func (s *robotsDirectiveSet) Result(maxRunes int) (string, bool, int) {
+	value, truncated, originalRunes := boundedString(s.String(), maxRunes)
+	if !s.truncated {
+		return value, truncated, originalRunes
+	}
+	return value, true, max(maxRunes+1, max(originalRunes, s.originalRunes))
 }
 
 func robotsDirectivePriority(directive string) int {
@@ -774,7 +829,7 @@ func RobotsHeaderDirectives(header http.Header) (string, bool, int) {
 		}
 		directives.AddScoped(scope, rules)
 	}
-	return boundedString(directives.String(), StorageRobotsTagMaxRunes)
+	return directives.Result(StorageRobotsTagMaxRunes)
 }
 
 type boundedTextCollector struct {
