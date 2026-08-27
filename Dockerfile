@@ -15,7 +15,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/seo-aud
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
-RUN apk add --no-cache ca-certificates tzdata && \
+RUN apk upgrade --no-cache libcrypto3 libssl3 && \
+    apk add --no-cache ca-certificates tzdata && \
     addgroup -S -g 10001 app && \
     adduser -S -D -H -u 10001 -G app app && \
     mkdir -p /app/reports && \

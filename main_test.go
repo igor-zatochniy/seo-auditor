@@ -81,7 +81,7 @@ func TestParsePageExtractsSEOMetrics(t *testing.T) {
 	if !data.HasJsonLd || !data.HasViewport {
 		t.Fatalf("expected JSON-LD and viewport flags")
 	}
-	if data.TotalImages != 3 || data.ImagesMissingAlt != 2 {
+	if data.TotalImages != 3 || data.ImagesMissingAlt != 1 {
 		t.Fatalf("unexpected image audit: total=%d missing=%d", data.TotalImages, data.ImagesMissingAlt)
 	}
 	if data.MetaRobots != "index, follow" || data.XRobotsTag != "index, follow" {
@@ -89,6 +89,33 @@ func TestParsePageExtractsSEOMetrics(t *testing.T) {
 	}
 	if data.WordCount == 0 {
 		t.Fatalf("expected non-zero word count")
+	}
+}
+
+func TestParsePageCountsOnlyImagesWithoutAltAttribute(t *testing.T) {
+	html := `<html><body>
+  <img src="missing.png">
+  <img src="boolean.png" alt>
+  <img src="empty.png" alt="">
+  <img src="whitespace.png" alt=" ">
+  <img src="described.png" alt="Chart">
+</body></html>`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(html)),
+	}
+
+	data, err := parsePage(resp, "https://example.com/page", int64(len(html)+1), DefaultMaxHTMLTokenBytes)
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	if data.TotalImages != 5 || data.ImagesMissingAlt != 1 {
+		t.Fatalf(
+			"image counts = total %d missing_alt %d, want 5 and 1",
+			data.TotalImages,
+			data.ImagesMissingAlt,
+		)
 	}
 }
 
@@ -671,9 +698,9 @@ func TestParsePageIncludesDeclarativeShadowDOMContent(t *testing.T) {
 					data.LinksCount,
 				)
 			}
-			if data.TotalImages != 1 || data.ImagesMissingAlt != 1 {
+			if data.TotalImages != 1 || data.ImagesMissingAlt != 0 {
 				t.Fatalf(
-					"image counts = total %d missing_alt %d, want 1 and 1",
+					"image counts = total %d missing_alt %d, want 1 and 0",
 					data.TotalImages,
 					data.ImagesMissingAlt,
 				)

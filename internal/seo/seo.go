@@ -345,7 +345,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 		}
 	case bytes.Equal(name, []byte("img")):
 		p.data.TotalImages++
-		if !attributes.hasAlt || len(bytes.TrimSpace(attributes.alt)) == 0 {
+		if !attributes.hasAlt {
 			p.data.ImagesMissingAlt++
 		}
 	}
