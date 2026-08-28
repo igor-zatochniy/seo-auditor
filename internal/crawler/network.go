@@ -94,6 +94,11 @@ var blockedTargetIPPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("ff00::/8"),
 }
 
+var (
+	nat64WellKnownPrefix = netip.MustParsePrefix("64:ff9b::/96")
+	nat64LocalUsePrefix  = netip.MustParsePrefix("64:ff9b:1::/48")
+)
+
 func NewHTTPTransport(cfg TransportConfig, attemptTimeout time.Duration) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   attemptTimeout,
@@ -214,6 +219,12 @@ func IsBlockedTargetIP(ip netip.Addr) bool {
 	if !ip.IsValid() {
 		return true
 	}
+	if nat64LocalUsePrefix.Contains(ip) {
+		return true
+	}
+	if embeddedIPv4, ok := wellKnownNAT64IPv4(ip); ok {
+		return IsBlockedTargetIP(embeddedIPv4)
+	}
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
 		return true
 	}
@@ -225,6 +236,15 @@ func IsBlockedTargetIP(ip netip.Addr) bool {
 	}
 
 	return false
+}
+
+func wellKnownNAT64IPv4(ip netip.Addr) (netip.Addr, bool) {
+	if !ip.Is6() || !nat64WellKnownPrefix.Contains(ip) {
+		return netip.Addr{}, false
+	}
+
+	octets := ip.As16()
+	return netip.AddrFrom4([4]byte{octets[12], octets[13], octets[14], octets[15]}), true
 }
 
 func ValidateResolvedTargetIPs(host string, ips []netip.Addr, allowPrivateTargets bool) error {

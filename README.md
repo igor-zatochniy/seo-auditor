@@ -307,6 +307,7 @@ gitleaks detect --source . --redact
 - Перед production upgrade робіть backup PostgreSQL volume/database; SQL migrations є forward-only, rollback має виконуватися через restore перевіреного backup або окремий rollback-план deployment-платформи.
 - Поточна observability-модель містить JSON logs, `run_id` і фінальні counters. Prometheus endpoint та distributed tracing потребують окремого довгоживучого control plane або collector deployment.
 - `ALLOW_PRIVATE_TARGETS=false` залишайте стандартним значенням для публічного сканування.
+- Для стандартного NAT64-префікса `64:ff9b::/96` валідатор окремо перевіряє вбудовану IPv4-адресу, а локальний `64:ff9b:1::/48` блокує повністю. Власний network-specific `Pref64` потрібно додатково закривати на мережевому рівні deployment-середовища.
 - `Retry-After` для HTTP `429/503` застосовується per host і обмежується максимумом `5m`; для конкретного URL очікування додатково обмежується залишком `HTTP_TOTAL_TIMEOUT` або `ROBOTS_TOTAL_TIMEOUT`.
 - PostgreSQL порт прив'язаний до `127.0.0.1`, тому база не відкривається назовні.
 - `Dockerfile.postgres` та named volumes `pgdata`/`reports` уникають host bind mounts, тому stack працює і з remote Docker daemon у Minikube. Windows launcher копіює report files на host через Docker API.

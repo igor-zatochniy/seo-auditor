@@ -1304,6 +1304,10 @@ func TestValidateResolvedTargetIPsBlocksPrivateAndSpecialRanges(t *testing.T) {
 		{name: "loopback", ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, wantErr: true},
 		{name: "private IPv4", ips: []netip.Addr{netip.MustParseAddr("10.0.0.5")}, wantErr: true},
 		{name: "cgnat IPv4", ips: []netip.Addr{netip.MustParseAddr("100.64.0.10")}, wantErr: true},
+		{name: "public IPv4 through well-known NAT64", ips: []netip.Addr{netip.MustParseAddr("64:ff9b::5db8:d822")}},
+		{name: "loopback through well-known NAT64", ips: []netip.Addr{netip.MustParseAddr("64:ff9b::7f00:1")}, wantErr: true},
+		{name: "private IPv4 through well-known NAT64", ips: []netip.Addr{netip.MustParseAddr("64:ff9b::a00:5")}, wantErr: true},
+		{name: "local-use NAT64", ips: []netip.Addr{netip.MustParseAddr("64:ff9b:1::5db8:d822")}, wantErr: true},
 		{name: "documentation IPv6", ips: []netip.Addr{netip.MustParseAddr("2001:db8::1")}, wantErr: true},
 		{
 			name:    "mixed DNS response",
