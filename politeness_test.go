@@ -15,6 +15,16 @@ import (
 	robotsparser "github.com/igor-zatochniy/seo-auditor/internal/robots"
 )
 
+type requestStartRecorder struct {
+	base   http.RoundTripper
+	starts chan<- time.Time
+}
+
+func (r requestStartRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.starts <- time.Now()
+	return r.base.RoundTrip(req)
+}
+
 func TestRobotsPolicyCacheEnforcesMemoryBudget(t *testing.T) {
 	compilePolicy := func(t *testing.T, prefix string, ruleCount int) robotsPolicy {
 		t.Helper()
@@ -342,23 +352,31 @@ func TestPoliteTransportAppliesRateLimitPerHost(t *testing.T) {
 	}))
 	defer server.Close()
 
+	requestStarts := make(chan time.Time, 2)
 	manager := newHostPolicyManager(50*time.Millisecond, 1, 16, time.Second)
-	client := &http.Client{Transport: &politeRoundTripper{base: server.Client().Transport, policies: manager}}
+	client := &http.Client{Transport: &politeRoundTripper{
+		base: requestStartRecorder{
+			base:   server.Client().Transport,
+			starts: requestStarts,
+		},
+		policies: manager,
+	}}
 
 	resp, err := client.Get(server.URL)
 	if err != nil {
 		t.Fatalf("first request failed: %v", err)
 	}
 	_ = resp.Body.Close()
+	firstStarted := <-requestStarts
 
-	started := time.Now()
 	resp, err = client.Get(server.URL)
 	if err != nil {
 		t.Fatalf("second request failed: %v", err)
 	}
 	_ = resp.Body.Close()
-	if elapsed := time.Since(started); elapsed < 35*time.Millisecond {
-		t.Fatalf("per-host rate limit was not applied: elapsed=%s", elapsed)
+	secondStarted := <-requestStarts
+	if spacing := secondStarted.Sub(firstStarted); spacing < 35*time.Millisecond {
+		t.Fatalf("per-host rate limit was not applied: spacing=%s", spacing)
 	}
 }
 
