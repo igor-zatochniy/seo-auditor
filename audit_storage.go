@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -26,6 +27,7 @@ const (
 	auditTargetStatusAbandoned = "abandoned"
 
 	maxStaleRecoveryTargetBatchSize = 500
+	maxStaleRecoveryDeadlineRetries = 2
 )
 
 type auditRunCompletion struct {
@@ -539,7 +541,7 @@ func abandonIncompleteTargetsForRecoveredRun(
 	for {
 		var abandonedTargets int64
 		var batchLastTargetID int64
-		err := withDBMutationRetry(ctx, cfg, "abandon_stale_audit_target_batch", func(queryCtx context.Context) error {
+		err := withStaleRecoveryBatchMutationRetry(ctx, cfg, "abandon_stale_audit_target_batch", func(queryCtx context.Context) error {
 			abandonedTargets = 0
 			batchLastTargetID = 0
 
@@ -587,6 +589,60 @@ func abandonIncompleteTargetsForRecoveredRun(
 		hasCursor = true
 		if abandonedTargets < int64(batchSize) || cursorTargetID >= highTargetID {
 			return totalAbandonedTargets, nil
+		}
+	}
+}
+
+func withStaleRecoveryBatchMutationRetry(
+	ctx context.Context,
+	cfg Config,
+	operation string,
+	fn func(context.Context) error,
+) error {
+	policy := retryPolicy{
+		maxRetries: cfg.DBMaxRetries,
+		baseDelay:  cfg.RetryBaseDelay,
+		maxDelay:   cfg.RetryMaxDelay,
+	}
+	timeout := effectiveStaleRecoveryBatchTimeout(cfg)
+
+	for timeoutAttempt := 0; ; timeoutAttempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		operationCtx, cancel := context.WithTimeout(ctx, timeout)
+		err := retryDBMutation(operationCtx, operation, policy, func() error {
+			return fn(operationCtx)
+		})
+		deadlineExpired := errors.Is(operationCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if !deadlineExpired || timeoutAttempt >= maxStaleRecoveryDeadlineRetries {
+			if deadlineExpired {
+				return fmt.Errorf(
+					"%s exceeded %s for %d consecutive attempts: %w",
+					operation,
+					timeout,
+					timeoutAttempt+1,
+					err,
+				)
+			}
+			return err
+		}
+
+		delay := retryDelay(policy, timeoutAttempt)
+		slog.Warn(
+			"Повторюється ідемпотентний batch відновлення stale run після локального timeout",
+			"operation", operation,
+			"attempt", timeoutAttempt+1,
+			"timeout", timeout.String(),
+			"delay", delay.String(),
+		)
+		if err := waitForRetry(ctx, delay); err != nil {
+			return err
 		}
 	}
 }
@@ -1212,6 +1268,13 @@ func effectiveDBWriteTimeout(cfg Config) time.Duration {
 		return cfg.DBWriteTimeout
 	}
 	return DefaultDBWriteTimeout
+}
+
+func effectiveStaleRecoveryBatchTimeout(cfg Config) time.Duration {
+	if cfg.StaleRecoveryBatchTimeout > 0 {
+		return cfg.StaleRecoveryBatchTimeout
+	}
+	return DefaultStaleRecoveryBatchTimeout
 }
 
 func effectiveStaleRecoveryTargetBatchSize(cfg Config) int {

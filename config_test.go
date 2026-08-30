@@ -22,6 +22,7 @@ var configEnvironmentVariables = []string{
 	"DB_MIGRATION_TIMEOUT",
 	"DB_FETCH_TIMEOUT",
 	"DB_WRITE_TIMEOUT",
+	"STALE_RECOVERY_BATCH_TIMEOUT",
 	"REPORT_EXPORT_TIMEOUT",
 	"REPORT_RETENTION_COUNT",
 	"AUDIT_RUN_HEARTBEAT_INTERVAL",
@@ -143,6 +144,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	if cfg.DBConnectTimeout != DefaultDBConnectTimeout || cfg.DBMigrationTimeout != DefaultDBMigrationTimeout {
 		t.Fatalf("unexpected DB timeout defaults: connect=%s migration=%s", cfg.DBConnectTimeout, cfg.DBMigrationTimeout)
 	}
+	if cfg.StaleRecoveryBatchTimeout != DefaultStaleRecoveryBatchTimeout {
+		t.Fatalf("unexpected stale recovery batch timeout: %s", cfg.StaleRecoveryBatchTimeout)
+	}
 	if cfg.ReportExportTimeout != DefaultReportExportTimeout {
 		t.Fatalf("unexpected report export timeout: %s", cfg.ReportExportTimeout)
 	}
@@ -173,6 +177,18 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.MaxHTMLTokenBytes != DefaultMaxHTMLTokenBytes {
 		t.Fatalf("unexpected HTML token limit: %d", cfg.MaxHTMLTokenBytes)
+	}
+}
+
+func TestLoadConfigRejectsStaleRecoveryTimeoutBelowWriteTimeout(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+	t.Setenv("DB_WRITE_TIMEOUT", "3s")
+	t.Setenv("STALE_RECOVERY_BATCH_TIMEOUT", "2s")
+
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected stale recovery timeout below DB write timeout to fail configuration loading")
 	}
 }
 

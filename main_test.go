@@ -1562,6 +1562,88 @@ func TestWaitForStaleRecoveryContentionStopsAfterWriteBudget(t *testing.T) {
 	}
 }
 
+func TestStaleRecoveryBatchRetryRenewsLocalDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	attempts := 0
+	err := withStaleRecoveryBatchMutationRetry(
+		ctx,
+		Config{
+			StaleRecoveryBatchTimeout: 10 * time.Millisecond,
+			DBMaxRetries:              0,
+			RetryBaseDelay:            time.Millisecond,
+			RetryMaxDelay:             time.Millisecond,
+		},
+		"test_stale_recovery",
+		func(attemptCtx context.Context) error {
+			attempts++
+			if attempts == 1 {
+				<-attemptCtx.Done()
+				return attemptCtx.Err()
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("stale recovery retry returned error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("stale recovery attempts = %d, want 2", attempts)
+	}
+}
+
+func TestStaleRecoveryBatchRetryStopsAfterConsecutiveDeadlines(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	attempts := 0
+	err := withStaleRecoveryBatchMutationRetry(
+		ctx,
+		Config{
+			StaleRecoveryBatchTimeout: 5 * time.Millisecond,
+			DBMaxRetries:              0,
+			RetryBaseDelay:            time.Millisecond,
+			RetryMaxDelay:             time.Millisecond,
+		},
+		"test_stale_recovery",
+		func(attemptCtx context.Context) error {
+			attempts++
+			<-attemptCtx.Done()
+			return attemptCtx.Err()
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "3 consecutive attempts") {
+		t.Fatalf("stale recovery deadline error = %v", err)
+	}
+	if attempts != maxStaleRecoveryDeadlineRetries+1 {
+		t.Fatalf("stale recovery attempts = %d, want %d", attempts, maxStaleRecoveryDeadlineRetries+1)
+	}
+}
+
+func TestStaleRecoveryBatchRetryDoesNotMaskParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+
+	err := withStaleRecoveryBatchMutationRetry(
+		ctx,
+		Config{StaleRecoveryBatchTimeout: time.Second},
+		"test_stale_recovery",
+		func(attemptCtx context.Context) error {
+			attempts++
+			cancel()
+			<-attemptCtx.Done()
+			return attemptCtx.Err()
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("stale recovery cancellation error = %v, want context.Canceled", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("stale recovery attempts after parent cancellation = %d, want 1", attempts)
+	}
+}
+
 func TestWorkerFinishesInFlightTaskAndStopsBeforeNextTask(t *testing.T) {
 	pageStarted := make(chan struct{}, 1)
 	releasePage := make(chan struct{})

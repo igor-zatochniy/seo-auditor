@@ -25,6 +25,7 @@ const (
 	DefaultDBMigrationTimeout        = 30 * time.Second
 	DefaultDBFetchTimeout            = 5 * time.Second
 	DefaultDBWriteTimeout            = 3 * time.Second
+	DefaultStaleRecoveryBatchTimeout = 15 * time.Second
 	DefaultReportExportTimeout       = 2 * time.Minute
 	DefaultReportRetentionCount      = 100
 	MaxReportRetentionCount          = 10_000
@@ -80,6 +81,7 @@ type Config struct {
 	DBMigrationTimeout        time.Duration
 	DBFetchTimeout            time.Duration
 	DBWriteTimeout            time.Duration
+	StaleRecoveryBatchTimeout time.Duration
 	ReportExportTimeout       time.Duration
 	ReportRetentionCount      int
 	AuditRunHeartbeatInterval time.Duration
@@ -144,6 +146,16 @@ func Load() (Config, error) {
 	dbWriteTimeout, err := durationFromEnv("DB_WRITE_TIMEOUT", DefaultDBWriteTimeout)
 	if err != nil {
 		return Config{}, err
+	}
+	staleRecoveryBatchTimeout, err := durationFromEnv(
+		"STALE_RECOVERY_BATCH_TIMEOUT",
+		DefaultStaleRecoveryBatchTimeout,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	if staleRecoveryBatchTimeout < dbWriteTimeout {
+		return Config{}, fmt.Errorf("STALE_RECOVERY_BATCH_TIMEOUT must not be lower than DB_WRITE_TIMEOUT")
 	}
 	reportExportTimeout, err := durationFromEnv("REPORT_EXPORT_TIMEOUT", DefaultReportExportTimeout)
 	if err != nil {
@@ -325,6 +337,7 @@ func Load() (Config, error) {
 		DBMigrationTimeout:        dbMigrationTimeout,
 		DBFetchTimeout:            dbFetchTimeout,
 		DBWriteTimeout:            dbWriteTimeout,
+		StaleRecoveryBatchTimeout: staleRecoveryBatchTimeout,
 		ReportExportTimeout:       reportExportTimeout,
 		ReportRetentionCount:      reportRetentionCount,
 		AuditRunHeartbeatInterval: auditRunHeartbeatInterval,

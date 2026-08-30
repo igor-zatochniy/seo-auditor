@@ -877,16 +877,17 @@ func TestAbandonLargeStaleAuditRunUsesBoundedBatches(t *testing.T) {
 	}()
 
 	cfg := Config{
-		RunID:                runID,
-		WorkerInstanceID:     "large-stale-recovery-worker",
-		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
-		URLBatchSize:         MaxURLBatchSize,
-		DBFetchTimeout:       3 * time.Second,
-		DBWriteTimeout:       3 * time.Second,
-		StaleRunThreshold:    time.Minute,
-		DBMaxRetries:         0,
-		RetryBaseDelay:       10 * time.Millisecond,
-		RetryMaxDelay:        50 * time.Millisecond,
+		RunID:                     runID,
+		WorkerInstanceID:          "large-stale-recovery-worker",
+		TargetFingerprintKey:      []byte("local-development-only-fingerprint-key"),
+		URLBatchSize:              MaxURLBatchSize,
+		DBFetchTimeout:            3 * time.Second,
+		DBWriteTimeout:            3 * time.Second,
+		StaleRecoveryBatchTimeout: 15 * time.Second,
+		StaleRunThreshold:         time.Minute,
+		DBMaxRetries:              0,
+		RetryBaseDelay:            10 * time.Millisecond,
+		RetryMaxDelay:             50 * time.Millisecond,
 	}
 	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create large stale audit run: %v", err)

@@ -30,6 +30,7 @@ const (
 	DefaultDBMigrationTimeout        = appconfig.DefaultDBMigrationTimeout
 	DefaultDBFetchTimeout            = appconfig.DefaultDBFetchTimeout
 	DefaultDBWriteTimeout            = appconfig.DefaultDBWriteTimeout
+	DefaultStaleRecoveryBatchTimeout = appconfig.DefaultStaleRecoveryBatchTimeout
 	DefaultReportExportTimeout       = appconfig.DefaultReportExportTimeout
 	DefaultReportRetentionCount      = appconfig.DefaultReportRetentionCount
 	MaxReportRetentionCount          = appconfig.MaxReportRetentionCount

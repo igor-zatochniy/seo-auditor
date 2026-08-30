@@ -84,6 +84,8 @@ func run() (exitCode int) {
 		cfg.RobotsTotalTimeout.String(),
 		"db_migration_timeout",
 		cfg.DBMigrationTimeout.String(),
+		"stale_recovery_batch_timeout",
+		cfg.StaleRecoveryBatchTimeout.String(),
 		"report_export_timeout",
 		cfg.ReportExportTimeout.String(),
 		"audit_run_heartbeat",
