@@ -1375,6 +1375,158 @@ func TestAuditRunClaimsAreExclusiveAndResumable(t *testing.T) {
 	}
 }
 
+func TestResumeWaitsForLockedResumableTarget(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "e75fb89e-5ded-4a34-887d-94ca45242093"
+	const requestURL = "https://resume-lock.example/page?token=runtime-secret"
+	ownerConfig := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "resume-lock-old-owner",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		DBFetchTimeout:       time.Second,
+		DBWriteTimeout:       2 * time.Second,
+		URLBatchSize:         10,
+		DBMaxRetries:         0,
+		RetryBaseDelay:       10 * time.Millisecond,
+		RetryMaxDelay:        20 * time.Millisecond,
+	}
+	resumeConfig := ownerConfig
+	resumeConfig.WorkerInstanceID = "resume-lock-new-owner"
+
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if err := createAuditRun(ctx, pool, &ownerConfig); err != nil {
+		t.Fatalf("create initial audit run: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`INSERT INTO audit_run_targets (run_id, target_id, request_url, status)
+		 VALUES ($1, 1, $2, $3)`,
+		runID,
+		requestURL,
+		auditTargetStatusAbandoned,
+	); err != nil {
+		t.Fatalf("insert abandoned target: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE audit_runs
+		 SET status = $2,
+		     finished_at = CURRENT_TIMESTAMP
+		 WHERE id = $1`,
+		runID,
+		auditRunStatusAbandoned,
+	); err != nil {
+		t.Fatalf("mark initial audit run abandoned: %v", err)
+	}
+
+	lockTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin target lock transaction: %v", err)
+	}
+	defer func() { _ = lockTx.Rollback(context.Background()) }()
+	var lockedTargetID int64
+	if err := lockTx.QueryRow(
+		ctx,
+		`SELECT target_id
+		 FROM audit_run_targets
+		 WHERE run_id = $1 AND target_id = 1
+		 FOR UPDATE`,
+		runID,
+	).Scan(&lockedTargetID); err != nil {
+		t.Fatalf("lock resumable target: %v", err)
+	}
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		resumeDone <- createAuditRun(ctx, pool, &resumeConfig)
+	}()
+	ownershipDeadline := time.Now().Add(time.Second)
+	for {
+		var currentWorkerInstanceID string
+		if err := pool.QueryRow(
+			ctx,
+			"SELECT worker_instance_id FROM audit_runs WHERE id = $1",
+			runID,
+		).Scan(&currentWorkerInstanceID); err != nil {
+			t.Fatalf("read audit run owner during resume: %v", err)
+		}
+		if currentWorkerInstanceID == resumeConfig.WorkerInstanceID {
+			break
+		}
+		if time.Now().After(ownershipDeadline) {
+			t.Fatalf("resume did not acquire audit run ownership before contention check")
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("resume ownership check was canceled: %v", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	select {
+	case resumeErr := <-resumeDone:
+		t.Fatalf("resume returned while resumable target lock was held: %v", resumeErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := lockTx.Rollback(ctx); err != nil {
+		t.Fatalf("release resumable target lock: %v", err)
+	}
+	select {
+	case resumeErr := <-resumeDone:
+		if resumeErr != nil {
+			t.Fatalf("resume audit run after lock release: %v", resumeErr)
+		}
+	case <-ctx.Done():
+		t.Fatalf("resume did not finish after target lock release: %v", ctx.Err())
+	}
+
+	var runStatus, targetStatus, workerInstanceID string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT run.status, target.status, run.worker_instance_id
+		 FROM audit_runs AS run
+		 JOIN audit_run_targets AS target ON target.run_id = run.id
+		 WHERE run.id = $1 AND target.target_id = 1`,
+		runID,
+	).Scan(&runStatus, &targetStatus, &workerInstanceID); err != nil {
+		t.Fatalf("read resumed audit state: %v", err)
+	}
+	if runStatus != auditRunStatusRunning ||
+		targetStatus != auditTargetStatusPending ||
+		workerInstanceID != resumeConfig.WorkerInstanceID {
+		t.Fatalf(
+			"resume left inconsistent state: run=%q target=%q worker=%q",
+			runStatus,
+			targetStatus,
+			workerInstanceID,
+		)
+	}
+}
+
 func TestRepeatedWorkerIDCannotPersistAfterOwnershipTakeover(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {

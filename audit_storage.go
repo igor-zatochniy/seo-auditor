@@ -80,12 +80,16 @@ func createAuditRun(ctx context.Context, dbPool *pgxpool.Pool, cfg *Config) erro
 }
 
 func resetResumableAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) error {
-	for {
-		var reset int64
-		err := withDBMutationRetry(ctx, cfg, "reset_resumable_audit_target_batch", func(queryCtx context.Context) error {
-			commandTag, err := dbPool.Exec(
-				queryCtx,
-				`WITH target_batch AS (
+	return drainIncompleteTargetBatches(
+		ctx,
+		cfg,
+		"reset resumable audit targets",
+		func() (int64, error) {
+			var reset int64
+			err := withDBMutationRetry(ctx, cfg, "reset_resumable_audit_target_batch", func(queryCtx context.Context) error {
+				commandTag, err := dbPool.Exec(
+					queryCtx,
+					`WITH target_batch AS (
 				     SELECT target.target_id
 				     FROM audit_run_targets AS target
 				     WHERE target.run_id = $1
@@ -121,28 +125,72 @@ func resetResumableAuditRunTargets(ctx context.Context, dbPool *pgxpool.Pool, cf
 				         AND run.worker_instance_id = $7
 				         AND run.owner_generation = $8
 				   )`,
-				cfg.RunID,
-				effectiveURLBatchSize(cfg),
-				auditTargetStatusAbandoned,
-				auditTargetStatusCanceled,
-				auditTargetStatusPending,
-				auditRunStatusRunning,
-				effectiveWorkerInstanceID(cfg),
-				effectiveOwnerGeneration(cfg),
-			)
+					cfg.RunID,
+					effectiveURLBatchSize(cfg),
+					auditTargetStatusAbandoned,
+					auditTargetStatusCanceled,
+					auditTargetStatusPending,
+					auditRunStatusRunning,
+					effectiveWorkerInstanceID(cfg),
+					effectiveOwnerGeneration(cfg),
+				)
+				if err != nil {
+					return err
+				}
+				reset = commandTag.RowsAffected()
+				return nil
+			})
 			if err != nil {
-				return err
+				return 0, err
 			}
-			reset = commandTag.RowsAffected()
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		if reset == 0 {
-			return nil
-		}
+			return reset, nil
+		},
+		func() (bool, error) {
+			return resumableAuditRunTargetsExist(ctx, dbPool, cfg)
+		},
+	)
+}
+
+func resumableAuditRunTargetsExist(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) (bool, error) {
+	var runStatus string
+	var workerInstanceID string
+	var ownerGeneration int64
+	var exists bool
+	err := withDBReadRetry(ctx, cfg, "check_resumable_audit_targets", func(queryCtx context.Context) error {
+		return dbPool.QueryRow(
+			queryCtx,
+			`SELECT run.status,
+			        run.worker_instance_id,
+			        run.owner_generation,
+			        EXISTS (
+			            SELECT 1
+			            FROM audit_run_targets AS target
+			            WHERE target.run_id = run.id
+			              AND (
+			                  target.status = $2
+			                  OR (
+			                      target.status = $3
+			                      AND target.request_url <> ''
+			                      AND target.request_url_cleared_at IS NULL
+			                  )
+			              )
+			        )
+			 FROM audit_runs AS run
+			 WHERE run.id = $1`,
+			cfg.RunID,
+			auditTargetStatusAbandoned,
+			auditTargetStatusCanceled,
+		).Scan(&runStatus, &workerInstanceID, &ownerGeneration, &exists)
+	})
+	if err != nil {
+		return false, err
 	}
+	if runStatus != auditRunStatusRunning ||
+		workerInstanceID != effectiveWorkerInstanceID(cfg) ||
+		ownerGeneration != effectiveOwnerGeneration(cfg) {
+		return false, fmt.Errorf("audit run %s ownership was lost while resetting resumable targets", cfg.RunID)
+	}
+	return exists, nil
 }
 
 //lint:ignore U1000 Integration tests exercise the full terminal-state and URL-cleanup composition.
