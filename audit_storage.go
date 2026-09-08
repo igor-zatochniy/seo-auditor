@@ -388,7 +388,7 @@ func clearRetainedTerminalAuditRunTargetURLs(
 }
 
 func abandonStaleAuditRuns(ctx context.Context, dbPool *pgxpool.Pool, cfg Config) (int64, error) {
-	cutoff := time.Now().Add(-effectiveStaleRunThreshold(cfg))
+	staleThresholdMicros := effectiveStaleRunThreshold(cfg).Microseconds()
 	var totalAbandonedRuns int64
 	var contentionSince time.Time
 
@@ -401,7 +401,7 @@ func abandonStaleAuditRuns(ctx context.Context, dbPool *pgxpool.Pool, cfg Config
 				     SELECT id
 				     FROM audit_runs
 				     WHERE status = $3
-				       AND heartbeat_at < $1
+				       AND heartbeat_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 microsecond')
 				     ORDER BY heartbeat_at, id
 				     LIMIT $4
 				     FOR UPDATE SKIP LOCKED
@@ -412,8 +412,8 @@ func abandonStaleAuditRuns(ctx context.Context, dbPool *pgxpool.Pool, cfg Config
 				 FROM stale_run_batch
 				 WHERE run.id = stale_run_batch.id
 				   AND run.status = $3
-				   AND run.heartbeat_at < $1`,
-				cutoff,
+				   AND run.heartbeat_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 microsecond')`,
+				staleThresholdMicros,
 				auditRunStatusAbandoned,
 				auditRunStatusRunning,
 				effectiveURLBatchSize(cfg),
@@ -433,7 +433,7 @@ func abandonStaleAuditRuns(ctx context.Context, dbPool *pgxpool.Pool, cfg Config
 			continue
 		}
 
-		remaining, err := staleAuditRunsExist(ctx, dbPool, cutoff, cfg)
+		remaining, err := staleAuditRunsExist(ctx, dbPool, cfg)
 		if err != nil {
 			return totalAbandonedRuns, fmt.Errorf("check stale audit runs: %w", err)
 		}
@@ -454,9 +454,9 @@ func abandonStaleAuditRuns(ctx context.Context, dbPool *pgxpool.Pool, cfg Config
 func staleAuditRunsExist(
 	ctx context.Context,
 	dbPool *pgxpool.Pool,
-	cutoff time.Time,
 	cfg Config,
 ) (bool, error) {
+	staleThresholdMicros := effectiveStaleRunThreshold(cfg).Microseconds()
 	var exists bool
 	err := withDBReadRetry(ctx, cfg, "check_stale_audit_runs", func(queryCtx context.Context) error {
 		return dbPool.QueryRow(
@@ -465,9 +465,9 @@ func staleAuditRunsExist(
 			     SELECT 1
 			     FROM audit_runs
 			     WHERE status = $2
-			       AND heartbeat_at < $1
+			       AND heartbeat_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 microsecond')
 			 )`,
-			cutoff,
+			staleThresholdMicros,
 			auditRunStatusRunning,
 		).Scan(&exists)
 	})

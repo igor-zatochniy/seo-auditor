@@ -848,6 +848,79 @@ func TestAbandonStaleAuditRunsMarksRunAndTargets(t *testing.T) {
 	}
 }
 
+func TestAbandonStaleAuditRunsUsesPostgreSQLClock(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	applyIntegrationMigrations(t, ctx, databaseURL)
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("create PostgreSQL pool: %v", err)
+	}
+	defer pool.Close()
+
+	const runID = "f18c14df-5329-46b7-b1b1-bfd85c742977"
+	cfg := Config{
+		RunID:                runID,
+		WorkerInstanceID:     "database-clock-worker",
+		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
+		DBFetchTimeout:       3 * time.Second,
+		DBWriteTimeout:       3 * time.Second,
+		StaleRunThreshold:    time.Minute,
+		DBMaxRetries:         2,
+		RetryBaseDelay:       10 * time.Millisecond,
+		RetryMaxDelay:        50 * time.Millisecond,
+	}
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = pool.Exec(cleanupCtx, "DELETE FROM audit_runs WHERE id = $1", runID)
+	}
+	cleanup(ctx)
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		cleanup(cleanupCtx)
+	}()
+
+	if err := createAuditRun(ctx, pool, &cfg); err != nil {
+		t.Fatalf("create fresh audit run: %v", err)
+	}
+	if _, err := abandonStaleAuditRuns(ctx, pool, cfg); err != nil {
+		t.Fatalf("run stale recovery for fresh database heartbeat: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, "SELECT status FROM audit_runs WHERE id = $1", runID).Scan(&status); err != nil {
+		t.Fatalf("read fresh audit run status: %v", err)
+	}
+	if status != auditRunStatusRunning {
+		t.Fatalf("fresh database heartbeat was abandoned: status=%q", status)
+	}
+
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE audit_runs
+		 SET heartbeat_at = CURRENT_TIMESTAMP - INTERVAL '10 minutes'
+		 WHERE id = $1`,
+		runID,
+	); err != nil {
+		t.Fatalf("age audit run using PostgreSQL clock: %v", err)
+	}
+	if _, err := abandonStaleAuditRuns(ctx, pool, cfg); err != nil {
+		t.Fatalf("run stale recovery for expired database heartbeat: %v", err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT status FROM audit_runs WHERE id = $1", runID).Scan(&status); err != nil {
+		t.Fatalf("read stale audit run status: %v", err)
+	}
+	if status != auditRunStatusAbandoned {
+		t.Fatalf("stale database heartbeat was not abandoned: status=%q", status)
+	}
+}
+
 func TestAbandonLargeStaleAuditRunUsesBoundedBatches(t *testing.T) {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -2068,6 +2141,236 @@ func TestCompletedRunRejectsNonTerminalTargets(t *testing.T) {
 			targetStatus,
 			retainedURL,
 		)
+	}
+}
+
+func TestMigrationsUpgradeEverySupportedSchemaVersion(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("DATABASE_URL is required for integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	adminDB, err := sql.Open(postgresMigrationDriver, databaseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL admin connection: %v", err)
+	}
+	defer adminDB.Close()
+	if err := adminDB.PingContext(ctx); err != nil {
+		t.Fatalf("ping PostgreSQL admin connection: %v", err)
+	}
+
+	for startingVersion := int64(1); startingVersion < requiredSchemaVersion; startingVersion++ {
+		t.Run(fmt.Sprintf("from_v%02d", startingVersion), func(t *testing.T) {
+			schemaName := fmt.Sprintf("migration_matrix_%02d_%d", startingVersion, time.Now().UnixNano())
+			if _, err := adminDB.ExecContext(ctx, `CREATE SCHEMA `+quoteSQLIdentifier(schemaName)); err != nil {
+				t.Fatalf("create temporary schema: %v", err)
+			}
+			defer func() {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cleanupCancel()
+				_, _ = adminDB.ExecContext(
+					cleanupCtx,
+					`DROP SCHEMA IF EXISTS `+quoteSQLIdentifier(schemaName)+` CASCADE`,
+				)
+			}()
+
+			migrationDB, err := sql.Open(postgresMigrationDriver, withSearchPath(databaseURL, schemaName))
+			if err != nil {
+				t.Fatalf("open migration connection: %v", err)
+			}
+			defer migrationDB.Close()
+			migrationDB.SetMaxOpenConns(1)
+			migrationDB.SetMaxIdleConns(1)
+
+			goose.SetBaseFS(migrationFiles)
+			goose.SetTableName(migrationVersionTable)
+			goose.SetLogger(goose.NopLogger())
+			if err := goose.SetDialect(postgresMigrationDriver); err != nil {
+				t.Fatalf("configure goose dialect: %v", err)
+			}
+			if err := goose.UpToContext(ctx, migrationDB, migrationDir, startingVersion); err != nil {
+				t.Fatalf("apply starting schema version %d: %v", startingVersion, err)
+			}
+
+			runID := fmt.Sprintf("10000000-0000-4000-8000-%012d", startingVersion)
+			seedMigrationUpgradeFixture(t, ctx, migrationDB, startingVersion, runID)
+
+			if err := applySchemaMigrationsDB(ctx, migrationDB); err != nil {
+				t.Fatalf("upgrade schema version %d to current: %v", startingVersion, err)
+			}
+			version, err := goose.GetDBVersionContext(ctx, migrationDB)
+			if err != nil {
+				t.Fatalf("read upgraded schema version: %v", err)
+			}
+			if version != requiredSchemaVersion {
+				t.Fatalf("upgraded schema version = %d, want %d", version, requiredSchemaVersion)
+			}
+
+			var (
+				ownerGeneration int64
+				targetStatus    string
+				requestURL      string
+				requestCleared  bool
+				safeURL         string
+				title           string
+				fingerprintKey  string
+			)
+			if err := migrationDB.QueryRowContext(
+				ctx,
+				`SELECT run.owner_generation,
+				        target.status,
+				        target.request_url,
+				        target.request_url_cleared_at IS NOT NULL,
+				        result.safe_url,
+				        result.title,
+				        result.fingerprint_key_id
+				 FROM audit_runs AS run
+				 JOIN audit_run_targets AS target ON target.run_id = run.id
+				 JOIN audit_results AS result
+				   ON result.run_id = target.run_id
+				  AND result.target_id = target.target_id
+				 WHERE run.id = $1::UUID`,
+				runID,
+			).Scan(
+				&ownerGeneration,
+				&targetStatus,
+				&requestURL,
+				&requestCleared,
+				&safeURL,
+				&title,
+				&fingerprintKey,
+			); err != nil {
+				t.Fatalf("read upgraded fixture: %v", err)
+			}
+			if ownerGeneration != 1 {
+				t.Fatalf("owner generation = %d, want 1", ownerGeneration)
+			}
+			if targetStatus != auditTargetStatusCompleted {
+				t.Fatalf("target status = %q, want %q", targetStatus, auditTargetStatusCompleted)
+			}
+			if requestURL != "" || !requestCleared {
+				t.Fatalf("terminal request URL was retained: request_url=%q cleared=%t", requestURL, requestCleared)
+			}
+			if strings.Contains(safeURL, "migration-secret") || strings.ContainsAny(safeURL, "?#") {
+				t.Fatalf("unsafe URL survived migration: %q", safeURL)
+			}
+			if title != fmt.Sprintf("Migration fixture v%d", startingVersion) {
+				t.Fatalf("fixture data was not preserved: title=%q", title)
+			}
+			if fingerprintKey != "legacy" {
+				t.Fatalf("fingerprint key ID = %q, want legacy", fingerprintKey)
+			}
+		})
+	}
+}
+
+func seedMigrationUpgradeFixture(
+	t *testing.T,
+	ctx context.Context,
+	db *sql.DB,
+	version int64,
+	runID string,
+) {
+	t.Helper()
+
+	rawURL := fmt.Sprintf("https://example.com/migration/%d?token=migration-secret#fragment", version)
+	title := fmt.Sprintf("Migration fixture v%d", version)
+	if version == 1 {
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO seo_results (url, run_id, status_code, scan_status, title)
+			 VALUES ($1, $2, 200, 'completed', $3)`,
+			rawURL,
+			runID,
+			title,
+		); err != nil {
+			t.Fatalf("seed schema v1 fixture: %v", err)
+		}
+		return
+	}
+
+	runInsert := `INSERT INTO audit_runs
+		(id, started_at, finished_at, status, total_urls, successful_urls, failed_urls)
+		VALUES ($1::UUID, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'completed', 1, 1, 0)`
+	if version >= 6 {
+		runInsert = `INSERT INTO audit_runs
+			(id, started_at, finished_at, status, total_urls, successful_urls, failed_urls,
+			 heartbeat_at, worker_instance_id)
+			VALUES ($1::UUID, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'completed', 1, 1, 0,
+			        CURRENT_TIMESTAMP, 'migration-matrix')`
+	}
+	if _, err := db.ExecContext(ctx, runInsert, runID); err != nil {
+		t.Fatalf("seed schema v%d audit run: %v", version, err)
+	}
+
+	if version == 2 {
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO audit_results (run_id, url, status_code, scan_status, title)
+			 VALUES ($1::UUID, $2, 200, 'completed', $3)`,
+			runID,
+			rawURL,
+			title,
+		); err != nil {
+			t.Fatalf("seed schema v2 audit result: %v", err)
+		}
+		return
+	}
+
+	const targetID = int64(42)
+	safeURL := rawURL
+	switch {
+	case version == 3:
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO audit_run_targets (run_id, target_id, request_url)
+			 VALUES ($1::UUID, $2, $3)`,
+			runID,
+			targetID,
+			rawURL,
+		); err != nil {
+			t.Fatalf("seed schema v3 target: %v", err)
+		}
+	case version < 6:
+		safeURL = fmt.Sprintf("https://example.com/migration/%d", version)
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO audit_run_targets
+			     (run_id, target_id, request_url, request_url_cleared_at)
+			 VALUES ($1::UUID, $2, '', CURRENT_TIMESTAMP)`,
+			runID,
+			targetID,
+		); err != nil {
+			t.Fatalf("seed schema v%d target: %v", version, err)
+		}
+	default:
+		safeURL = fmt.Sprintf("https://example.com/migration/%d", version)
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO audit_run_targets
+			     (run_id, target_id, request_url, request_url_cleared_at, status, finished_at)
+			 VALUES ($1::UUID, $2, '', CURRENT_TIMESTAMP, 'completed', CURRENT_TIMESTAMP)`,
+			runID,
+			targetID,
+		); err != nil {
+			t.Fatalf("seed schema v%d target: %v", version, err)
+		}
+	}
+
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO audit_results
+		     (run_id, safe_url, target_fingerprint, target_id, status_code, scan_status, title)
+		 VALUES ($1::UUID, $2, decode(repeat('ab', 16), 'hex'), $3, 200, 'completed', $4)`,
+		runID,
+		safeURL,
+		targetID,
+		title,
+	); err != nil {
+		t.Fatalf("seed schema v%d audit result: %v", version, err)
 	}
 }
 

@@ -312,6 +312,7 @@ gitleaks detect --source . --redact
 - `Retry-After` для HTTP `429/503` застосовується per host і обмежується максимумом `5m`; для конкретного URL очікування додатково обмежується залишком `HTTP_TOTAL_TIMEOUT` або `ROBOTS_TOTAL_TIMEOUT`.
 - PostgreSQL порт прив'язаний до `127.0.0.1`, тому база не відкривається назовні.
 - `Dockerfile.postgres` та named volumes `pgdata`/`reports` уникають host bind mounts, тому stack працює і з remote Docker daemon у Minikube. Windows launcher копіює report files на host через Docker API.
+- Base images закріплені digest, а виправлені runtime-пакети OpenSSL і `libuuid` — точними версіями; оновлюйте ці значення лише разом із повторним Trivy scan обох образів.
 - Parser image запускається від numeric non-root user `10001:10001`.
 - Compose resource limits (`cpus`, `mem_limit`) утримують локальний стек у прогнозованих межах.
 - `STOP_GRACE_PERIOD` має перевищувати суму `SHUTDOWN_TIMEOUT` і `FINALIZATION_TIMEOUT` щонайменше на `5s`; parser перевіряє цей інваріант до підключення до PostgreSQL, а Compose використовує те саме значення для `stop_grace_period`.
