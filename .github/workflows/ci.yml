@@ -6,19 +6,24 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      freeze_evidence:
+        description: Run repeated concurrency checks before freeze
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
   verify:
     name: Go checks and Docker build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       DB_USER: seo_user
       DB_PASSWORD: integration-only-password
@@ -53,6 +58,13 @@ jobs:
 
       - name: Run tests with race detector
         run: go test -race -count=1 ./...
+
+      - name: Stress test shuffled execution
+        if: github.event_name == 'workflow_dispatch' && inputs.freeze_evidence
+        shell: bash
+        run: |
+          go test -v -shuffle=on -count=10 ./... | tee "$RUNNER_TEMP/freeze-shuffle.log"
+          go test -v -race -shuffle=on -count=10 ./... | tee "$RUNNER_TEMP/freeze-race.log"
 
       - name: Run vet
         run: go vet ./...
@@ -106,10 +118,22 @@ jobs:
           output-file: ./seo-auditor.spdx.json
 
       - name: Start integration PostgreSQL
-        run: docker compose up --build --wait postgres
+        run: |
+          docker tag seo-auditor-postgres:ci seo-auditor-postgres:local
+          docker compose up --no-build --pull never --wait postgres
 
       - name: Run integration tests
         run: go test -tags=integration -count=1 ./...
+
+      - name: Stress test PostgreSQL ownership and shutdown
+        if: github.event_name == 'workflow_dispatch' && inputs.freeze_evidence
+        shell: bash
+        env:
+          STRESS_TESTS: >-
+            ^Test(AuditRunClaimsAreExclusiveAndResumable|ResumeWaitsForLockedResumableTarget|RepeatedWorkerIDCannotPersistAfterOwnershipTakeover|HeartbeatMonitorCancelsWorkAfterOwnershipLoss|FailedAuditRunPreservesTargetForResume|CanceledCompletionWaitsForPostgreSQLTargetLock|StaleRecoveryDefersLockedTargetUntilNextPass|AbandonStaleAuditRunsUsesPostgreSQLClock|CancellationWaitsForAllResultProducers)$
+        run: |
+          go test -v -tags=integration -race -shuffle=on -count=10 \
+            -run "$STRESS_TESTS" ./... | tee "$RUNNER_TEMP/freeze-postgres.log"
 
       - name: Stop integration PostgreSQL
         if: always()

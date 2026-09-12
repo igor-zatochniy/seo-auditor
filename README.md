@@ -303,6 +303,9 @@ gitleaks detect --source . --redact
 
 ## Production notes
 
+Процедура фіксації SHA, ручних concurrency-перевірок, захисту tags і необов'язкового
+збереження build artifacts наведена в [docs/freeze.md](docs/freeze.md).
+
 - Значення з `.env.example` призначені для локального запуску; для deployment задавайте власні секрети.
 - Docker Compose у цьому репозиторії є локальним runtime, а не production deployment. HA PostgreSQL, automated backup/restore, monitoring та secret manager мають надаватися deployment-платформою.
 - Перед production upgrade робіть backup PostgreSQL volume/database; SQL migrations є forward-only, rollback має виконуватися через restore перевіреного backup або окремий rollback-план deployment-платформи.
