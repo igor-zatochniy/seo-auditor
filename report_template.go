@@ -133,6 +133,9 @@ const reportHeaderHTML = `<!doctype html>
     <div><dt>Завершення</dt><dd>{{.FinishedAt}}</dd></div>
     <div><dt>Звіт створено</dt><dd>{{.GeneratedAt}}</dd></div>
   </dl>
+  <section aria-label="Технічні сигнали">
+    {{range .Analytics.Groups}}{{$group := .}}<details><summary>{{.Label}}</summary><dl>{{range .Buckets}}<dt>{{.Label}}</dt><dd>{{printf "%.1f" .Value}} <progress max="{{$group.Maximum}}" value="{{.Value}}" aria-label="{{.Label}}"></progress></dd>{{end}}</dl></details>{{end}}
+  </section>
   <div class="table-shell">
     <table>
       <thead>
@@ -155,7 +158,7 @@ const reportHeaderHTML = `<!doctype html>
 `
 
 const reportRowHTML = `        <tr>
-          <td class="url">{{.URL}}</td>
+          <td class="url">{{.URL}}{{if .Details}}<details><summary>Повні метрики</summary><dl>{{range .Details}}<dt>{{.Group}} / {{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl></details>{{end}}</td>
           <td class="compact">{{.HTTPCode}}</td>
           <td class="compact"><span class="pill {{.StatusTone}}">{{.Status}}</span></td>
           <td class="text-cell">{{.Title}}</td>

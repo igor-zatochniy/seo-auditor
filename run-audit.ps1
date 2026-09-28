@@ -104,6 +104,8 @@ function Invoke-Audit {
     $reportDirectory = Join-Path $projectDirectory "reports"
     $latestReport = Join-Path $reportDirectory "latest-report.html"
     $auditExitCode = 1
+    $previousMode = $env:AUDITOR_MODE
+    $env:AUDITOR_MODE = "run"
 
     Push-Location $projectDirectory
     try {
@@ -151,6 +153,7 @@ function Invoke-Audit {
             Write-Warning "Не вдалося перенести або відкрити HTML-звіт: $($_.Exception.Message). Результат аудиту не змінено."
         }
     } finally {
+        $env:AUDITOR_MODE = $previousMode
         Pop-Location
     }
 

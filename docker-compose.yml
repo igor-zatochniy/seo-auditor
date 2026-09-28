@@ -4,7 +4,6 @@ services:
       context: .
       dockerfile: Dockerfile.postgres
     image: seo-auditor-postgres:local
-    container_name: seo_auditor_postgres
     environment:
       POSTGRES_USER: ${DB_USER:?DB_USER is required}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
@@ -32,8 +31,19 @@ services:
       context: .
       dockerfile: Dockerfile
     image: seo-auditor:local
-    container_name: seo_auditor_parser
+    command: ["${AUDITOR_MODE:-serve}"]
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     environment:
+      WEB_ADDR: ":8080"
+      WEB_ACCESS_TOKEN: ${WEB_ACCESS_TOKEN:-}
+      MAX_WEB_URLS_PER_RUN: ${MAX_WEB_URLS_PER_RUN:-10000}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       RUN_ID: ${RUN_ID:-}
       WORKER_INSTANCE_ID: ${WORKER_INSTANCE_ID:-}

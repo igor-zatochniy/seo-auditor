@@ -53,6 +53,14 @@ func main() {
 }
 
 func run() (exitCode int) {
+	mode := "run"
+	if len(os.Args) > 1 {
+		mode = os.Args[1]
+	}
+	if mode != "run" && mode != "serve" {
+		slog.Error("Невідомий режим; використовуйте run або serve")
+		return exitFatal
+	}
 	bootstrapLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(bootstrapLogger)
 	cfg, err := loadConfig()
@@ -60,7 +68,10 @@ func run() (exitCode int) {
 		slog.Error("Некоректна конфігурація рантайму", "error", err)
 		return exitFatal
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})).With("run_id", cfg.RunID)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	if mode == "run" {
+		logger = logger.With("run_id", cfg.RunID)
+	}
 	slog.SetDefault(logger)
 
 	slog.Info("Запускається етичний SEO-аудитор")
@@ -119,6 +130,9 @@ func run() (exitCode int) {
 	}
 
 	poolConfig.MaxConns = int32(cfg.Workers + 2)
+	if mode == "serve" {
+		poolConfig.MaxConns += 4
+	}
 	poolConfig.MinConns = 2
 	if poolConfig.MinConns > poolConfig.MaxConns {
 		poolConfig.MinConns = poolConfig.MaxConns
@@ -173,8 +187,11 @@ func run() (exitCode int) {
 		slog.Info("Очищено URL завершених запусків після перерваної фіналізації", "count", clearedRetainedURLs)
 	}
 
+	defer dbPool.Close()
+	if mode == "serve" {
+		return serveAuditor(signalCtx, dbPool, cfg)
+	}
 	if err := createAuditRun(signalCtx, dbPool, &cfg); err != nil {
-		dbPool.Close()
 		slog.Error("Не вдалося зареєструвати запуск аудиту", "error", err)
 		return exitFatal
 	}
@@ -186,16 +203,21 @@ func run() (exitCode int) {
 		poolConfig.MaxConns,
 	)
 
-	defer func() {
-		slog.Info("Закривається пул підключень PostgreSQL")
-		dbPool.Close()
-	}()
+	return executeCapturedAuditRun(signalCtx, dbPool, cfg, true)
+}
+
+// Both entry points share ownership, heartbeat, persistence and shutdown semantics.
+func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cfg Config, publish bool) (exitCode int) {
+	logger := slog.Default()
+	if !publish {
+		logger = logger.With("run_id", cfg.RunID)
+	}
 	runCompletion := auditRunCompletion{Status: auditRunStatusFailed}
 	workCtx, cancelWork := context.WithCancelCause(signalCtx)
 	defer cancelWork(context.Canceled)
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
 	heartbeatDone := startAuditRunHeartbeat(heartbeatCtx, dbPool, cfg, func(err error) {
-		slog.Error("Втрачено надійний heartbeat запуску; планування нових targets зупиняється", "error", err)
+		logger.Error("Втрачено надійний heartbeat запуску; планування нових targets зупиняється", "error", err)
 		cancelWork(err)
 	})
 	defer func() {
@@ -211,6 +233,14 @@ func run() (exitCode int) {
 			cfg.FinalizationTimeout,
 		)
 		defer cancelFinalization()
+		// A captured web snapshot may be canceled before its first read.
+		if runCompletion.TotalURLs == 0 {
+			if err := dbPool.QueryRow(finalizationCtx,
+				`SELECT total_urls, successful_urls, failed_urls FROM audit_runs WHERE id=$1 AND owner_generation=$2`,
+				cfg.RunID, effectiveOwnerGeneration(cfg)).Scan(&runCompletion.TotalURLs, &runCompletion.SuccessfulURLs, &runCompletion.FailedURLs); err != nil {
+				logger.Error("Не вдалося прочитати counters перед фіналізацією", "run_id", cfg.RunID, "error", err)
+			}
+		}
 
 		terminalErr := persistAuditRunTerminalState(
 			finalizationCtx,
@@ -222,18 +252,18 @@ func run() (exitCode int) {
 		stopHeartbeat()
 		<-heartbeatDone
 		if terminalErr != nil {
-			slog.Error("Не вдалося записати terminal status запуску аудиту", "error", terminalErr)
+			logger.Error("Не вдалося записати terminal status запуску аудиту", "error", terminalErr)
 			exitCode = exitFatal
 			return
 		}
 		if _, err := clearAuditRunTargetURLs(finalizationCtx, dbPool, cfg.RunID, cfg); err != nil {
-			slog.Error("Не вдалося очистити збережені URL завершеного запуску", "error", err)
+			logger.Error("Не вдалося очистити збережені URL завершеного запуску", "error", err)
 			exitCode = exitFatal
 		}
-		if signalCtx.Err() == nil {
+		if publish && signalCtx.Err() == nil {
 			publishAuditReport(dbPool, cfg)
-		} else {
-			slog.Info("HTML-звіт пропущено під час завершення за системним сигналом")
+		} else if signalCtx.Err() != nil {
+			logger.Info("HTML-звіт пропущено під час завершення за системним сигналом")
 		}
 	}()
 
@@ -241,18 +271,18 @@ func run() (exitCode int) {
 	if err != nil {
 		if signalCtx.Err() != nil {
 			runCompletion.Status = auditRunStatusCanceled
-			slog.Warn("Запуск скасовано до фіксації стабільного набору цілей", "error", signalCtx.Err())
+			logger.Warn("Запуск скасовано до фіксації стабільного набору цілей", "error", signalCtx.Err())
 			return exitCanceled
 		}
 		if cause := context.Cause(workCtx); cause != nil {
-			slog.Error("Heartbeat завершився фатально до фіксації стабільного набору цілей", "error", cause)
+			logger.Error("Heartbeat завершився фатально до фіксації стабільного набору цілей", "error", cause)
 			return exitFatal
 		}
-		slog.Error("Не вдалося зафіксувати стабільний набір цілей аудиту", "error", err)
+		logger.Error("Не вдалося зафіксувати стабільний набір цілей аудиту", "error", err)
 		return exitFatal
 	}
 	if targetSnapshot.Total == 0 {
-		slog.Warn("Стабільний набір цілей аудиту порожній")
+		logger.Warn("Стабільний набір цілей аудиту порожній")
 		if signalCtx.Err() != nil {
 			runCompletion.Status = auditRunStatusCanceled
 			return exitCanceled
@@ -263,7 +293,7 @@ func run() (exitCode int) {
 	runCompletion.TotalURLs = targetSnapshot.Total
 	runCompletion.SuccessfulURLs = int(targetSnapshot.Successful)
 	runCompletion.FailedURLs = int(targetSnapshot.Failed)
-	slog.Info(
+	logger.Info(
 		"Зафіксовано стабільний набір цілей аудиту",
 		"high_watermark",
 		targetSnapshot.HighWatermark,
@@ -358,7 +388,7 @@ func run() (exitCode int) {
 		closeResultsAfterProducers(&wg, streamFinished, results)
 	}()
 
-	slog.Info("Починається паралельна обробка URL та збереження результатів")
+	logger.Info("Починається паралельна обробка URL та збереження результатів")
 	summary := saveResults(operationCtx, dbPool, results, cfg)
 	streamSummary := <-streamDone
 	close(processingDone)
@@ -381,7 +411,7 @@ func run() (exitCode int) {
 	runCompletion.FailedURLs = int(targetSnapshot.Failed) + summary.Failed + missingResults
 	if streamSummary.Error != nil && !streamCanceledByLifecycle {
 		runCompletion.FailedURLs += int(unprocessedTargets)
-		slog.Error(
+		logger.Error(
 			"Потокове читання стабільного набору цілей завершилося помилкою",
 			"error",
 			streamSummary.Error,
@@ -394,11 +424,11 @@ func run() (exitCode int) {
 	}
 
 	if streamSummary.Queued == 0 && previouslyProcessed < targetSnapshot.Total {
-		slog.Warn("Стабільний набір цілей не містить валідних URL", "skipped_urls", streamSummary.Skipped)
+		logger.Warn("Стабільний набір цілей не містить валідних URL", "skipped_urls", streamSummary.Skipped)
 	}
 	if heartbeatFailure {
 		runCompletion.Status = auditRunStatusFailed
-		slog.Error(
+		logger.Error(
 			"Запуск завершується через послідовні помилки heartbeat",
 			"error",
 			context.Cause(workCtx),
@@ -411,7 +441,7 @@ func run() (exitCode int) {
 	}
 	if shutdownRequested {
 		runCompletion.Status = auditRunStatusCanceled
-		slog.Warn(
+		logger.Warn(
 			"Запуск аудиту скасовано до завершення стабільного набору цілей",
 			"shutdown_requested",
 			shutdownRequested,
@@ -430,7 +460,7 @@ func run() (exitCode int) {
 	}
 	if summary.PersistenceFailures > 0 || missingResults > 0 {
 		runCompletion.Status = auditRunStatusFailed
-		slog.Error(
+		logger.Error(
 			"Запуск не може бути завершений через втрату результатів у persistence pipeline",
 			"persistence_failures",
 			summary.PersistenceFailures,
@@ -444,7 +474,7 @@ func run() (exitCode int) {
 	if unprocessedTargets > 0 {
 		runCompletion.FailedURLs += int(unprocessedTargets)
 		runCompletion.Status = auditRunStatusFailed
-		slog.Error(
+		logger.Error(
 			"Стабільний набір цілей оброблено не повністю",
 			"unprocessed_targets",
 			unprocessedTargets,
@@ -461,7 +491,7 @@ func run() (exitCode int) {
 	}
 	if targetSnapshot.Failed > 0 || streamSummary.Skipped > 0 || summary.Failed > 0 {
 		runCompletion.Status = auditRunStatusCompletedWithErrors
-		slog.Warn(
+		logger.Warn(
 			"Аудит завершено з помилками окремих URL",
 			"skipped_urls",
 			streamSummary.Skipped,
@@ -476,7 +506,7 @@ func run() (exitCode int) {
 	}
 
 	runCompletion.Status = auditRunStatusCompleted
-	slog.Info(
+	logger.Info(
 		"Роботу парсера завершено",
 		"queued_urls",
 		streamSummary.Queued,

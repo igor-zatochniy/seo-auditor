@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -32,6 +34,7 @@ type auditReportPaths struct {
 }
 
 type auditReportSummary struct {
+	Analytics      webAnalytics
 	RunID          string
 	Status         string
 	StatusTone     string
@@ -44,6 +47,7 @@ type auditReportSummary struct {
 }
 
 type auditReportRow struct {
+	Details          []reportDetail
 	URL              string
 	HTTPCode         string
 	Status           string
@@ -68,11 +72,15 @@ var (
 )
 
 func publishAuditReport(dbPool *pgxpool.Pool, cfg Config) {
+	publishAuditReportContext(context.Background(), dbPool, cfg, true)
+}
+
+func publishAuditReportContext(parent context.Context, dbPool *pgxpool.Pool, cfg Config, openBrowser bool) {
 	timeout := cfg.ReportExportTimeout
 	if timeout <= 0 {
 		timeout = DefaultReportExportTimeout
 	}
-	reportCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	reportCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	paths, err := exportAuditReport(reportCtx, dbPool, cfg.RunID, reportsDirectory, time.Now())
@@ -93,8 +101,10 @@ func publishAuditReport(dbPool *pgxpool.Pool, cfg Config) {
 		"archive_report", paths.Archive,
 	)
 
-	if err := openReportInBrowser(paths.Latest); err != nil {
-		slog.Warn("Не вдалося відкрити HTML-звіт у системному браузері", "report", paths.Latest, "error", err)
+	if openBrowser {
+		if err := openReportInBrowser(paths.Latest); err != nil {
+			slog.Warn("Не вдалося відкрити HTML-звіт у системному браузері", "report", paths.Latest, "error", err)
+		}
 	}
 }
 
@@ -167,6 +177,10 @@ func exportAuditReport(
 	if err != nil {
 		return auditReportPaths{}, err
 	}
+	summary.Analytics, err = loadWebAnalytics(ctx, dbPool, runID)
+	if err != nil {
+		return auditReportPaths{}, err
+	}
 
 	rows, err := dbPool.Query(
 		ctx,
@@ -187,8 +201,9 @@ func exportAuditReport(
 		        COALESCE(word_count, 0),
 		        COALESCE(duration_ms, 0),
 		        COALESCE(error_code, ''),
-		        COALESCE(error_message, '')
-		 FROM audit_results
+		        COALESCE(error_message, ''),
+		        (SELECT row_to_json(p) FROM (`+reportSelectSQL()+` WHERE r.run_id = outer_result.run_id AND r.target_id = outer_result.target_id) p)
+		 FROM audit_results outer_result
 		 WHERE run_id = $1
 		 ORDER BY target_id`,
 		runID,
@@ -225,6 +240,7 @@ func exportAuditReport(
 			durationMS       int64
 			errorCode        string
 			errorMessage     string
+			detailsJSON      []byte
 		)
 		if err := rows.Scan(
 			&safeURL,
@@ -245,11 +261,12 @@ func exportAuditReport(
 			&durationMS,
 			&errorCode,
 			&errorMessage,
+			&detailsJSON,
 		); err != nil {
 			return auditReportRow{}, false, fmt.Errorf("scan audit report result: %w", err)
 		}
 
-		return newAuditReportRow(
+		row := newAuditReportRow(
 			safeURL,
 			statusCode,
 			scanStatus,
@@ -268,7 +285,15 @@ func exportAuditReport(
 			durationMS,
 			errorCode,
 			errorMessage,
-		), true, nil
+		)
+		var record reportRecord
+		decoder := json.NewDecoder(bytes.NewReader(detailsJSON))
+		decoder.UseNumber()
+		if err := decoder.Decode(&record); err != nil {
+			return auditReportRow{}, false, err
+		}
+		row.Details = recordDetails(sanitizeReportRecord(record))
+		return row, true, nil
 	}
 
 	paths, err := writeAuditReportFiles(reportDir, summary, next, generatedAt)
@@ -339,6 +364,9 @@ func newAuditReportRow(
 	errorCode string,
 	errorMessage string,
 ) auditReportRow {
+	safeURL = redactURL(safeURL)
+	title, description, h1 = redactText(title), redactText(description), redactText(h1)
+	metaRobots, xRobotsTag, errorMessage = redactText(metaRobots), redactText(xRobotsTag), redactText(errorMessage)
 	httpCode := "-"
 	if statusCode.Valid {
 		httpCode = strconv.FormatInt(int64(statusCode.Int32), 10)

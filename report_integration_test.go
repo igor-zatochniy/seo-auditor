@@ -106,7 +106,7 @@ func TestExportAuditReportFromPostgreSQL(t *testing.T) {
 	report := string(latest)
 	for _, expected := range []string{
 		runID,
-		"https://example.com/page?token=[REDACTED]",
+		redactURL("https://example.com/page?token=[REDACTED]"),
 		"Integration description",
 		"Integration H1",
 		"Внутрішні: 4",
