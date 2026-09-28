@@ -37,7 +37,7 @@ const (
 	DefaultTargetFingerprintKeyID    = "default"
 	MinFingerprintKeyLen             = 32
 	MaxWorkerInstanceIDLen           = 128
-	DefaultWorkers                   = 3
+	DefaultWorkers                   = 2
 	DefaultURLBatchSize              = 100
 	DefaultShutdownTimeout           = 25 * time.Second
 	DefaultFinalizationTimeout       = 30 * time.Second
@@ -45,10 +45,10 @@ const (
 	MinStopGraceMargin               = 5 * time.Second
 	MaxURLBatchSize                  = 10_000
 	MaxWorkers                       = 32
-	DefaultMaxHTMLBodyBytes          = int64(5 * 1024 * 1024)
+	DefaultMaxHTMLBodyBytes          = int64(8 * 1024 * 1024)
 	MaxHTMLBodyBytes                 = int64(8 * 1024 * 1024)
-	DefaultMaxHTMLTokenBytes         = int64(512 * 1024)
-	MaxHTMLTokenBytes                = int64(1024 * 1024)
+	DefaultMaxHTMLTokenBytes         = int64(5 * 1024 * 1024)
+	MaxHTMLTokenBytes                = int64(8 * 1024 * 1024)
 	MaxEstimatedHTMLParserHeapBytes  = int64(96 * 1024 * 1024)
 	HTMLParserHeapAmplification      = int64(8)
 

@@ -34,7 +34,22 @@ API потребує bearer token або session cookie. Змінюючі зап
 
 Таблиця використовує keyset cursor `after=target_id`, `limit=50` (максимум 200), `search` та whitelist `filter`. Історія: 50 запусків на сторінку й opaque cursor. POST body обмежений 8 MiB, `MAX_WEB_URLS_PER_RUN` має default/max 10000, один URL: 2048 символів. Метадані та telemetry `*_truncated`/`*_original_length` доступні у деталях. `request_url` і fingerprint не повертаються браузеру.
 
-Агрегати обчислює PostgreSQL. HTML-сигнали рахуються для розібраних HTTP 200 сторінок, а HTTP/outcome distributions охоплюють усі результати. Title 40–65 і Description 120–170 символів є евристиками SEO Auditor. Non-self canonical, відсутність JSON-LD, мала кількість слів і robots block не позначаються універсальними помилками. Noindex distribution показує наявність директиви в будь-якому scope, не остаточне рішення пошуковика.
+Агрегати обчислює PostgreSQL. HTML-сигнали рахуються для розібраних HTTP 200 сторінок, а HTTP/outcome distributions охоплюють усі результати. Title і Description оцінюються за шириною тексту в px, а кількість символів залишається окремою метрикою. Non-self canonical, відсутність JSON-LD, мала кількість слів і robots block не позначаються універсальними помилками. Noindex distribution показує наявність директиви в будь-якому scope, не остаточне рішення пошуковика.
+
+### Оцінка SERP width
+
+| Метрика | Ширина | Статус |
+| --- | --- | --- |
+| Title | ≤580 px | Recommended |
+| Title | 581–600 px | Borderline |
+| Title | >600 px | High truncation risk |
+| Description | ≤680 px | Desktop: Safe; Mobile: Safe |
+| Description | 681–920 px | Desktop: Safe; Mobile: May truncate |
+| Description | >920 px | Desktop: May truncate; Mobile: Likely truncate |
+
+Сервер використовує вбудований Liberation Sans 2.1.5: regular 20 px для Title та 14 px для Description, kerning без hinting, згортання whitespace та округлення ширини вгору до цілого CSS pixel. Це оцінка ризику, а не точна емуляція Google: пошуковик може переписати snippet, виділити слова жирним або змінити layout. Непідтримувані glyphs мають fallback шириною 1 em; `serp_width_approximate` також позначає підтримувані перевіркою випадки складного письма. Зовнішні шрифти та браузер для обчислення не потрібні; ліцензія OFL зберігається в `internal/seo/fonts/`.
+
+Метрики обчислюються до storage truncation та зберігаються разом із версією моделі. Порожні метадані мають `Missing`, а нерозібрані сторінки не отримують pixel metrics. Міграція `012_serp_pixel_metrics.sql` не переписує історію: у старих рядках px дорівнює `NULL`, а character-based статус у звіті має префікс `Legacy:`. Для отримання px потрібен новий аудит. Значення та статуси однакові у web details, таблиці, CSV та HTML-експорті; `description_status` тепер означає Desktop, `description_mobile_status` — Mobile.
 
 ## Можливості
 
@@ -46,7 +61,7 @@ API потребує bearer token або session cookie. Змінюючі зап
 - Версіоновані PostgreSQL migrations через `goose`: parser застосовує непройдені SQL-кроки на старті, веде `schema_migrations` і бере advisory lock.
 - Таймаути для PostgreSQL, HTTP-запитів, `robots.txt` і запису результатів.
 - Кероване graceful shutdown: припинення планування, завершення in-flight задач, окремий bounded budget для terminal persistence і пропуск необов'язкового HTML-експорту під час зупинки.
-- Streaming HTML parser без `ReadAll`, DOM і повної копії body text; raw response обмежений до `8 MiB`, один tokenizer token — до `1 MiB`, а `WORKERS` перевіряється проти `96 MiB` parser heap budget.
+- Streaming HTML parser без `ReadAll`, DOM і повної копії body text; HTML body обмежений до `8 MiB`, один tokenizer token за замовчуванням — до `5 MiB` (абсолютна межа `8 MiB`), а `WORKERS` перевіряється проти `96 MiB` parser heap budget.
 - Базовий SSRF hardening: локальні та приватні IP-цілі заблоковані за замовчуванням.
 - Маскування всіх query values URL у логах, помилках і `safe_url`; `target_fingerprint` лишається псевдонімізованим lookup-полем, а унікальність результатів тримається на `UNIQUE(run_id, target_id)`.
 - Bounded storage для недовірених HTML metadata: oversized `title`, `H1`, canonical, Open Graph і robots values обрізаються до DB-safe меж із `*_truncated` та `*_original_length`.
@@ -107,7 +122,8 @@ Docker Compose
 │   ├── 008_bounded_snapshot_finalization.sql
 │   ├── 009_target_start_tracking.sql
 │   ├── 010_stale_recovery_index.sql
-│   └── 011_owner_generation_fencing.sql
+│   ├── 011_owner_generation_fencing.sql
+│   └── 012_serp_pixel_metrics.sql
 ├── internal/
 │   ├── config/
 │   ├── crawler/
@@ -190,7 +206,7 @@ Parser аналізує HTML, повернутий сервером, без ви
 - `reports/latest-report.html`: останній завершений експорт;
 - `reports/seo-audit-YYYY-MM-DD_HH-MM-SS-<run>.html`: архівна копія з датою, часом і коротким ID запуску.
 
-Звіт містить counters запуску, графічні розподіли та таблицю з URL, HTTP-кодом, статусом, `title`, `description`, `H1`, internal/external links, зображеннями без `alt`, robots signals, word count, duration і помилками. Розділ «Повні метрики» кожного рядка містить усі 58 публічних полів, включно з truncation telemetry. Рядки читаються з PostgreSQL потоково, тому exporter не завантажує весь запуск у пам'ять. HTML генерується стандартним `html/template`: усі значення з БД екрануються, CSS вбудовано у файл, зовнішні scripts, fonts або stylesheets відсутні. Після успішного експорту зберігаються лише останні `REPORT_RETENTION_COUNT` archive reports; `latest-report.html` до цього ліміту не входить.
+Звіт містить counters запуску, графічні розподіли та таблицю з URL, HTTP-кодом, статусом, `title`, `description`, `H1`, internal/external links, зображеннями без `alt`, robots signals, word count, duration і помилками. Розділ «Повні метрики» кожного рядка містить усі публічні поля, включно з truncation telemetry. Рядки читаються з PostgreSQL потоково, тому exporter не завантажує весь запуск у пам'ять. HTML генерується стандартним `html/template`: усі значення з БД екрануються, CSS вбудовано у файл, зовнішні scripts, fonts або stylesheets відсутні. Після успішного експорту зберігаються лише останні `REPORT_RETENTION_COUNT` archive reports; `latest-report.html` до цього ліміту не входить.
 
 Під час нативного запуску Windows успішно створений `latest-report.html` відкривається системним браузером. Linux parser container не має доступу до Windows desktop, тому `run-audit.cmd` використовує Docker API: запускає batch, копіює звіти з named volume у локальну папку `reports/`, застосовує той самий retention limit на host і відкриває `latest-report.html` лише тоді, коли поточний запуск створив свіжі archive та latest files. Попередні звіти не відкриваються як результат нового запуску. Помилка export, pruning, copy або browser launch лише записується в лог чи warning і не змінює exit code аудиту. Згенеровані HTML-файли виключено з Git.
 
@@ -209,7 +225,7 @@ Docker Compose читає локальний `.env`; Windows launcher створ
 | `WORKER_INSTANCE_ID` | generated | Необов'язковий ID parser instance для heartbeat і target claims. |
 | `TARGET_FINGERPRINT_KEY` | set in `.env` | HMAC key для `target_fingerprint`; замініть локальний placeholder перед deployment. |
 | `TARGET_FINGERPRINT_KEY_ID` | `default` | Non-secret identifier ключа fingerprint; змінюйте під час ротації HMAC key. |
-| `WORKERS` | `3` | Кількість паралельних worker goroutines; разом із token limit перевіряється проти `96 MiB` estimated parser heap budget. |
+| `WORKERS` | `2` | Кількість паралельних worker goroutines; разом із token limit перевіряється проти `96 MiB` estimated parser heap budget. |
 | `GOMEMLIMIT` | `192MiB` | Soft memory limit Go runtime; залишає запас відносно container limit `256m`. |
 | `LOG_LEVEL` | `INFO` | Мінімальний рівень JSON-логів: `DEBUG`, `INFO`, `WARN` або `ERROR`. |
 | `HTTP_ATTEMPT_TIMEOUT` | `5s` | Таймаут однієї HTTP-спроби. |
@@ -231,8 +247,8 @@ Docker Compose читає локальний `.env`; Windows launcher створ
 | `FINALIZATION_TIMEOUT` | `30s` | Окремий загальний budget для terminal status і очищення raw target URL після завершення pipeline. |
 | `STOP_GRACE_PERIOD` | `65s` | Спільне значення для app validation і Compose `stop_grace_period`; має залишати щонайменше `5s` понад два shutdown budgets. |
 | `URL_BATCH_SIZE` | `100` | Максимальна кількість URL, що читаються з PostgreSQL за один batch. |
-| `MAX_HTML_BODY_BYTES` | `5242880` | Максимальний розмір HTML-відповіді; абсолютна межа `8 MiB`. |
-| `MAX_HTML_TOKEN_BYTES` | `524288` | Максимальний token buffer потокового HTML parser; абсолютна межа `1 MiB`. |
+| `MAX_HTML_BODY_BYTES` | `8388608` | Максимальний розмір HTML body після HTTP-декомпресії, до charset decoding; абсолютна межа `8 MiB`. |
+| `MAX_HTML_TOKEN_BYTES` | `5242880` | Максимальний token buffer потокового HTML parser після charset decoding; абсолютна межа `8 MiB`. |
 | `RATE_LIMIT_INTERVAL` | `500ms` | Мінімальний інтервал між HTTP-спробами до одного host; має бути меншим за `HTTP_TOTAL_TIMEOUT` і `ROBOTS_TOTAL_TIMEOUT`. Очікування входить у total budget, але не в attempt timeout. |
 | `MAX_CONCURRENT_PER_HOST` | `1` | Максимальна кількість одночасних HTTP-запитів до одного host. |
 | `ROBOTS_CACHE_TTL` | `1h` | TTL кешованої robots policy; дозволений максимум становить `24h`. |
@@ -243,6 +259,10 @@ Docker Compose читає локальний `.env`; Windows launcher створ
 | `RETRY_MAX_DELAY` | `2s` | Максимальна межа retry delay без урахування `Retry-After`; фактичне очікування також обмежується total budget. |
 
 Якщо явно задана змінна має некоректний формат або виходить за дозволені межі, parser завершується з exit code `1`. `DATABASE_URL` і `TARGET_FINGERPRINT_KEY` є обов'язковими і не мають fallback-значень у коді.
+
+Великі inline SVG/data URI, script і JSON-LD можуть утворювати один HTML token. Типові налаштування `WORKERS=2`, `MAX_HTML_BODY_BYTES=8388608`, `MAX_HTML_TOKEN_BYTES=5242880` допускають такі сторінки без вимкнення захисту пам'яті: оцінка parser heap становить `2 × 5 MiB × 8 = 80 MiB` при бюджеті `96 MiB`. Це консервативна оцінка, а не гарантія загального RSS; `GOMEMLIMIT=192MiB` і container limit `256 MiB` не змінені. Для token limit `8 MiB` за body limit `8 MiB` потрібен `WORKERS=1`. Більша кількість workers вимагає меншого token limit.
+
+Під час оновлення наявного deployment узгодьте ці три значення у власному `.env`: збережені старі значення мають пріоритет над Compose defaults. Після завершення активного аудиту перезапустіть `start-auditor.cmd` або виконайте `docker compose up -d --build parser`. HTML, що перевищує налаштовані межі, як і раніше отримує `response_parse_failed`; неповний розбір не позначається успішним. Повторна перевірка виправленою версією потребує нового запуску аудиту.
 
 ## Advanced: CLI / batch mode
 

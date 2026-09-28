@@ -178,6 +178,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	if cfg.MaxHTMLTokenBytes != DefaultMaxHTMLTokenBytes {
 		t.Fatalf("unexpected HTML token limit: %d", cfg.MaxHTMLTokenBytes)
 	}
+	if cfg.Workers != 2 || cfg.MaxHTMLBodyBytes != 8*1024*1024 || cfg.MaxHTMLTokenBytes != 5*1024*1024 {
+		t.Fatalf("unexpected default parser budget: workers=%d body=%d token=%d", cfg.Workers, cfg.MaxHTMLBodyBytes, cfg.MaxHTMLTokenBytes)
+	}
 }
 
 func TestLoadConfigRejectsStaleRecoveryTimeoutBelowWriteTimeout(t *testing.T) {
@@ -428,7 +431,7 @@ func TestLoadConfigRejectsOversizedHTMLToken(t *testing.T) {
 	clearConfigEnvironment(t)
 	t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
 	t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
-	t.Setenv("MAX_HTML_TOKEN_BYTES", "1048577")
+	t.Setenv("MAX_HTML_TOKEN_BYTES", "8388609")
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected oversized MAX_HTML_TOKEN_BYTES to fail configuration loading")
@@ -445,5 +448,36 @@ func TestLoadConfigRejectsExcessiveHTMLParserHeapBudget(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected excessive HTML parser heap budget to fail configuration loading")
+	}
+}
+
+func TestLoadConfigLargeHTMLTokenHeapBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		workers string
+		token   string
+		wantErr bool
+	}{
+		{"two workers with five MiB tokens", "2", "5242880", false},
+		{"three workers exceed budget", "3", "5242880", true},
+		{"one worker with eight MiB tokens", "1", "8388608", false},
+		{"two workers with eight MiB exceed budget", "2", "8388608", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnvironment(t)
+			t.Setenv("DATABASE_URL", "postgres://user:test-placeholder-not-a-secret@postgres:5432/seo_db")
+			t.Setenv("TARGET_FINGERPRINT_KEY", testTargetFingerprintKey)
+			t.Setenv("WORKERS", tt.workers)
+			t.Setenv("MAX_HTML_BODY_BYTES", "8388608")
+			t.Setenv("MAX_HTML_TOKEN_BYTES", tt.token)
+			_, err := loadConfig()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "estimated HTML parser heap") {
+					t.Fatalf("expected parser heap budget error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("valid parser budget rejected: %v", err)
+			}
+		})
 	}
 }

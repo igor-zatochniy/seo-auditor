@@ -19,11 +19,6 @@ import (
 )
 
 const (
-	MinTitleLen       = 40
-	MaxTitleLen       = 65
-	MinDescriptionLen = 120
-	MaxDescriptionLen = 170
-
 	StorageURLMaxRunes         = 2048
 	StorageTitleMaxRunes       = 500
 	StorageDescriptionMaxRunes = 4000
@@ -51,6 +46,13 @@ type Data struct {
 	TitleOriginalLength        int
 	Description                string
 	DescriptionStatus          string
+	TitleCharCount             *int
+	TitleWidthPX               *int
+	DescriptionCharCount       *int
+	DescriptionWidthPX         *int
+	DescriptionMobileStatus    string
+	SERPWidthModel             string
+	SERPWidthApproximate       bool
 	H1                         string
 	H1Count                    int
 	H1Truncated                bool
@@ -227,6 +229,9 @@ type pageParser struct {
 	documentBaseURL    *url.URL
 	documentBaseSet    bool
 	title              boundedTextCollector
+	titleWidth         serpWidthCounter
+	descriptionWidth   serpWidthCounter
+	descriptionChars   int
 	firstH1            boundedTextCollector
 	titleSeen          bool
 	collectTitle       bool
@@ -267,11 +272,13 @@ const (
 func newPageParser(data *Data, targetURL string) *pageParser {
 	parsedTarget, _ := url.Parse(targetURL)
 	return &pageParser{
-		data:            data,
-		targetURL:       parsedTarget,
-		documentBaseURL: parsedTarget,
-		title:           newBoundedTextCollector(StorageTitleMaxRunes),
-		firstH1:         newBoundedTextCollector(StorageH1MaxRunes),
+		data:             data,
+		targetURL:        parsedTarget,
+		documentBaseURL:  parsedTarget,
+		title:            newBoundedTextCollector(StorageTitleMaxRunes),
+		titleWidth:       serpWidthCounter{pixels: 20},
+		descriptionWidth: serpWidthCounter{pixels: 14},
+		firstH1:          newBoundedTextCollector(StorageH1MaxRunes),
 	}
 }
 
@@ -423,6 +430,8 @@ func (p *pageParser) handleMeta(attributes tagAttributes) {
 		case bytes.EqualFold(name, []byte("description")) && !p.descriptionSeen:
 			p.descriptionSeen = true
 			if attributes.hasContent {
+				p.descriptionWidth.Write(attributes.content)
+				p.descriptionChars = utf8.RuneCount(bytes.TrimSpace(attributes.content))
 				p.data.Description, _, _ = boundedBytes(attributes.content, StorageDescriptionMaxRunes)
 			}
 		case bytes.EqualFold(name, []byte("twitter:card")) && !p.twitterCardSeen:
@@ -509,6 +518,7 @@ func (p *pageParser) handleText(text []byte) {
 	}
 	if p.collectTitle {
 		p.title.Write(text)
+		p.titleWidth.Write(text)
 	}
 	if p.collectFirstH1 {
 		p.firstH1.Write(text)
@@ -560,26 +570,15 @@ func (p *pageParser) finalize() {
 		p.metaRobots.Result(StorageRobotsTagMaxRunes)
 	p.data.Title, p.data.TitleTruncated, p.data.TitleOriginalLength = p.title.Result()
 	titleLen := p.title.RuneCount()
-	if titleLen == 0 {
-		p.data.TitleStatus = "Missing"
-	} else if titleLen < MinTitleLen {
-		p.data.TitleStatus = "Too Short"
-	} else if titleLen > MaxTitleLen {
-		p.data.TitleStatus = "Too Long"
-	} else {
-		p.data.TitleStatus = "OK"
-	}
-
-	descLen := utf8.RuneCountInString(p.data.Description)
-	if descLen == 0 {
-		p.data.DescriptionStatus = "Missing"
-	} else if descLen < MinDescriptionLen {
-		p.data.DescriptionStatus = "Too Short"
-	} else if descLen > MaxDescriptionLen {
-		p.data.DescriptionStatus = "Too Long"
-	} else {
-		p.data.DescriptionStatus = "OK"
-	}
+	p.data.TitleCharCount = &titleLen
+	p.data.TitleWidthPX = p.titleWidth.Width()
+	p.data.TitleStatus = titleWidthStatus(titleLen, p.data.TitleWidthPX)
+	descLen := p.descriptionChars
+	p.data.DescriptionCharCount = &descLen
+	p.data.DescriptionWidthPX = p.descriptionWidth.Width()
+	p.data.DescriptionStatus, p.data.DescriptionMobileStatus = descriptionWidthStatus(descLen, p.data.DescriptionWidthPX)
+	p.data.SERPWidthModel = SERPWidthModel
+	p.data.SERPWidthApproximate = p.titleWidth.approximate || p.descriptionWidth.approximate
 
 	if p.data.H1Count > 0 {
 		p.data.H1, p.data.H1Truncated, p.data.H1OriginalLength = p.firstH1.Result()

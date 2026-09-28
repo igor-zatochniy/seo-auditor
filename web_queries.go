@@ -25,7 +25,12 @@ var resultFilters = map[string]string{
 	"robots_blocked": "r.scan_status = 'blocked_by_robots'",
 	"title_missing":  "r.title_status = 'Missing'", "title_short": "r.title_status = 'Too Short'", "title_long": "r.title_status = 'Too Long'",
 	"description_missing": "r.description_status = 'Missing'", "description_short": "r.description_status = 'Too Short'", "description_long": "r.description_status = 'Too Long'",
-	"h1_missing": parsedPagePredicate + " AND r.h1_count = 0", "h1_multiple": parsedPagePredicate + " AND r.h1_count > 1",
+	"title_recommended":        parsedPagePredicate + " AND r.title_status='Recommended'",
+	"title_borderline":         parsedPagePredicate + " AND r.title_status='Borderline'",
+	"title_high_risk":          parsedPagePredicate + " AND r.title_status='High truncation risk'",
+	"description_mobile_risk":  parsedPagePredicate + " AND r.description_mobile_status IN ('May truncate','Likely truncate')",
+	"description_desktop_risk": parsedPagePredicate + " AND r.description_status='May truncate'",
+	"h1_missing":               parsedPagePredicate + " AND r.h1_count = 0", "h1_multiple": parsedPagePredicate + " AND r.h1_count > 1",
 	"canonical_missing": parsedPagePredicate + " AND COALESCE(r.canonical_url,'') = ''",
 	"canonical_other":   parsedPagePredicate + " AND COALESCE(r.canonical_url,'') <> '' AND NOT r.is_self_canonical",
 	"noindex":           noindexPredicate, "images_alt": parsedPagePredicate + " AND r.images_missing_alt > 0",
@@ -79,6 +84,10 @@ func parseResultQuery(v url.Values) (resultQuery, error) {
 func reportSelectSQL() string {
 	columns := make([]string, 0, len(reportFields))
 	for _, field := range reportFields {
+		if field.Key == "title_status" || field.Key == "description_status" {
+			columns = append(columns, "CASE WHEN r.serp_width_model='' AND r."+field.Key+" IN ('OK','Too Short','Too Long') THEN 'Legacy: ' || r."+field.Key+" ELSE r."+field.Key+" END AS "+field.Key)
+			continue
+		}
 		prefix := "r."
 		if field.Key == "attempts" || field.Key == "started_at" || field.Key == "finished_at" {
 			prefix = "t."

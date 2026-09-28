@@ -137,6 +137,18 @@ func TestWebPipelineReportAnalyticsAndPagination(t *testing.T) {
 	if len(page.Rows[0]) != len(reportFields) {
 		t.Fatalf("fields=%d want=%d", len(page.Rows[0]), len(reportFields))
 	}
+	if page.Rows[0]["title_width_px"] == nil || page.Rows[0]["description_width_px"] == nil ||
+		fmt.Sprint(page.Rows[0]["title_status"]) != "Recommended" ||
+		fmt.Sprint(page.Rows[0]["description_mobile_status"]) != "Safe" {
+		t.Fatalf("pixel metrics not persisted: %+v", page.Rows[0])
+	}
+	if second.Rows[0]["title_width_px"] != nil || second.Rows[0]["description_width_px"] != nil {
+		t.Fatal("unparsed redirect has pixel measurements")
+	}
+	recommended, err := loadResultPage(ctx, pool, cfg.RunID, resultQuery{After: math.MinInt64, Limit: 50, Filter: "title_recommended"})
+	if err != nil || len(recommended.Rows) != 1 {
+		t.Fatalf("pixel filter failed: %+v %v", recommended, err)
+	}
 	encoded, _ := json.Marshal(page)
 	if strings.Contains(string(encoded), "secret-alpha") || strings.Contains(string(encoded), "request_url") || strings.Contains(string(encoded), "target_fingerprint") {
 		t.Fatal("API privacy failure")
@@ -161,6 +173,9 @@ func TestWebPipelineReportAnalyticsAndPagination(t *testing.T) {
 		}
 		if strings.Contains(w.Body.String(), "secret-alpha") || strings.Contains(w.Body.String(), "private-value") {
 			t.Fatal("export leaked URL query value")
+		}
+		if !strings.Contains(w.Body.String(), "Recommended") || !strings.Contains(w.Body.String(), "liberation-sans-2.1.5") {
+			t.Fatal("export omitted pixel statuses or measurement model")
 		}
 	}
 }

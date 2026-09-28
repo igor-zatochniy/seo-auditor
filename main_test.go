@@ -60,10 +60,10 @@ func TestParsePageExtractsSEOMetrics(t *testing.T) {
 		t.Fatalf("parsePage returned error: %v", err)
 	}
 
-	if data.Title != title || data.TitleStatus != "OK" {
+	if data.Title != title || data.TitleStatus != "Recommended" {
 		t.Fatalf("unexpected title result: %q / %q", data.Title, data.TitleStatus)
 	}
-	if data.Description != description || data.DescriptionStatus != "OK" {
+	if data.Description != description || data.DescriptionStatus != "May truncate" {
 		t.Fatalf("unexpected description result: %q / %q", data.Description, data.DescriptionStatus)
 	}
 	if data.H1 != "Primary heading" || data.H1Count != 1 {
@@ -285,7 +285,7 @@ func TestStorageSanitizerTruncatesOversizedHTMLMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsePage returned error: %v", err)
 	}
-	if data.TitleStatus != "Too Long" ||
+	if data.TitleStatus != "High truncation risk" ||
 		utf8.RuneCountInString(data.Title) != storageTitleMaxRunes ||
 		!data.TitleTruncated ||
 		data.TitleOriginalLength != storageTitleMaxRunes+25 {
@@ -358,16 +358,92 @@ func TestParsePageRejectsOversizedHTML(t *testing.T) {
 }
 
 func TestParsePageRejectsOversizedHTMLToken(t *testing.T) {
-	body := "<html><body><script>" + strings.Repeat("x", 1024) + "</script></body></html>"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
-		Body:       io.NopCloser(strings.NewReader(body)),
+	for _, tt := range []struct {
+		name       string
+		bytes      int
+		tokenLimit int64
+	}{
+		{"custom lower limit", 1024, 256},
+		{"default limit", 6 * 1024 * 1024, DefaultMaxHTMLTokenBytes},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := "<html><body><script>" + strings.Repeat("x", tt.bytes) + "</script></body></html>"
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+			_, err := parsePage(resp, "https://example.com", DefaultMaxHTMLBodyBytes, tt.tokenLimit)
+			if err == nil || !strings.Contains(err.Error(), "HTML token exceeds configured limit") {
+				t.Fatalf("expected oversized token error, got %v", err)
+			}
+		})
 	}
+}
 
-	_, err := parsePage(resp, "https://example.com", int64(len(body)+1), 256)
-	if err == nil || !strings.Contains(err.Error(), "HTML token exceeds configured limit") {
-		t.Fatalf("expected oversized token error, got %v", err)
+func TestParsePageAcceptsLargeInlinePayloads(t *testing.T) {
+	const payloadBytes = 3 * 1024 * 1024
+	payload := strings.Repeat("x", payloadBytes)
+	tests := []struct {
+		name   string
+		inline string
+		jsonLD bool
+	}{
+		{"SVG image attribute", `<svg><image href="data:image/png;base64,` + payload + `"/></svg>`, false},
+		{"script", `<script>` + payload + `</script>`, false},
+		{"style", `<style>` + payload + `</style>`, false},
+		{"JSON-LD", `<script type="application/ld+json">{"value":"` + payload + `"}</script>`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `<html><head><title>Large page</title><link rel="canonical" href="https://example.com/page"></head><body>` +
+				tt.inline + `<h1>Real heading</h1> <p>Visible words</p> <a href="/next">Next</a><img src="photo.jpg"></body></html>`
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+			data, err := parsePage(resp, "https://example.com/page", DefaultMaxHTMLBodyBytes, DefaultMaxHTMLTokenBytes)
+			if err != nil {
+				t.Fatalf("parse large inline payload: %v", err)
+			}
+			if data.Title != "Large page" || data.H1 != "Real heading" || data.H1Count != 1 ||
+				!data.IsSelfCanonical || data.InternalLinksCount != 1 || data.ImagesMissingAlt != 1 ||
+				data.TotalImages != 1 || data.HasJsonLd != tt.jsonLD || data.WordCount != 5 {
+				t.Fatalf("metadata around inline payload was not preserved: %+v", data)
+			}
+		})
+	}
+}
+
+func TestParsePageDefaultBodyBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		images  int
+		wantErr bool
+	}{
+		{"HTML above five MiB", 3, false},
+		{"HTML above eight MiB", 4, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			image := `<svg><image href="data:image/png;base64,` + strings.Repeat("x", 2*1024*1024) + `"/></svg>`
+			body := `<html><body>` + strings.Repeat(image, tt.images) + `<h1>After payloads</h1></body></html>`
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}
+			data, err := parsePage(resp, "https://example.com/page", DefaultMaxHTMLBodyBytes, DefaultMaxHTMLTokenBytes)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "response body exceeds configured limit") {
+					t.Fatalf("expected body limit error, got %v", err)
+				}
+				return
+			}
+			if err != nil || data.H1 != "After payloads" {
+				t.Fatalf("expected complete parsing through final H1, got %q, err=%v", data.H1, err)
+			}
+		})
 	}
 }
 

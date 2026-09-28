@@ -2,14 +2,16 @@
 (() => {
   const $ = id => document.getElementById(id);
   const labels = {running:"Виконується",pending:"Очікує",completed:"Завершено",completed_with_errors:"З помилками",failed:"Помилка",canceled:"Скасовано",abandoned:"Перервано",redirect:"Редирект",blocked_by_robots:"Robots blocked"};
-  const defaults = ["safe_url","status_code","scan_status","title","description","h1","canonical_url","meta_robots","links_count","images_missing_alt","word_count","duration_ms"];
-  const filters = {all:"Усі сторінки",errors:"Помилки", "4xx":"HTTP 4xx", "5xx":"HTTP 5xx",redirects:"Редиректи",robots_blocked:"Robots blocked",title_missing:"Title відсутній",title_short:"Title закороткий",title_long:"Title задовгий",description_missing:"Description відсутній",description_short:"Description закороткий",description_long:"Description задовгий",h1_missing:"H1 відсутній",h1_multiple:"Декілька H1",canonical_missing:"Canonical відсутній",canonical_other:"Non-self canonical",noindex:"Noindex / none",images_alt:"Зображення без alt",json_ld_absent:"JSON-LD відсутній",viewport_absent:"Viewport відсутній",truncated:"Обрізані метадані"};
+  const defaults = ["safe_url","status_code","scan_status","title","title_width_px","title_status","description","description_width_px","description_status","description_mobile_status","h1","canonical_url","meta_robots","links_count","images_missing_alt","word_count","duration_ms"];
+  const filters = {all:"Усі сторінки",errors:"Помилки", "4xx":"HTTP 4xx", "5xx":"HTTP 5xx",redirects:"Редиректи",robots_blocked:"Robots blocked",title_missing:"Title відсутній",title_recommended:"Title: Recommended",title_borderline:"Title: Borderline",title_high_risk:"Title: High truncation risk",description_missing:"Description відсутній",description_mobile_risk:"Description: Mobile risk",description_desktop_risk:"Description: Desktop risk",h1_missing:"H1 відсутній",h1_multiple:"Декілька H1",canonical_missing:"Canonical відсутній",canonical_other:"Non-self canonical",noindex:"Noindex / none",images_alt:"Зображення без alt",json_ld_absent:"JSON-LD відсутній",viewport_absent:"Viewport відсутній",truncated:"Обрізані метадані"};
   const runID = location.pathname.match(/^\/audits\/([a-f0-9-]{36})$/i)?.[1];
   let fields = [], columns = defaults.slice(), rows = [], cursors = [""], next = "", historyNext = "", historyCursor = "", pollTimer, refreshCount = 0, lastStatus = "", resultRequest = 0;
   const notice = message => { $("notice").textContent = message; $("notice").hidden = !message; };
   const text = value => value == null || value === "" ? "—" : typeof value === "boolean" ? (value ? "Так" : "Ні") : String(value);
   const el = (tag, value, cls) => { const node = document.createElement(tag); if(value != null) node.textContent = value; if(cls) node.className = cls; return node; };
   const statusBadge = status => el("span", labels[status] || status, "badge " + (status === "completed" ? "success" : status === "failed" ? "error" : ["redirect","blocked_by_robots","completed_with_errors","abandoned"].includes(status) ? "warning" : ""));
+  const metricStatusKeys = new Set(["title_status", "description_status", "description_mobile_status"]);
+  const metricBadge = value => el("span", text(value), "badge " + (["Recommended","Safe"].includes(value) ? "success" : ["Borderline","May truncate"].includes(value) ? "warning" : ["High truncation risk","Likely truncate","Missing"].includes(value) ? "error" : ""));
   async function api(path, body, token) {
     const headers = {"X-SEO-Auditor-Request":"1"};
     if(body !== undefined) headers["Content-Type"] = "application/json";
@@ -99,7 +101,7 @@
     const body=$("results-table").querySelector("tbody"); body.replaceChildren();
     for(const record of rows) {
       const row=el("tr"); row.tabIndex=0;
-      for(const field of selected) { const td=el("td"); td.append(field.key==="scan_status" ? statusBadge(record[field.key]) : el("span",text(record[field.key]),"cell-text")); row.append(td); }
+      for(const field of selected) { const td=el("td"); td.append(field.key==="scan_status" ? statusBadge(record[field.key]) : metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : el("span",text(record[field.key]),"cell-text")); row.append(td); }
       row.addEventListener("click",()=>details(record)); row.addEventListener("keydown",e=>{if(e.key==="Enter") details(record);}); body.append(row);
     }
     if(!rows.length) { const row=el("tr"),td=el("td","Результатів за цим фільтром немає","empty"); td.colSpan=Math.max(1,selected.length); row.append(td); body.append(row); }
@@ -107,7 +109,7 @@
   function details(record) {
     $("detail-url").textContent=text(record.safe_url); const content=$("detail-content"); content.replaceChildren();
     let group="",list;
-    for(const field of fields) { if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } list.append(el("dt",field.label),el("dd",text(record[field.key]))); }
+    for(const field of fields) { if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : document.createTextNode(text(record[field.key]))); list.append(el("dt",field.label),value); }
     $("details-dialog").showModal();
   }
   function columnOptions() {

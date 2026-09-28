@@ -61,6 +61,9 @@ jobs:
       - name: Run tests with race detector
         run: go test -race -count=1 ./...
 
+      - name: Test dialog dismissal
+        run: node --test web/tests/dialogs.test.cjs
+
       - name: Stress test shuffled execution
         if: github.event_name == 'workflow_dispatch' && inputs.freeze_evidence
         shell: bash

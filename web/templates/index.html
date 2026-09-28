@@ -6,6 +6,7 @@
   <title>SEO Auditor</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/app.js" defer></script>
+  <script src="/static/dialogs.js" defer></script>
 </head>
 <body>
   <header class="app-header"><a class="brand" href="/">SEO Auditor<span class="local-label">LOCAL</span></a><nav aria-label="Навігація"><a href="/" id="new-nav">Новий аудит</a><a href="/audits" id="history-nav">Історія</a></nav><span class="connection" id="connection">PostgreSQL</span></header>
@@ -18,7 +19,7 @@
         <textarea id="urls" rows="8" spellcheck="false" placeholder="https://example.com/&#10;https://example.com/about" required></textarea>
         <div class="input-footer"><div class="input-counts"><span>URL <strong id="url-count">0</strong></span><span>Повтори <strong id="duplicate-count">0</strong></span><span>Некоректні <strong id="invalid-count">0</strong></span></div><div class="actions"><button type="button" id="clear">Очистити</button><button class="primary" id="submit" type="submit">Запустити аудит <span aria-hidden="true">→</span></button></div></div>
       </form>
-      <details class="advanced"><summary>Параметри перевірки</summary><dl><dt>Title</dt><dd>40–65 символів</dd><dt>Description</dt><dd>120–170 символів</dd><dt>Правила</dt><dd>Евристики SEO Auditor, не офіційні обмеження пошукових систем</dd></dl></details>
+      <details class="advanced"><summary>Параметри перевірки</summary><dl><dt>Title</dt><dd>≤580 px Recommended · 581–600 px Borderline · >600 px High truncation risk</dd><dt>Description</dt><dd>≤680 px Safe desktop/mobile · 681–920 px Safe desktop / May truncate mobile · >920 px May truncate desktop / Likely truncate mobile</dd><dt>Модель</dt><dd>Liberation Sans 20 px / 14 px. Оцінка SERP, не гарантія відображення пошуковиком.</dd></dl></details>
     </section>
     <section id="report" hidden>
       <div class="section-heading"><div><p class="eyebrow" id="run-reference"></p><h1>Звіт аудиту <span id="run-status" class="badge"></span></h1><p class="muted" id="run-time"></p></div><div class="actions"><button id="cancel" class="danger" hidden>Скасувати аудит</button><button id="resume" class="primary" hidden>Відновити аудит</button><a id="html-export" class="button" download>HTML ↓</a><a id="csv-export" class="button" download>CSV ↓</a></div></div>

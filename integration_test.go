@@ -2263,6 +2263,10 @@ func TestMigrationsUpgradeEverySupportedSchemaVersion(t *testing.T) {
 			if fingerprintKey != "legacy" {
 				t.Fatalf("fingerprint key ID = %q, want legacy", fingerprintKey)
 			}
+			var unmeasured bool
+			if err := migrationDB.QueryRowContext(ctx, `SELECT title_width_px IS NULL AND description_width_px IS NULL AND title_char_count IS NULL AND description_char_count IS NULL AND serp_width_model='' FROM audit_results WHERE run_id=$1`, runID).Scan(&unmeasured); err != nil || !unmeasured {
+				t.Fatalf("upgrade fabricated pixel metrics for historical metadata: unmeasured=%t err=%v", unmeasured, err)
+			}
 		})
 	}
 }
