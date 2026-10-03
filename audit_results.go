@@ -4,10 +4,22 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config) ResultSummary {
+type resultPersistenceHooks struct {
+	before    func(context.Context, pgx.Tx) error
+	after     func(context.Context, pgx.Tx, Result) error
+	onFailure func(error)
+}
+
+func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Result, cfg Config, hooks ...resultPersistenceHooks) ResultSummary {
+	var hook resultPersistenceHooks
+	if len(hooks) > 0 {
+		hook = hooks[0]
+	}
 	query := `
 		INSERT INTO audit_results (
 			run_id, target_id, safe_url, target_fingerprint, fingerprint_key_id, status_code, scan_status, error_code, error_message,
@@ -27,8 +39,9 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			meta_robots_truncated, meta_robots_original_length,
 			x_robots_tag_truncated, x_robots_tag_original_length,
 			title_char_count, title_width_px, description_char_count, description_width_px,
-			description_mobile_status, serp_width_model, serp_width_approximate
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64)
+			description_mobile_status, serp_width_model, serp_width_approximate,
+			html_raw_bytes, html_size_complete, googlebot_2mb_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67)
 		ON CONFLICT (run_id, target_id) DO UPDATE SET
 			safe_url = EXCLUDED.safe_url,
 			target_fingerprint = EXCLUDED.target_fingerprint,
@@ -50,6 +63,9 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			description_mobile_status = EXCLUDED.description_mobile_status,
 			serp_width_model = EXCLUDED.serp_width_model,
 			serp_width_approximate = EXCLUDED.serp_width_approximate,
+			html_raw_bytes = EXCLUDED.html_raw_bytes,
+			html_size_complete = EXCLUDED.html_size_complete,
+			googlebot_2mb_status = EXCLUDED.googlebot_2mb_status,
 			h1 = EXCLUDED.h1,
 			h1_count = EXCLUDED.h1_count,
 			h2_to_h6_status = EXCLUDED.h2_to_h6_status,
@@ -161,6 +177,11 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 				defer func() {
 					_ = tx.Rollback(dbWriteCtx)
 				}()
+				if hook.before != nil {
+					if err := hook.before(dbWriteCtx, tx); err != nil {
+						return err
+					}
+				}
 
 				if _, err := tx.Exec(
 					dbWriteCtx,
@@ -229,6 +250,9 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 					d.DescriptionMobileStatus,
 					d.SERPWidthModel,
 					d.SERPWidthApproximate,
+					d.HTMLRawBytes,
+					d.HTMLSizeComplete,
+					d.Googlebot2MBStatus,
 				); err != nil {
 					return err
 				}
@@ -244,6 +268,11 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 				); err != nil {
 					return err
 				}
+				if hook.after != nil {
+					if err := hook.after(dbWriteCtx, tx, res); err != nil {
+						return err
+					}
+				}
 				return tx.Commit(dbWriteCtx)
 			},
 		)
@@ -251,6 +280,9 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 
 		if err != nil {
 			slog.Error("Не вдалося зберегти результат SEO-аудиту", "target_id", target.TargetID, "url", d.URL, "error", sanitizeError(err))
+			if hook.onFailure != nil {
+				hook.onFailure(err)
+			}
 			summary.PersistenceFailures++
 			if !resultFailed {
 				summary.Failed++

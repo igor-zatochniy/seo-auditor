@@ -20,7 +20,12 @@ const parsedPagePredicate = "r.scan_status = 'completed' AND r.status_code = 200
 const noindexPredicate = "(COALESCE(r.meta_robots, '') || ',' || COALESCE(r.x_robots_tag, '')) ~* '(^|[[:space:],:;])(noindex|none)($|[[:space:],;])'"
 
 var resultFilters = map[string]string{
-	"all": "TRUE", "errors": "r.scan_status = 'failed'", "4xx": "r.status_code BETWEEN 400 AND 499",
+	"deep_pages":           "sc.graph_ready AND n.crawl_depth > 3",
+	"orphan_candidates":    "sc.graph_ready AND n.orphan_candidate",
+	"broken_internal":      "sc.graph_ready AND n.broken_internal_links > 0",
+	"redirecting_internal": "sc.graph_ready AND n.redirecting_internal_links > 0",
+	"googlebot_size_risk":  "r.googlebot_2mb_status = 'Googlebot cutoff risk'",
+	"all":                  "TRUE", "errors": "r.scan_status = 'failed'", "4xx": "r.status_code BETWEEN 400 AND 499",
 	"5xx": "r.status_code BETWEEN 500 AND 599", "redirects": "r.scan_status = 'redirect'",
 	"robots_blocked": "r.scan_status = 'blocked_by_robots'",
 	"title_missing":  "r.title_status = 'Missing'", "title_short": "r.title_status = 'Too Short'", "title_long": "r.title_status = 'Too Long'",
@@ -84,6 +89,16 @@ func parseResultQuery(v url.Values) (resultQuery, error) {
 func reportSelectSQL() string {
 	columns := make([]string, 0, len(reportFields))
 	for _, field := range reportFields {
+		if field.Group == "Граф сайту" {
+			if field.Key == "site_graph_ready" {
+				columns = append(columns, "sc.graph_ready AS site_graph_ready")
+			} else if field.Key == "in_sitemap" || field.Key == "links_truncated" {
+				columns = append(columns, "n."+field.Key)
+			} else {
+				columns = append(columns, "CASE WHEN sc.graph_ready THEN n."+field.Key+" END AS "+field.Key)
+			}
+			continue
+		}
 		if field.Key == "title_status" || field.Key == "description_status" {
 			columns = append(columns, "CASE WHEN r.serp_width_model='' AND r."+field.Key+" IN ('OK','Too Short','Too Long') THEN 'Legacy: ' || r."+field.Key+" ELSE r."+field.Key+" END AS "+field.Key)
 			continue
@@ -94,7 +109,7 @@ func reportSelectSQL() string {
 		}
 		columns = append(columns, prefix+field.Key)
 	}
-	return "SELECT " + strings.Join(columns, ",") + " FROM audit_results r JOIN audit_run_targets t USING (run_id, target_id)"
+	return "SELECT " + strings.Join(columns, ",") + " FROM audit_results r JOIN audit_run_targets t USING (run_id, target_id) LEFT JOIN audit_site_nodes n USING (run_id,target_id) LEFT JOIN audit_site_crawls sc ON sc.run_id=r.run_id"
 }
 
 func scanReportRecord(rows pgx.Rows) (reportRecord, error) {
@@ -158,14 +173,14 @@ func loadResultPage(ctx context.Context, pool *pgxpool.Pool, id string, q result
 	return page, rows.Err()
 }
 
-const webRunColumns = `run.id::TEXT, run.status, run.total_urls, run.successful_urls, run.failed_urls,
+const webRunColumns = `run.id::TEXT, CASE WHEN EXISTS(SELECT 1 FROM audit_site_crawls sc WHERE sc.run_id=run.id) THEN 'site' ELSE 'list' END, run.status, run.total_urls, run.successful_urls, run.failed_urls,
 	run.started_at, run.finished_at,
 	(run.targets_captured_at IS NOT NULL AND (run.status IN ('failed','abandoned') OR
 	 (run.status='running' AND run.heartbeat_at < CURRENT_TIMESTAMP - $2::INTERVAL)))`
 
 func scanWebRun(row pgx.Row) (webRun, error) {
 	var run webRun
-	err := row.Scan(&run.ID, &run.Status, &run.Total, &run.Successful, &run.Failed, &run.StartedAt, &run.FinishedAt, &run.Resumable)
+	err := row.Scan(&run.ID, &run.Mode, &run.Status, &run.Total, &run.Successful, &run.Failed, &run.StartedAt, &run.FinishedAt, &run.Resumable)
 	return run, err
 }
 func loadWebRun(ctx context.Context, pool *pgxpool.Pool, cfg Config, id string) (webRun, error) {

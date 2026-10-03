@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -213,6 +214,7 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 		logger = logger.With("run_id", cfg.RunID)
 	}
 	runCompletion := auditRunCompletion{Status: auditRunStatusFailed}
+	var site *siteCrawl
 	workCtx, cancelWork := context.WithCancelCause(signalCtx)
 	defer cancelWork(context.Canceled)
 	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
@@ -233,6 +235,13 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 			cfg.FinalizationTimeout,
 		)
 		defer cancelFinalization()
+		if site != nil {
+			if err := dbPool.QueryRow(finalizationCtx, `SELECT total_urls FROM audit_runs WHERE id=$1 AND owner_generation=$2`, cfg.RunID, effectiveOwnerGeneration(cfg)).Scan(&runCompletion.TotalURLs); err != nil {
+				logger.Error("Не вдалося прочитати Site Crawl counters", "error", err)
+				runCompletion.Status = auditRunStatusFailed
+				exitCode = exitFatal
+			}
+		}
 		// A captured web snapshot may be canceled before its first read.
 		if runCompletion.TotalURLs == 0 {
 			if err := dbPool.QueryRow(finalizationCtx,
@@ -267,6 +276,19 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 		}
 	}()
 
+	var err error
+	site, err = loadSiteCrawl(workCtx, dbPool, cfg)
+	if err != nil {
+		if signalCtx.Err() != nil {
+			runCompletion.Status = auditRunStatusCanceled
+			return exitCanceled
+		}
+		logger.Error("Не вдалося прочитати параметри Site Crawl", "error", err)
+		return exitFatal
+	}
+	if site != nil {
+		cfg.Workers = min(cfg.Workers, 4)
+	}
 	targetSnapshot, err := captureAuditRunTargets(workCtx, dbPool, cfg)
 	if err != nil {
 		if signalCtx.Err() != nil {
@@ -350,6 +372,16 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 	robotsHTTPClient := newRobotsHTTPClient(robotsRetryingTransport)
 	defer pageCustomTransport.CloseIdleConnections()
 	defer robotsCustomTransport.CloseIdleConnections()
+	if site != nil {
+		if err := initializeSiteSitemaps(workCtx, dbPool, cfg, site, pageHTTPClient, robotsHTTPClient, robotsCache); err != nil {
+			logger.Error("Не вдалося завершити discovery sitemap", "error", sanitizeError(err))
+			if signalCtx.Err() != nil {
+				runCompletion.Status = auditRunStatusCanceled
+				return exitCanceled
+			}
+			return exitFatal
+		}
+	}
 
 	operationCtx, cancelOperations := context.WithCancel(context.WithoutCancel(workCtx))
 	defer cancelOperations()
@@ -362,9 +394,13 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 	)
 
 	var wg sync.WaitGroup
+	var siteFailure func(error)
+	if site != nil {
+		siteFailure = func(err error) { cancelWork(err) }
+	}
 	for w := 1; w <= cfg.Workers; w++ {
 		wg.Add(1)
-		go worker(workCtx, operationCtx, w, jobs, results, pageHTTPClient, robotsHTTPClient, robotsCache, dbPool, cfg, &wg)
+		go worker(workCtx, operationCtx, w, jobs, results, pageHTTPClient, robotsHTTPClient, robotsCache, dbPool, cfg, &wg, siteFailure)
 	}
 
 	streamDone := make(chan urlStreamSummary, 1)
@@ -379,6 +415,9 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 			jobs,
 			results,
 			func(ctx context.Context, limit int) ([]targetURLRecord, error) {
+				if site != nil {
+					return claimSiteTargetBatch(ctx, dbPool, cfg, limit)
+				}
 				return claimTargetURLBatch(ctx, dbPool, cfg, limit)
 			},
 		)
@@ -389,10 +428,29 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 	}()
 
 	logger.Info("Починається паралельна обробка URL та збереження результатів")
-	summary := saveResults(operationCtx, dbPool, results, cfg)
+	var hooks resultPersistenceHooks
+	if site != nil {
+		hooks = resultPersistenceHooks{
+			before: func(ctx context.Context, tx pgx.Tx) error { return lockSiteOwner(ctx, tx, cfg) },
+			after: func(ctx context.Context, tx pgx.Tx, res Result) error {
+				return persistSiteDiscovery(ctx, tx, cfg, site, res)
+			},
+			onFailure: siteFailure,
+		}
+	}
+	summary := saveResults(operationCtx, dbPool, results, cfg, hooks)
 	streamSummary := <-streamDone
 	close(processingDone)
 	<-shutdownGuardDone
+	if site != nil && workCtx.Err() == nil {
+		current, err := summarizeAuditRunTargets(workCtx, dbPool, cfg)
+		if err != nil {
+			logger.Error("Не вдалося прочитати підсумок Site Crawl", "error", err)
+			return exitFatal
+		}
+		targetSnapshot.Total = current.Total
+		runCompletion.TotalURLs = current.Total
+	}
 
 	shutdownRequested := signalCtx.Err() != nil
 	heartbeatFailure := signalCtx.Err() == nil && context.Cause(workCtx) != nil
@@ -488,6 +546,19 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 			summary.Saved,
 		)
 		return exitFatal
+	}
+	if site != nil {
+		graphCtx, cancelGraph := context.WithTimeout(workCtx, cfg.FinalizationTimeout)
+		err := finalizeSiteGraph(graphCtx, dbPool, cfg)
+		cancelGraph()
+		if err != nil {
+			logger.Error("Не вдалося завершити граф сайту", "error", sanitizeError(err))
+			if signalCtx.Err() != nil {
+				runCompletion.Status = auditRunStatusCanceled
+				return exitCanceled
+			}
+			return exitFatal
+		}
 	}
 	if targetSnapshot.Failed > 0 || streamSummary.Skipped > 0 || summary.Failed > 0 {
 		runCompletion.Status = auditRunStatusCompletedWithErrors

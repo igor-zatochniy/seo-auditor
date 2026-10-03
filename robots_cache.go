@@ -23,6 +23,7 @@ const (
 type robotsPolicy struct {
 	allowAll bool
 	compiled *robotsparser.Policy
+	sitemaps []string
 }
 
 func (p robotsPolicy) allows(target *url.URL) bool {
@@ -47,7 +48,11 @@ func (p robotsPolicy) estimatedMemoryBytes() int64 {
 	if p.compiled == nil {
 		return 0
 	}
-	return p.compiled.EstimatedMemoryBytes()
+	weight := p.compiled.EstimatedMemoryBytes()
+	for _, location := range p.sitemaps {
+		weight += int64(len(location) + 32)
+	}
+	return weight
 }
 
 type robotsPolicyCache struct {
@@ -359,5 +364,5 @@ func fetchRobotsPolicy(
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("compile robots.txt from %s: %w", robotsURL, err)
 	}
-	return robotsPolicy{compiled: compiled}, nil
+	return robotsPolicy{compiled: compiled, sitemaps: robotsSitemapLocations(string(body))}, nil
 }

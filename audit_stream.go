@@ -13,7 +13,12 @@ func claimTargetURLBatch(
 	dbPool *pgxpool.Pool,
 	cfg Config,
 	limit int,
+	frontier ...int,
 ) ([]targetURLRecord, error) {
+	depth := -1
+	if len(frontier) > 0 {
+		depth = frontier[0]
+	}
 	dbFetchCtx, fetchCancel := context.WithTimeout(ctx, cfg.DBFetchTimeout)
 	defer fetchCancel()
 
@@ -33,6 +38,7 @@ func claimTargetURLBatch(
 				       AND run.status = $2
 				       AND run.worker_instance_id = $3
 				       AND run.owner_generation = $8
+				       AND ($9::INT < 0 OR EXISTS (SELECT 1 FROM audit_site_nodes n WHERE n.run_id=target.run_id AND n.target_id=target.target_id AND n.frontier_depth=$9))
 				       AND (
 				           target.status = $4
 				           OR (
@@ -69,6 +75,7 @@ func claimTargetURLBatch(
 				limit,
 				effectiveTargetLeaseDuration(cfg).Milliseconds(),
 				effectiveOwnerGeneration(cfg),
+				depth,
 			)
 			if err != nil {
 				return err

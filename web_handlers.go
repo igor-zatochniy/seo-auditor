@@ -60,9 +60,33 @@ func (s *webServer) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		URLs string `json:"urls"`
+		URLs string            `json:"urls"`
+		Mode string            `json:"mode"`
+		Site *siteCrawlOptions `json:"site"`
 	}
 	if !decodeWebJSON(w, r, min(int64(s.web.MaxURLs)*4096+1024, 8<<20), &body) {
+		return
+	}
+	if body.Mode == "site" {
+		if body.Site == nil || body.URLs != "" {
+			writeWebError(w, 400, "invalid_site", "Вкажіть лише параметри Site Crawl")
+			return
+		}
+		if err := validateSiteOptions(body.Site, s.cfg.AllowPrivateTargets); err != nil {
+			writeWebError(w, 400, "invalid_site", err.Error())
+			return
+		}
+		id, err := s.manager.start(r.Context(), nil, "", *body.Site)
+		if err != nil {
+			handleStartError(w, err)
+			return
+		}
+		w.Header().Set("Location", "/audits/"+id)
+		writeWebJSON(w, 202, map[string]string{"id": id})
+		return
+	}
+	if (body.Mode != "" && body.Mode != "list") || body.Site != nil {
+		writeWebError(w, 400, "invalid_mode", "Режим: list або site")
 		return
 	}
 	urls, err := parseWebURLs(body.URLs, s.web.MaxURLs, s.cfg.AllowPrivateTargets)

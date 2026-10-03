@@ -22,10 +22,11 @@ func newTargetIdentity(secret []byte, normalizedURL string) TargetIdentity {
 func newAuditTarget(record targetURLRecord, requestURL string, secret []byte) AuditTarget {
 	identity := newTargetIdentity(secret, requestURL)
 	return AuditTarget{
-		TargetID:    record.ID,
-		RequestURL:  identity.RequestURL,
-		SafeURL:     identity.SafeURL,
-		Fingerprint: identity.Fingerprint,
+		TargetID:      record.ID,
+		RequestURL:    identity.RequestURL,
+		SafeURL:       identity.SafeURL,
+		Fingerprint:   identity.Fingerprint,
+		DiscoverLinks: record.DiscoverLinks,
 	}
 }
 

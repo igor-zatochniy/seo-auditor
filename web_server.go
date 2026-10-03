@@ -103,6 +103,7 @@ func (s *webServer) handler() http.Handler {
 	mux.HandleFunc("GET /api/audits/{id}/progress", s.progress)
 	mux.HandleFunc("GET /api/audits/{id}/analytics", s.analytics)
 	mux.HandleFunc("GET /api/audits/{id}/results", s.results)
+	mux.HandleFunc("GET /api/audits/{id}/graph", s.graph)
 	mux.HandleFunc("POST /api/audits/{id}/cancel", s.cancel)
 	mux.HandleFunc("POST /api/audits/{id}/resume", s.resume)
 	mux.HandleFunc("GET /api/audits/{id}/export/{format}", s.export)

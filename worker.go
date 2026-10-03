@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/seo"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,6 +25,7 @@ func worker(
 	dbPool *pgxpool.Pool,
 	cfg Config,
 	wg *sync.WaitGroup,
+	onFatal ...func(error),
 ) {
 	defer wg.Done()
 	workerLogger := slog.With("worker_id", id)
@@ -46,6 +49,9 @@ func worker(
 
 		if err := markAuditRunTargetStarted(operationCtx, dbPool, target, cfg); err != nil {
 			workerLogger.Warn("Не вдалося позначити target як running", "target_id", target.TargetID, "url", target.SafeURL, "error", err)
+			if len(onFatal) > 0 && onFatal[0] != nil {
+				onFatal[0](err)
+			}
 			continue
 		}
 		start := time.Now()
@@ -172,7 +178,11 @@ func worker(
 		if maxHTMLTokenBytes <= 0 {
 			maxHTMLTokenBytes = DefaultMaxHTMLTokenBytes
 		}
-		data, err := parsePage(
+		parse := parsePage
+		if target.DiscoverLinks {
+			parse = seo.ParsePageWithLinks
+		}
+		data, err := parse(
 			resp,
 			target.RequestURL,
 			cfg.MaxHTMLBodyBytes,

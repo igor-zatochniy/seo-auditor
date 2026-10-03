@@ -15,8 +15,15 @@
     <section id="home" hidden>
       <div class="section-heading"><div><p class="eyebrow">РОБОЧИЙ ПРОСТІР</p><h1>Новий аудит</h1></div><span class="muted" id="limit-label"></span></div>
       <form id="audit-form">
+        <fieldset class="crawl-mode"><legend>Режим аудиту</legend><label><input type="radio" name="mode" value="list" checked> Список URL</label><label><input type="radio" name="mode" value="site"> Site Crawl</label></fieldset>
+        <div id="list-input">
         <label for="urls">URL сторінок</label>
         <textarea id="urls" rows="8" spellcheck="false" placeholder="https://example.com/&#10;https://example.com/about" required></textarea>
+        </div>
+        <div id="site-input" hidden>
+          <label for="root-url">Стартовий URL</label><input id="root-url" type="url" placeholder="https://example.com/" maxlength="2048" disabled>
+          <div class="crawl-options"><label for="max-pages">Ліміт сторінок<input id="max-pages" type="number" min="1" max="1000" value="100" required disabled></label><label for="max-depth">Глибина обходу<input id="max-depth" type="number" min="0" max="10" value="5" required disabled></label><label class="checkbox-label"><input id="use-sitemaps" type="checkbox" checked disabled> Sitemap discovery</label></div>
+        </div>
         <div class="input-footer"><div class="input-counts"><span>URL <strong id="url-count">0</strong></span><span>Повтори <strong id="duplicate-count">0</strong></span><span>Некоректні <strong id="invalid-count">0</strong></span></div><div class="actions"><button type="button" id="clear">Очистити</button><button class="primary" id="submit" type="submit">Запустити аудит <span aria-hidden="true">→</span></button></div></div>
       </form>
       <details class="advanced"><summary>Параметри перевірки</summary><dl><dt>Title</dt><dd>≤580 px Recommended · 581–600 px Borderline · >600 px High truncation risk</dd><dt>Description</dt><dd>≤680 px Safe desktop/mobile · 681–920 px Safe desktop / May truncate mobile · >920 px May truncate desktop / Likely truncate mobile</dd><dt>Модель</dt><dd>Liberation Sans 20 px / 14 px. Оцінка SERP, не гарантія відображення пошуковиком.</dd></dl></details>
@@ -26,12 +33,19 @@
       <div class="summary" id="summary"></div>
       <div class="progress-line"><progress id="run-progress" max="100" value="0" aria-label="Прогрес аудиту"></progress><strong id="percentage">0%</strong></div>
       <div class="target-states" id="target-states"></div>
-      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button></div>
+      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button></div>
       <section id="overview" role="tabpanel" aria-labelledby="tab-overview"><div class="band-heading"><h2>Технічні сигнали</h2><span class="muted" id="parsed-count"></span></div><div id="analytics" class="charts"></div><p class="metric-note">HTML-сигнали враховують лише успішно розібрані сторінки HTTP 200. Non-self canonical, відсутність JSON-LD та блокування robots.txt не є універсальними SEO-помилками. Noindex / none враховує будь-який scope директиви.</p></section>
       <section id="pages" role="tabpanel" aria-labelledby="tab-pages" hidden>
         <div class="table-toolbar"><input id="search" type="search" placeholder="Пошук URL" aria-label="Пошук URL" maxlength="512"><select id="filter" aria-label="Фільтр результатів"></select><select id="page-size" aria-label="Рядків на сторінці"><option value="50">50 рядків</option><option value="100">100 рядків</option><option value="200">200 рядків</option></select><button id="columns-button">Колонки</button></div>
         <div class="table-wrap" tabindex="0" aria-label="Результати аудиту"><table id="results-table"><thead></thead><tbody></tbody></table></div>
         <div class="pagination"><span class="muted" id="row-count"></span><div class="actions"><button id="previous" aria-label="Попередня сторінка" title="Попередня сторінка">←</button><span id="page-number">1</span><button id="next" aria-label="Наступна сторінка" title="Наступна сторінка">→</button></div></div>
+      </section>
+      <section id="graph" role="tabpanel" aria-labelledby="tab-graph" hidden>
+        <div class="band-heading"><h2>Граф сайту</h2><span id="graph-status" class="badge"></span></div>
+        <p class="detail-url" id="graph-root"></p><div id="graph-summary" class="target-states"></div><p id="graph-warning" class="metric-note" role="status"></p>
+        <div class="table-toolbar"><input id="graph-target" type="number" min="1" placeholder="Target ID" aria-label="Target ID"><select id="graph-filter" aria-label="Фільтр посилань"><option value="all">Усі посилання</option><option value="internal">Внутрішні</option><option value="external">Зовнішні</option><option value="broken">HTTP 4xx/5xx</option><option value="redirects">Редиректи</option><option value="unresolved">Без результату</option><option value="nofollow">Nofollow</option></select><button id="graph-reset" title="Увесь граф" aria-label="Увесь граф">↺</button></div>
+        <div class="table-wrap" tabindex="0" aria-label="Граф посилань"><table id="graph-table"><thead><tr><th>Звідки</th><th>Куди</th><th>Anchor</th><th>HTTP / результат</th><th>Тип</th><th>Nofollow</th></tr></thead><tbody></tbody></table></div>
+        <div class="pagination"><span id="graph-page" class="muted"></span><div class="actions"><button id="graph-previous" aria-label="Попередні посилання" title="Попередні посилання">←</button><button id="graph-next" aria-label="Наступні посилання" title="Наступні посилання">→</button></div></div>
       </section>
     </section>
     <section id="history-section"><div class="band-heading"><h2 id="history-title">Останні аудити</h2><button id="history-refresh" title="Оновити історію" aria-label="Оновити історію">↻</button></div><div id="history-list" class="history-list"></div><div class="pagination"><button id="history-next" hidden>Попередні аудити →</button></div></section>

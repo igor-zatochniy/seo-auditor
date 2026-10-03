@@ -137,6 +137,9 @@ func TestWebPipelineReportAnalyticsAndPagination(t *testing.T) {
 	if len(page.Rows[0]) != len(reportFields) {
 		t.Fatalf("fields=%d want=%d", len(page.Rows[0]), len(reportFields))
 	}
+	if page.Rows[0]["html_raw_bytes"] == nil || page.Rows[0]["html_size_complete"] != true || fmt.Sprint(page.Rows[0]["googlebot_2mb_status"]) != "OK" {
+		t.Fatalf("HTML size metrics not persisted: %+v", page.Rows[0])
+	}
 	if page.Rows[0]["title_width_px"] == nil || page.Rows[0]["description_width_px"] == nil ||
 		fmt.Sprint(page.Rows[0]["title_status"]) != "Recommended" ||
 		fmt.Sprint(page.Rows[0]["description_mobile_status"]) != "Safe" {

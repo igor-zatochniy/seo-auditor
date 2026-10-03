@@ -5,13 +5,17 @@
   const defaults = ["safe_url","status_code","scan_status","title","title_width_px","title_status","description","description_width_px","description_status","description_mobile_status","h1","canonical_url","meta_robots","links_count","images_missing_alt","word_count","duration_ms"];
   const filters = {all:"Усі сторінки",errors:"Помилки", "4xx":"HTTP 4xx", "5xx":"HTTP 5xx",redirects:"Редиректи",robots_blocked:"Robots blocked",title_missing:"Title відсутній",title_recommended:"Title: Recommended",title_borderline:"Title: Borderline",title_high_risk:"Title: High truncation risk",description_missing:"Description відсутній",description_mobile_risk:"Description: Mobile risk",description_desktop_risk:"Description: Desktop risk",h1_missing:"H1 відсутній",h1_multiple:"Декілька H1",canonical_missing:"Canonical відсутній",canonical_other:"Non-self canonical",noindex:"Noindex / none",images_alt:"Зображення без alt",json_ld_absent:"JSON-LD відсутній",viewport_absent:"Viewport відсутній",truncated:"Обрізані метадані"};
   const runID = location.pathname.match(/^\/audits\/([a-f0-9-]{36})$/i)?.[1];
+  defaults.push("html_raw_bytes", "googlebot_2mb_status");
+  filters.googlebot_size_risk = "Googlebot: HTML ≥2 MiB";
+  Object.assign(filters,{deep_pages:"Понад 3 кліки",orphan_candidates:"Orphan candidates",broken_internal:"Биті внутрішні посилання",redirecting_internal:"Внутрішні редиректи"});
   let fields = [], columns = defaults.slice(), rows = [], cursors = [""], next = "", historyNext = "", historyCursor = "", pollTimer, refreshCount = 0, lastStatus = "", resultRequest = 0;
   const notice = message => { $("notice").textContent = message; $("notice").hidden = !message; };
   const text = value => value == null || value === "" ? "—" : typeof value === "boolean" ? (value ? "Так" : "Ні") : String(value);
   const el = (tag, value, cls) => { const node = document.createElement(tag); if(value != null) node.textContent = value; if(cls) node.className = cls; return node; };
   const statusBadge = status => el("span", labels[status] || status, "badge " + (status === "completed" ? "success" : status === "failed" ? "error" : ["redirect","blocked_by_robots","completed_with_errors","abandoned"].includes(status) ? "warning" : ""));
   const metricStatusKeys = new Set(["title_status", "description_status", "description_mobile_status"]);
-  const metricBadge = value => el("span", text(value), "badge " + (["Recommended","Safe"].includes(value) ? "success" : ["Borderline","May truncate"].includes(value) ? "warning" : ["High truncation risk","Likely truncate","Missing"].includes(value) ? "error" : ""));
+  metricStatusKeys.add("googlebot_2mb_status");
+  const metricBadge = value => el("span", text(value), "badge " + (["Recommended","Safe","OK"].includes(value) ? "success" : ["Borderline","May truncate","Unknown (incomplete HTML)"].includes(value) ? "warning" : ["High truncation risk","Likely truncate","Missing","Googlebot cutoff risk"].includes(value) ? "error" : ""));
   async function api(path, body, token) {
     const headers = {"X-SEO-Auditor-Request":"1"};
     if(body !== undefined) headers["Content-Type"] = "application/json";
@@ -45,7 +49,9 @@
   }
   async function submit(event) {
     event.preventDefault(); notice(""); $("submit").disabled=true;
-    try { const run = await api("/api/audits",{urls:$("urls").value}); $("urls").value=""; location.assign("/audits/"+run.id); }
+    const site=document.querySelector('input[name="mode"]:checked').value==="site";
+    const body=site?{mode:"site",site:{root_url:$("root-url").value,max_pages:Number($("max-pages").value),max_depth:Number($("max-depth").value),use_sitemaps:$("use-sitemaps").checked}}:{urls:$("urls").value};
+    try { const run = await api("/api/audits",body); $("urls").value=""; location.assign("/audits/"+run.id); }
     catch(error) { notice(error.message); $("submit").disabled=false; }
   }
   function renderSummary(p, analytics) {
@@ -74,6 +80,7 @@
     clearTimeout(pollTimer);
     try {
       const p=await api(`/api/audits/${runID}/progress`); const run=p.run;
+      $("tab-graph").hidden=run.mode!=="site";
       const badge=statusBadge(run.status); badge.id="run-status"; $("run-status").replaceWith(badge);
       $("run-reference").textContent="АУДИТ / "+run.id;
       $("run-time").textContent=`${formatDate(run.started_at)} · ${elapsed(run.started_at,run.finished_at)}`;
@@ -82,7 +89,7 @@
       for(const [status,n] of Object.entries(p.counts)){ const span=el("span",labels[status]+" "); span.append(el("strong",n)); $("target-states").append(span); }
       $("cancel").hidden=run.status!=="running"; $("resume").hidden=!run.resumable;
       for(const format of ["html","csv"]) { $(format+"-export").setAttribute("aria-disabled",String(run.status==="running")); }
-      if(refreshCount++%10===0 || lastStatus!==run.status) { await analytics(); await results(); }
+      if(refreshCount++%10===0 || lastStatus!==run.status) { await analytics(); await results(); if(run.mode==="site") await graph(); }
       lastStatus=run.status; renderSummary(p,analyticsData);
       if(run.status==="running") pollTimer=setTimeout(progress,1000);
     } catch(error) { notice(error.message); pollTimer=setTimeout(progress,3000); }
@@ -120,6 +127,37 @@
       label.append(input,document.createTextNode(field.label)); container.append(label);
     }
   }
+  let graphCursors=[{after:0,ordinal:0}], graphNext=null, graphRequest=0;
+  async function graph() {
+    const serial=++graphRequest, cursor=graphCursors[graphCursors.length-1];
+    const params=new URLSearchParams({...cursor,filter:$("graph-filter").value,target:$("graph-target").value});
+    const data=await api(`/api/audits/${runID}/graph?${params}`);
+    if(serial!==graphRequest||!data.site)return;
+    const s=data.site;
+    $("graph-root").textContent=s.root;
+    $("graph-status").textContent=s.ready?"Граф збережено":"Збір графа";
+    $("graph-summary").replaceChildren();
+    for(const [name,value] of [["Сторінки",s.nodes],["Посилання",s.edges],["Orphan candidates",s.ready?s.orphans:"—"],["Понад 3 кліки",s.ready?s.deep:"—"],["Поза набором",s.unresolved],["Sitemap",s.sitemap_state]]) {
+      const item=el("span",name+" ");item.append(el("strong",value));$("graph-summary").append(item);
+    }
+    $("graph-warning").textContent=[s.warning,s.limited?"Досягнуто ліміт обходу.":"",s.truncated?`Ліміт посилань: ${s.truncated} сторінок.`:"",s.unresolved?"Частина внутрішніх адрес не має результату.":""].filter(Boolean).join(" ");
+    const body=$("graph-table").querySelector("tbody");body.replaceChildren();
+    for(const edge of data.edges) {
+      const row=el("tr");
+      for(const [id,url] of [[edge.from,edge.source],[edge.to,edge.destination]]) {
+        const cell=el("td");
+        if(id){const button=el("button",url,"node-link");button.type="button";button.title="Target "+id;button.onclick=safely(()=>{$("graph-target").value=id;return resetGraph();});cell.append(button,el("small","#"+id,"muted"));}
+        else cell.append(el("span",url));row.append(cell);
+      }
+      row.append(el("td",text(edge.anchor)));
+      const result=el("td");result.append(edge.http==null?el("span",edge.status||"Не перевірено","muted"):el("span",String(edge.http),"badge "+(edge.http>=400?"error":edge.http>=300?"warning":"success")));row.append(result);
+      row.append(el("td",edge.kind==="redirect"?"Редирект":edge.internal?"Внутрішнє":"Зовнішнє"),el("td",edge.nofollow?"Так":"Ні"));body.append(row);
+    }
+    if(!data.edges.length){const row=el("tr"),cell=el("td","Посилань за цим фільтром немає","empty");cell.colSpan=6;row.append(cell);body.append(row);}
+    const last=data.edges[data.edges.length-1];graphNext=data.more&&last?{after:last.from,ordinal:last.ordinal}:null;
+    $("graph-previous").disabled=graphCursors.length===1;$("graph-next").disabled=!graphNext;$("graph-page").textContent=`Сторінка ${graphCursors.length} · ${data.edges.length} посилань`;
+  }
+  function resetGraph(){graphCursors=[{after:0,ordinal:0}];return graph();}
   const safely = fn => async (...args) => { try { await fn(...args); } catch(error) { notice(error.message); } };
   async function init() {
     const fragment=new URLSearchParams(location.hash.slice(1)); const token=fragment.get("access_token");
@@ -132,11 +170,22 @@
     $(runID||location.pathname==="/audits"?"history-nav":"new-nav").classList.add("active");
     for(const [key,label] of Object.entries(filters)){ const option=el("option",label);option.value=key;$("filter").append(option); }
     $("urls").addEventListener("input",countURLs); $("clear").onclick=()=>{$("urls").value="";countURLs();$("urls").focus();}; $("audit-form").onsubmit=submit;
+    document.querySelectorAll('input[name="mode"]').forEach(input=>input.onchange=()=>{
+      const site=document.querySelector('input[name="mode"]:checked').value==="site";
+      $("limit-label").textContent="До "+(site?Number($("max-pages").max):schema.max_urls).toLocaleString("uk-UA")+" URL";
+      $("list-input").hidden=site;$("site-input").hidden=!site;$("urls").disabled=site;$("urls").required=!site;$("root-url").required=site;
+      for(const id of ["root-url","max-pages","max-depth","use-sitemaps"])$(id).disabled=!site;
+      $("clear").hidden=site;document.querySelector(".input-counts").hidden=site;
+    });
     $("history-refresh").onclick=safely(()=>{historyCursor="";return loadHistory();}); $("history-next").onclick=safely(()=>{historyCursor=historyNext;return loadHistory();});
     document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>$(button.dataset.close).close());
     if(!runID) { await loadHistory(); return; }
     for(const format of ["html","csv"]) $(format+"-export").href=`/api/audits/${runID}/export/${format}`;
-    for(const view of ["overview","pages"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); }};
+    for(const view of ["overview","pages","graph"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages","graph"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); }};
+    $("graph-filter").onchange=safely(resetGraph);$("graph-target").onchange=safely(resetGraph);
+    $("graph-reset").onclick=safely(()=>{$("graph-target").value="";$("graph-filter").value="all";return resetGraph();});
+    $("graph-next").onclick=safely(()=>{if(graphNext)graphCursors.push(graphNext);return graph();});
+    $("graph-previous").onclick=safely(()=>{if(graphCursors.length>1)graphCursors.pop();return graph();});
     $("columns-button").onclick=()=>{columnOptions();$("columns-dialog").showModal();}; $("reset-columns").onclick=()=>{columns=defaults.slice();try{localStorage.removeItem("seo-columns");}catch{}columnOptions();renderTable();};
     $("cancel").onclick=safely(async()=>{ $("cancel").disabled=true; try{await api(`/api/audits/${runID}/cancel`,{});$("cancel").textContent="Завершення…";await progress();}finally{$("cancel").disabled=false;} });
     $("resume").onclick=safely(async()=>{ $("resume").disabled=true;try{await api(`/api/audits/${runID}/resume`,{});await progress();}finally{$("resume").disabled=false;} });

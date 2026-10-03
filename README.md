@@ -8,7 +8,7 @@
 
 Запустіть Docker Desktop, потім відкрийте **`start-auditor.cmd`**. Launcher створить `.env`, якщо його немає, з випадковими паролем PostgreSQL, HMAC-ключем і web access token. Наявні DB credentials не змінюються. Після `docker compose up -d --build --wait` відкриється браузер: **http://127.0.0.1:8080**.
 
-1. Вставте один URL або список URL у форму.
+1. Виберіть **Список URL** або **Site Crawl**. Для Site Crawl задайте стартовий URL, ліміт сторінок, глибину та використання sitemap.
 2. Натисніть **Запустити аудит**. Прогрес оновлюється приблизно раз на секунду.
 3. Перегляньте розподіли HTTP, SEO-сигналів, помилок, часу та кількості слів.
 4. Відкрийте **Сторінки**: пошук URL, фільтри, вибір колонок і повні деталі кожного результату.
@@ -27,6 +27,7 @@
 - `GET /api/schema`: перелік дозволених report fields.
 - `GET /api/audits`, `POST /api/audits`: історія та запуск `{ "urls": "https://example.com/\nhttps://example.com/about" }`.
 - `GET /api/audits/{id}`, `/progress`, `/analytics`, `/results`.
+- `GET /api/audits/{id}/graph`: пагінований граф Site Crawl, anchor texts, nofollow та результат перевірки destination.
 - `POST /api/audits/{id}/cancel`, `/resume`: JSON `{}`.
 - `GET /api/audits/{id}/export/html`, `/export/csv`: повний потоковий експорт завершеного run.
 
@@ -50,6 +51,52 @@ API потребує bearer token або session cookie. Змінюючі зап
 Сервер використовує вбудований Liberation Sans 2.1.5: regular 20 px для Title та 14 px для Description, kerning без hinting, згортання whitespace та округлення ширини вгору до цілого CSS pixel. Це оцінка ризику, а не точна емуляція Google: пошуковик може переписати snippet, виділити слова жирним або змінити layout. Непідтримувані glyphs мають fallback шириною 1 em; `serp_width_approximate` також позначає підтримувані перевіркою випадки складного письма. Зовнішні шрифти та браузер для обчислення не потрібні; ліцензія OFL зберігається в `internal/seo/fonts/`.
 
 Метрики обчислюються до storage truncation та зберігаються разом із версією моделі. Порожні метадані мають `Missing`, а нерозібрані сторінки не отримують pixel metrics. Міграція `012_serp_pixel_metrics.sql` не переписує історію: у старих рядках px дорівнює `NULL`, а character-based статус у звіті має префікс `Legacy:`. Для отримання px потрібен новий аудит. Значення та статуси однакові у web details, таблиці, CSV та HTML-експорті; `description_status` тепер означає Desktop, `description_mobile_status` — Mobile.
+
+### Розмір HTML / Googlebot
+
+`html_raw_bytes` вимірює фактично прочитані байти HTML після HTTP-розпакування (зокрема gzip), але **до** перетворення charset. Це не `Content-Length`, не розмір DOM і не обсяг усіх ресурсів сторінки. Safety limit `MAX_HTML_BODY_BYTES=8388608` залишається незалежним.
+
+| Умова | `googlebot_2mb_status` |
+| --- | --- |
+| Повне HTML, менше 2 097 152 bytes | `OK` |
+| Прочитано щонайменше 2 097 152 bytes | `Googlebot cutoff risk` |
+| Неповне читання нижче порога | `Unknown (incomplete HTML)` |
+
+`html_size_complete=false` означає, що байти є нижньою межею, а не повним розміром документа. Старі результати та відповіді без HTML-парсингу мають `html_raw_bytes=NULL`, без вигаданого `OK`. Міграція `013_html_size.sql` не перераховує історію. Метрика, фільтр ризику та агрегати доступні у браузері, CSV й HTML.
+
+За [документацією Googlebot](https://developers.google.com/search/docs/crawling-indexing/googlebot), ліміт застосовується до uncompressed data; [пояснення Google](https://developers.google.com/search/blog/2026/03/crawler-blog-post) також враховує HTTP headers. Наш body-only поріг **2 MiB** є оцінкою ризику, не точною емуляцією всього fetch budget: `OK` не гарантує повного завантаження чи індексації Google. Ресурси CSS/JS мають окремі бюджети; PDF ця метрика не оцінює.
+
+### Site Crawl
+
+```json
+{
+  "mode": "site",
+  "site": {
+    "root_url": "https://example.com/",
+    "max_pages": 100,
+    "max_depth": 5,
+    "use_sitemaps": true
+  }
+}
+```
+
+Надішліть цей JSON у `POST /api/audits` з тими самими auth/CSRF headers, що й для списку URL. Режим `run` з `pages_to_scan` залишається незмінним.
+
+Обхід використовує початковий **origin** (scheme + нормалізований IDN hostname + port). Subdomains, інший scheme/port та cross-origin redirects не розширюють scope автоматично. Вони залишаються у графі як зовнішні посилання; за потреби запустіть окремий аудит правильного стартового URL. Query string зберігає семантику; fragments відкидаються, еквівалентні hostname/default ports нормалізуються. Різні signed URL не зливаються після redaction.
+
+1. Завантаження robots policy через спільний fail-closed cache.
+2. Пошук `Sitemap:` у robots.txt та fallback `/sitemap.xml`; підтримка XML `urlset`, `sitemapindex` і gzip. Кожен sitemap перевіряється за robots.txt; кожен redirect повторно проходить scope/robots/SSRF validation.
+3. BFS від стартової сторінки: поточна frontier завершується лише після запису результатів та їхніх нових цілей. Sitemap-only seeds скануються після reachable frontier; від них також виконується bounded BFS. `<a href>` враховує `<base>`, anchor text та `rel=nofollow`. Nofollow edges зберігаються, але самі по собі не додають ціль до обходу.
+4. Результат, завершення target, нові targets та вихідні edges записуються **в одній транзакції** під ownership fencing. Невдалий запис зупиняє планування; run можна відновити без втрати discovery. Одночасні повтори URL дедуплікуються за HMAC у межах запуску. Для resume потрібен початковий `TARGET_FINGERPRINT_KEY`; після його ротації слід почати новий site audit.
+5. Після завершення обчислюється граф: shortest click depth від стартового URL (redirect = 0 додаткових кліків), унікальні вхідні сторінки / вихідні внутрішні URL, посилання на HTTP 4xx/5xx, внутрішні redirects, sitemap orphan candidates. Цикли не створюють нескінченний обхід.
+
+**Межі:** UI defaults — 100 сторінок і 5 рівнів; hard limits — 1000 сторінок, 10 рівнів від root або sitemap seed, до 4 workers, 256 зібраних links на сторінку, 2048 bytes на discovery URL, 256 символів anchor. Redirect також витрачає рівень discovery, хоча не додає кліка до графа. Sitemap: до 16 файлів, 2 MiB decoded XML на файл, bounded XML nesting/token count, загальний discovery budget 2 хвилини; private-network доступ за замовчуванням заборонено. Ліміти фіксуються у `limit_reached`, `links_truncated`, `sitemap_state` і не приховуються як повний обхід. Якщо sitemap заповнює весь page budget, додаткові URL із HTML залишаються неперевіреними edges. Рекомендується збільшити page budget або вимкнути sitemap для окремого link-only обходу.
+
+`crawl_depth=NULL` означає, що шлях від стартової сторінки не знайдено у зібраному графі, або граф ще не завершено; це **не** глибина 0. `orphan_candidate` — sitemap URL без вхідних links у спостережуваному наборі; це не доказ відсутності посилань на всьому сайті. Nofollow links входять у inlinks/outlinks counts, але не у followable click depth. HTTP 4xx/5xx вважаються broken; network/robots errors та URL поза page budget залишаються «не перевірено», не вигаданим 404. Сигнал `>3 кліки` є діагностикою, а не універсальним порушенням SEO.
+
+PostgreSQL зберігає `audit_site_crawls`, `audit_site_nodes`, `audit_site_edges` (міграція `014_site_crawl.sql`). Raw URL з query потрібен лише у захищеному `audit_run_targets.request_url`; до завершення run діє попередня retention policy. Нові graph tables містять **тільки safe URL, HMAC і relational IDs**, не копії raw URL. Metadata та anchors екрануються в UI/HTML. Невідомі raw токени у довільному тексті не можна автоматично розпізнати: база й локальний звіт залишаються довіреною зоною.
+
+Вкладка **Граф посилань** має keyset pagination по `(from_target_id, ordinal)`, фільтри та перехід до зв'язків конкретного Target ID. API: `filter=all|internal|external|broken|redirects|unresolved|nofollow`, `target`, `after`, `ordinal`; 50 edges на сторінку. Node metrics доступні також у деталях сторінки, HTML і CSV. Поки `site_graph_ready` не встановлено, підсумкові graph metrics невідомі. JavaScript rendering, browser navigation, form submission та повна Shadow DOM slot projection не виконуються.
 
 ## Можливості
 
@@ -123,7 +170,9 @@ Docker Compose
 │   ├── 009_target_start_tracking.sql
 │   ├── 010_stale_recovery_index.sql
 │   ├── 011_owner_generation_fencing.sql
-│   └── 012_serp_pixel_metrics.sql
+│   ├── 012_serp_pixel_metrics.sql
+│   ├── 013_html_size.sql
+│   └── 014_site_crawl.sql
 ├── internal/
 │   ├── config/
 │   ├── crawler/

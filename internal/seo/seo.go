@@ -89,6 +89,11 @@ type Data struct {
 	ImagesMissingAlt           int
 	WordCount                  int
 	Duration                   time.Duration
+	HTMLRawBytes               *int64
+	HTMLSizeComplete           bool
+	Googlebot2MBStatus         string
+	DiscoveredLinks            []DiscoveredLink `json:"-"`
+	LinksTruncated             bool
 }
 
 func HTTPStatus(code int) *int {
@@ -96,7 +101,15 @@ func HTTPStatus(code int) *int {
 }
 
 func ParsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenBytes int64) (Data, error) {
-	data := Data{
+	return parsePage(resp, targetURL, maxBodyBytes, maxTokenBytes, false)
+}
+
+func ParsePageWithLinks(resp *http.Response, targetURL string, maxBodyBytes, maxTokenBytes int64) (Data, error) {
+	return parsePage(resp, targetURL, maxBodyBytes, maxTokenBytes, true)
+}
+
+func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenBytes int64, collectLinks bool) (data Data, parseErr error) {
+	data = Data{
 		URL:        targetURL,
 		StatusCode: HTTPStatus(resp.StatusCode),
 	}
@@ -116,6 +129,10 @@ func ParsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenByte
 	rawBody := &countingReader{
 		reader: io.LimitReader(resp.Body, maxBodyBytes+1),
 	}
+	defer func() {
+		data.HTMLRawBytes = &rawBody.bytesRead
+		data.Googlebot2MBStatus = googlebotSizeStatus(rawBody.bytesRead, data.HTMLSizeComplete)
+	}()
 	decodedBody, err := charset.NewReader(rawBody, resp.Header.Get("Content-Type"))
 	if err != nil {
 		return data, fmt.Errorf("decode HTML charset: %w", err)
@@ -125,6 +142,7 @@ func ParsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenByte
 	tokenLimit := min(maxTokenBytes, maxBodyBytes+1)
 	tokenizer.SetMaxBuf(int(tokenLimit))
 	parser := newPageParser(&data, targetURL)
+	parser.collectLinks = collectLinks
 
 	for {
 		tokenType := tokenizer.Next()
@@ -135,6 +153,7 @@ func ParsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenByte
 			}
 			tokenErr := tokenizer.Err()
 			if errors.Is(tokenErr, io.EOF) {
+				data.HTMLSizeComplete = true
 				parser.finalize()
 				return data, nil
 			}
@@ -253,6 +272,8 @@ type pageParser struct {
 	relativeLinks      int
 	subHeaderCounts    [7]int
 	bodyWordCounter    wordCounter
+	collectLinks       bool
+	linkCollector      linkCollector
 }
 
 type documentPhase uint8
@@ -347,8 +368,10 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	case bytes.Equal(name, []byte("style")):
 		p.ignoredTextDepth++
 	case bytes.Equal(name, []byte("a")):
+		p.finishLink()
 		if attributes.hasHref {
 			p.countLink(attributes.href)
+			p.startLink(attributes)
 		}
 	case bytes.Equal(name, []byte("img")):
 		p.data.TotalImages++
@@ -511,6 +534,9 @@ func (p *pageParser) handleText(text []byte) {
 	if p.inertTemplateDepth > 0 {
 		return
 	}
+	if p.linkCollector.active && p.ignoredTextDepth == 0 {
+		p.linkCollector.anchor.Write(text)
+	}
 	if p.documentPhase == documentPhaseHead && p.shadowRootDepth == 0 &&
 		!p.collectTitle && p.ignoredTitleDepth == 0 && p.ignoredTextDepth == 0 &&
 		len(bytes.TrimSpace(text)) > 0 {
@@ -548,6 +574,8 @@ func (p *pageParser) handleEndTag(name []byte) {
 	}
 
 	switch {
+	case bytes.Equal(name, []byte("a")):
+		p.finishLink()
 	case bytes.Equal(name, []byte("title")):
 		if p.collectTitle {
 			p.collectTitle = false
@@ -566,6 +594,8 @@ func (p *pageParser) handleEndTag(name []byte) {
 }
 
 func (p *pageParser) finalize() {
+	p.finishLink()
+	p.resolveLinks()
 	p.data.MetaRobots, p.data.MetaRobotsTruncated, p.data.MetaRobotsOriginalLength =
 		p.metaRobots.Result(StorageRobotsTagMaxRunes)
 	p.data.Title, p.data.TitleTruncated, p.data.TitleOriginalLength = p.title.Result()

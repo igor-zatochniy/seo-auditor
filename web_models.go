@@ -4,6 +4,7 @@ import "time"
 
 type webRun struct {
 	ID         string     `json:"id"`
+	Mode       string     `json:"mode"`
 	Status     string     `json:"status"`
 	Total      int64      `json:"total"`
 	Successful int64      `json:"successful"`
@@ -46,6 +47,18 @@ var reportFields = []reportField{
 	{"links_count", "Усі посилання", "Посилання"}, {"total_images", "Зображення", "Зображення"},
 	{"images_missing_alt", "Без атрибута alt", "Зображення"}, {"has_json_ld", "JSON-LD", "Технічні сигнали"},
 	{"has_viewport", "Viewport", "Технічні сигнали"}, {"word_count", "Слова", "Контент"},
+	{"html_raw_bytes", "HTML після розпакування, bytes", "Розмір HTML"},
+	{"html_size_complete", "HTML прочитано повністю", "Розмір HTML"},
+	{"googlebot_2mb_status", "Googlebot: 2 MiB", "Розмір HTML"},
+	{"crawl_depth", "Кліків від стартової сторінки", "Граф сайту"},
+	{"in_sitemap", "Є в sitemap", "Граф сайту"},
+	{"internal_inlinks_count", "Вхідні внутрішні сторінки", "Граф сайту"},
+	{"internal_outlinks_count", "Унікальні внутрішні URL", "Граф сайту"},
+	{"broken_internal_links", "Внутрішні URL з HTTP 4xx/5xx", "Граф сайту"},
+	{"redirecting_internal_links", "Внутрішні URL з редиректом", "Граф сайту"},
+	{"orphan_candidate", "Orphan candidate", "Граф сайту"},
+	{"links_truncated", "Ліміт збору посилань", "Граф сайту"},
+	{"site_graph_ready", "Метрики графа завершено", "Граф сайту"},
 	{"duration_ms", "Час, ms", "Час"}, {"created_at", "Збережено", "Час"},
 	{"attempts", "Спроби", "Час"}, {"started_at", "Початок target", "Час"}, {"finished_at", "Завершення target", "Час"},
 	{"error_code", "Код помилки", "Помилки"}, {"error_message", "Помилка", "Помилки"},

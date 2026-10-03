@@ -29,7 +29,7 @@ func newAuditManager(ctx context.Context, pool *pgxpool.Pool, cfg Config) *Audit
 	return &AuditManager{root: ctx, pool: pool, cfg: cfg, execute: executeCapturedAuditRun, publish: publishAuditReportContext}
 }
 
-func (m *AuditManager) start(ctx context.Context, urls []string, resumeID string) (string, error) {
+func (m *AuditManager) start(ctx context.Context, urls []string, resumeID string, siteOptions ...siteCrawlOptions) (string, error) {
 	ctx, cancelInit := context.WithCancel(ctx)
 	stopInit := context.AfterFunc(m.root, cancelInit)
 	defer stopInit()
@@ -53,7 +53,14 @@ func (m *AuditManager) start(ctx context.Context, urls []string, resumeID string
 		if !run.Resumable {
 			return "", errAuditNotResumable
 		}
+		if _, err := loadSiteCrawl(ctx, m.pool, cfg); err != nil {
+			return "", err
+		}
 		if err := createAuditRun(ctx, m.pool, &cfg); err != nil {
+			return "", err
+		}
+	} else if len(siteOptions) > 0 {
+		if err := createSiteAuditRun(ctx, m.pool, &cfg, siteOptions[0]); err != nil {
 			return "", err
 		}
 	} else if err := createExplicitAuditRun(ctx, m.pool, &cfg, urls); err != nil {

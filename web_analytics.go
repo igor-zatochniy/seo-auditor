@@ -35,6 +35,13 @@ var reportAggregateGroups = []aggregateGroup{
 	{"Контент, слова", []aggregateMetric{{"Середнє", "COALESCE(AVG(r.word_count) FILTER (WHERE " + parsedPagePredicate + "),0)"}, {"Медіана", "COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.word_count) FILTER (WHERE " + parsedPagePredicate + "),0)"}, parsedCount("0–99", "r.word_count<100"), parsedCount("100–499", "r.word_count BETWEEN 100 AND 499"), parsedCount("500–1499", "r.word_count BETWEEN 500 AND 1499"), parsedCount("1500+", "r.word_count>=1500")}},
 }
 
+func init() {
+	reportAggregateGroups = append(reportAggregateGroups,
+		aggregateGroup{"HTML / Googlebot", []aggregateMetric{countWhere("Cutoff risk (≥2 MiB)", "r.googlebot_2mb_status='Googlebot cutoff risk'"), countWhere("Менше 2 MiB", "r.googlebot_2mb_status='OK'"), countWhere("Неповне читання", "r.html_raw_bytes IS NOT NULL AND NOT r.html_size_complete"), countWhere("Не виміряно", "r.html_raw_bytes IS NULL")}},
+		aggregateGroup{"Граф сайту", []aggregateMetric{countWhere("Понад 3 кліки", "sc.graph_ready AND n.crawl_depth>3"), countWhere("Orphan candidates", "sc.graph_ready AND n.orphan_candidate"), countWhere("Сторінки з битими посиланнями", "sc.graph_ready AND n.broken_internal_links>0"), countWhere("Сторінки з внутрішніми редиректами", "sc.graph_ready AND n.redirecting_internal_links>0"), countWhere("Ліміт збору посилань", "n.links_truncated")}},
+	)
+}
+
 type reportQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Query(context.Context, string, ...any) (pgx.Rows, error)
@@ -53,7 +60,7 @@ func loadWebAnalytics(ctx context.Context, pool reportQuerier, id string) (webAn
 		}
 		a.Groups = append(a.Groups, g)
 	}
-	if err := pool.QueryRow(ctx, "SELECT "+strings.Join(expressions, ",")+" FROM audit_results r WHERE r.run_id=$1", id).Scan(dest...); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT "+strings.Join(expressions, ",")+" FROM audit_results r LEFT JOIN audit_site_nodes n USING(run_id,target_id) LEFT JOIN audit_site_crawls sc USING(run_id) WHERE r.run_id=$1", id).Scan(dest...); err != nil {
 		return a, err
 	}
 	rows, err := pool.Query(ctx, "SELECT error_code,COUNT(*)::DOUBLE PRECISION FROM audit_results WHERE run_id=$1 AND error_code<>'' GROUP BY error_code ORDER BY COUNT(*) DESC,error_code LIMIT 50", id)

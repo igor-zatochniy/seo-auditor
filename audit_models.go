@@ -27,15 +27,17 @@ func failedScanResult(data SEOData, code string, err error) Result {
 }
 
 type targetURLRecord struct {
-	ID  int64
-	URL string
+	ID            int64
+	URL           string
+	DiscoverLinks bool
 }
 
 type AuditTarget struct {
-	TargetID    int64
-	RequestURL  string
-	SafeURL     string
-	Fingerprint []byte
+	TargetID      int64
+	RequestURL    string
+	SafeURL       string
+	Fingerprint   []byte
+	DiscoverLinks bool
 }
 
 type targetURLSnapshot struct {
