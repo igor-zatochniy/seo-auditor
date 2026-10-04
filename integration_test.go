@@ -2208,6 +2208,10 @@ func TestMigrationsUpgradeEverySupportedSchemaVersion(t *testing.T) {
 			if version != requiredSchemaVersion {
 				t.Fatalf("upgraded schema version = %d, want %d", version, requiredSchemaVersion)
 			}
+			var legacySignalsUnknown bool
+			if err := migrationDB.QueryRowContext(ctx, "SELECT geo_signals IS NULL FROM audit_results WHERE run_id=$1", runID).Scan(&legacySignalsUnknown); err != nil || !legacySignalsUnknown {
+				t.Fatalf("Міграція не повинна вигадувати GEO-сигнали для старих даних: %v", err)
+			}
 
 			var (
 				ownerGeneration int64

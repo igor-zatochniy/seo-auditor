@@ -72,6 +72,7 @@ func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
 
 func (s *webServer) handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerGEO(mux)
 	assets, _ := fs.Sub(webAssets, "web/static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(assets))))
 	page := template.Must(template.ParseFS(webAssets, "web/templates/index.html"))

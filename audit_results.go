@@ -40,8 +40,8 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			x_robots_tag_truncated, x_robots_tag_original_length,
 			title_char_count, title_width_px, description_char_count, description_width_px,
 			description_mobile_status, serp_width_model, serp_width_approximate,
-			html_raw_bytes, html_size_complete, googlebot_2mb_status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67)
+			html_raw_bytes, html_size_complete, googlebot_2mb_status, geo_signals
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68)
 		ON CONFLICT (run_id, target_id) DO UPDATE SET
 			safe_url = EXCLUDED.safe_url,
 			target_fingerprint = EXCLUDED.target_fingerprint,
@@ -66,6 +66,7 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 			html_raw_bytes = EXCLUDED.html_raw_bytes,
 			html_size_complete = EXCLUDED.html_size_complete,
 			googlebot_2mb_status = EXCLUDED.googlebot_2mb_status,
+			geo_signals = EXCLUDED.geo_signals,
 			h1 = EXCLUDED.h1,
 			h1_count = EXCLUDED.h1_count,
 			h2_to_h6_status = EXCLUDED.h2_to_h6_status,
@@ -253,6 +254,7 @@ func saveResults(ctx context.Context, dbPool *pgxpool.Pool, results <-chan Resul
 					d.HTMLRawBytes,
 					d.HTMLSizeComplete,
 					d.Googlebot2MBStatus,
+					d.GEO,
 				); err != nil {
 					return err
 				}

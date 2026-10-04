@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
+	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
@@ -29,6 +30,7 @@ const (
 
 // Data contains the full set of metrics collected by the parser.
 type Data struct {
+	GEO                        *geo.Signals
 	URL                        string
 	SafeURLTruncated           bool
 	SafeURLOriginalLength      int
@@ -243,6 +245,7 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 }
 
 type pageParser struct {
+	geo                geoCollector
 	data               *Data
 	targetURL          *url.URL
 	documentBaseURL    *url.URL
@@ -293,6 +296,7 @@ const (
 func newPageParser(data *Data, targetURL string) *pageParser {
 	parsedTarget, _ := url.Parse(targetURL)
 	return &pageParser{
+		geo:              newGEOCollector(),
 		data:             data,
 		targetURL:        parsedTarget,
 		documentBaseURL:  parsedTarget,
@@ -314,6 +318,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	if p.documentPhase == documentPhaseHead && p.shadowRootDepth == 0 && startsBodyContent(name) {
 		p.documentPhase = documentPhaseBody
 	}
+	p.geoStart(name, attributes)
 
 	switch {
 	case bytes.Equal(name, []byte("title")):
@@ -534,6 +539,7 @@ func (p *pageParser) handleText(text []byte) {
 	if p.inertTemplateDepth > 0 {
 		return
 	}
+	p.geo.scriptText(text)
 	if p.linkCollector.active && p.ignoredTextDepth == 0 {
 		p.linkCollector.anchor.Write(text)
 	}
@@ -552,6 +558,7 @@ func (p *pageParser) handleText(text []byte) {
 	if p.documentPhase == documentPhaseBody && !p.collectTitle &&
 		p.ignoredTextDepth == 0 && p.ignoredTitleDepth == 0 {
 		p.bodyWordCounter.Write(text)
+		p.geo.text(text)
 	}
 }
 
@@ -572,6 +579,7 @@ func (p *pageParser) handleEndTag(name []byte) {
 	if p.inertTemplateDepth > 0 {
 		return
 	}
+	p.geo.end(name)
 
 	switch {
 	case bytes.Equal(name, []byte("a")):
@@ -594,6 +602,7 @@ func (p *pageParser) handleEndTag(name []byte) {
 }
 
 func (p *pageParser) finalize() {
+	p.data.GEO = p.geo.result()
 	p.finishLink()
 	p.resolveLinks()
 	p.data.MetaRobots, p.data.MetaRobotsTruncated, p.data.MetaRobotsOriginalLength =

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Готовність до GEO · SEO Auditor</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/geo.css">
+  <script src="/static/geo.js" defer></script>
+  <script src="/static/dialogs.js" defer></script>
+</head>
+<body>
+  <header class="app-header"><a class="brand" href="/">SEO Auditor<span class="local-label">ЛОКАЛЬНО</span></a><nav aria-label="Навігація"><a href="/">SEO-аудит</a><a href="/geo" class="active" aria-current="page">Готовність до GEO</a><a href="/audits">Історія SEO</a></nav><span class="connection">PostgreSQL</span></header>
+  <main>
+    <div id="notice" role="alert" hidden></div>
+    <section id="geo-home">
+      <div class="section-heading"><div><p class="eyebrow">КОНТЕНТ І ЗАПИТИ</p><h1>Готовність до GEO</h1></div><span class="badge success">Без зовнішніх API</span></div>
+      <form id="geo-form">
+        <div class="geo-form-grid">
+          <label>Завершений SEO-аудит<input id="source-run" list="source-list" required placeholder="Ідентифікатор аудиту" autocomplete="off"><datalist id="source-list"></datalist></label>
+          <label>Домен<input id="domain" required maxlength="253" placeholder="example.com" autocomplete="off"></label>
+          <label>Бренд <span class="muted">(необов'язково)</span><input id="brand" maxlength="120" autocomplete="organization"></label>
+        </div>
+        <label for="queries">Пошукові запити · один на рядок</label>
+        <textarea id="queries" rows="8" required maxlength="500000" placeholder="як запобігти чарджбекам&#10;захист платежів Stripe&#10;порівняння сервісів захисту платежів" spellcheck="false"></textarea>
+        <div class="input-footer"><span id="query-count" class="muted">0 / 1000 запитів</span><div class="actions"><button id="clear-queries" type="button">Очистити</button><button id="analyze" class="primary" type="submit">Проаналізувати</button></div></div>
+      </form>
+      <p id="no-sources" class="empty" hidden>Завершених аудитів ще немає. <a href="/">Створити SEO-аудит</a></p>
+    </section>
+    <section id="geo-report" hidden>
+      <div class="section-heading"><div><p class="eyebrow" id="report-reference"></p><h1 id="report-title">Готовність до GEO</h1><p class="muted" id="report-meta"></p></div><div class="actions"><a href="/geo">Новий аналіз</a><a id="csv-export" class="button" download>Завантажити CSV</a></div></div>
+      <div id="geo-summary" class="summary"></div>
+      <p class="geo-scope">Локальні евристики, не фактична AI-видимість. Збіг термінів не вимірює семантичну якість; оцінка сигналів не є ймовірністю цитування.</p>
+      <div class="table-toolbar"><input id="search-query" type="search" aria-label="Пошук запиту або URL" placeholder="Пошук запиту або URL"><select id="geo-filter" aria-label="Фільтр результатів"><option value="all">Усі запити</option><option value="unmapped">Без цільової сторінки</option><option value="ambiguous">Близькі кандидати</option><option value="weak">Слабкі сигнали</option><option value="unknown">Недостатньо даних</option><option value="unchecked">Без ручної перевірки AI</option></select><select id="geo-page-size" aria-label="Рядків на сторінці"><option>25</option><option selected>50</option><option>100</option></select></div>
+      <div class="table-wrap"><table id="geo-table"><thead><tr><th>Запит</th><th>Намір (оцінка)</th><th>Цільова сторінка</th><th>Збіг термінів</th><th>Готовність до GEO</th><th>Основна прогалина</th><th>Ручна перевірка AI</th></tr></thead><tbody></tbody></table></div>
+      <div class="input-footer"><span id="geo-page-label" class="muted"></span><div class="actions"><button id="geo-prev" title="Попередня сторінка" aria-label="Попередня сторінка">←</button><button id="geo-next" title="Наступна сторінка" aria-label="Наступна сторінка">→</button></div></div>
+    </section>
+    <details class="geo-method"><summary>Методика та межі достовірності</summary><dl>
+      <dt>Джерело</dt><dd>Збережені успішні HTML-сторінки одного завершеного SEO-аудиту, до 1000 сторінок. Свіжість дорівнює даті сканування. JavaScript не виконується.</dd>
+      <dt>Зіставлення</dt><dd>Точні нормалізовані терміни без стоп-слів: title, H1, опис, шлях URL, заголовки та перші 2000 символів тексту. Кандидат потребує щонайменше 50% збігів. Синоніми, відмінки та переклад не моделюються.</dd>
+      <dt>Готовність</dt><dd>Частка виявлених структурних сигналів: перший абзац із термінами запиту, H1, список або таблиця, авторство, зовнішні посилання, розпізнана JSON-LD. Для порівняльного наміру додається перевірка таблиці. ≥75% — сильні; ≥45% — часткові; нижче — слабкі сигнали. Це не фактори ранжування та не гарантія цитування.</dd>
+      <dt>Неповні дані</dt><dd>Старі аудити без сигналів контенту не отримують оцінки готовності. Невідоме не означає відсутнє. Невдалий збіг не доводить, що на сайті немає сторінки.</dd>
+      <dt>AI-цитування</dt><dd>Лише ручні спостереження з датою, системою та доказами. Вони не підтверджують загальну видимість бренду. Останнє спостереження для кожної системи замінює попереднє.</dd>
+    </dl></details>
+    <section id="geo-history-section"><div class="section-heading"><h2>Останні GEO-звіти</h2><button id="refresh-history" title="Оновити список">Оновити</button></div><div id="geo-history" class="history-list"></div></section>
+  </main>
+  <dialog id="geo-details" aria-labelledby="details-heading"><div class="dialog-heading"><h2 id="details-heading">Аналіз запиту</h2><button data-close="geo-details" aria-label="Закрити" title="Закрити">×</button></div><p class="detail-url" id="detail-query"></p><div id="detail-analysis"></div>
+    <h3>Ручна перевірка AI-цитування</h3>
+    <form id="citation-form"><div class="geo-form-grid"><label>AI-система<select id="citation-engine"><option value="google_ai">Google AI Overviews</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="perplexity">Perplexity</option><option value="other">Інша система</option></select></label><label>Цитування домену<select id="citation-value"><option value="unknown">Не перевірено</option><option value="yes">Так</option><option value="no">Не виявлено</option></select></label><label>Згадка бренду<select id="mention-value"><option value="unknown">Не перевірено</option><option value="yes">Так</option><option value="no">Не виявлено</option></select></label></div>
+    <label>Посилання на доказ<input type="url" id="evidence-url" maxlength="2048" placeholder="https://..."></label><label>Нотатка або уривок відповіді<textarea id="citation-note" rows="3" maxlength="2000"></textarea></label><div class="input-footer"><span id="citation-status" role="status" class="muted"></span><button id="save-citation" class="primary">Зберегти спостереження</button></div></form>
+  </dialog>
+</body>
+</html>

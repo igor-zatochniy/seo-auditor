@@ -130,6 +130,13 @@ func sanitizeError(err error) string {
 }
 
 func sanitizeSEODataForStorage(data SEOData) SEOData {
+	if data.GEO != nil {
+		signals := *data.GEO
+		signals.Excerpt = sanitizeGEOTextForStorage(signals.Excerpt, 2000)
+		signals.Headings = sanitizeGEOTextForStorage(signals.Headings, 800)
+		signals.FirstParagraph = sanitizeGEOTextForStorage(signals.FirstParagraph, 600)
+		data.GEO = &signals
+	}
 	data.URL = redactURL(data.URL)
 	data.RedirectURL = redactURL(data.RedirectURL)
 	data.CanonicalURL = redactURL(data.CanonicalURL)
@@ -164,6 +171,12 @@ func sanitizeSEODataForStorage(data SEOData) SEOData {
 		data.XRobotsTag, storageRobotsTagMaxRunes, data.XRobotsTagTruncated, data.XRobotsTagOriginalLength,
 	)
 	return data
+}
+
+func sanitizeGEOTextForStorage(value string, maxRunes int) string {
+	// PostgreSQL JSONB не приймає U+0000 навіть у JSON escape-послідовності.
+	value = strings.ReplaceAll(value, "\x00", "\uFFFD")
+	return truncateRunes(redactText(value), maxRunes)
 }
 
 func limitStorageStringPreservingMetadata(
