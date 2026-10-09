@@ -209,6 +209,9 @@ func run() (exitCode int) {
 
 // Both entry points share ownership, heartbeat, persistence and shutdown semantics.
 func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cfg Config, publish bool) (exitCode int) {
+	if cfg.RenderJavaScript {
+		cfg.Workers = 1
+	}
 	logger := slog.Default()
 	if !publish {
 		logger = logger.With("run_id", cfg.RunID)

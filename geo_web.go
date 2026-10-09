@@ -296,6 +296,8 @@ func (s *webServer) geoGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type geoCitation struct {
+	ID           string     `json:"id,omitempty"`
+	Sequence     int64      `json:"sequence,omitempty"`
 	Engine       string     `json:"engine"`
 	Citation     string     `json:"citation"`
 	BrandMention string     `json:"brand_mention"`
@@ -305,6 +307,9 @@ type geoCitation struct {
 }
 
 func validateGEOCitation(c *geoCitation) error {
+	if c.ID != "" && !runIDPattern.MatchString(c.ID) {
+		return errors.New("некоректний ідентифікатор спостереження")
+	}
 	switch c.Engine {
 	case "google_ai", "chatgpt", "gemini", "perplexity", "other":
 	default:
@@ -330,6 +335,7 @@ func validateGEOCitation(c *geoCitation) error {
 	}
 	c.Note = redactText(c.Note)
 	c.CheckedAt = nil
+	c.Sequence = 0
 	return nil
 }
 
@@ -351,12 +357,30 @@ func (s *webServer) geoSaveCitation(w http.ResponseWriter, r *http.Request) {
 		writeWebError(w, 400, "invalid_check", err.Error())
 		return
 	}
-	err = s.pool.QueryRow(r.Context(), `INSERT INTO geo_citation_checks(report_id,ordinal,engine,citation,brand_mention,evidence_url,note)
-		SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS(SELECT 1 FROM geo_query_results WHERE report_id=$1 AND ordinal=$2)
+	if check.ID == "" {
+		check.ID = newWebRunID()
+	}
+	err = s.pool.QueryRow(r.Context(), `WITH observation AS (
+		INSERT INTO geo_citation_observations(id,report_id,ordinal,engine,citation,brand_mention,evidence_url,note)
+		SELECT $8,$1,$2,$3,$4,$5,$6,$7 WHERE EXISTS(SELECT 1 FROM geo_query_results WHERE report_id=$1 AND ordinal=$2)
+		ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id
+		WHERE geo_citation_observations.report_id=EXCLUDED.report_id AND geo_citation_observations.ordinal=EXCLUDED.ordinal
+		AND geo_citation_observations.engine=EXCLUDED.engine AND geo_citation_observations.citation=EXCLUDED.citation
+		AND geo_citation_observations.brand_mention=EXCLUDED.brand_mention AND geo_citation_observations.evidence_url=EXCLUDED.evidence_url
+		AND geo_citation_observations.note=EXCLUDED.note RETURNING *
+	), latest AS (
+		INSERT INTO geo_citation_checks(report_id,ordinal,engine,citation,brand_mention,evidence_url,note,checked_at)
+		SELECT report_id,ordinal,engine,citation,brand_mention,evidence_url,note,checked_at FROM observation
 		ON CONFLICT(report_id,ordinal,engine) DO UPDATE SET citation=EXCLUDED.citation,brand_mention=EXCLUDED.brand_mention,
-		evidence_url=EXCLUDED.evidence_url,note=EXCLUDED.note,checked_at=NOW() RETURNING checked_at`,
-		id, ordinal, check.Engine, check.Citation, check.BrandMention, check.EvidenceURL, check.Note).Scan(&check.CheckedAt)
+		evidence_url=EXCLUDED.evidence_url,note=EXCLUDED.note,checked_at=EXCLUDED.checked_at
+		WHERE geo_citation_checks.checked_at <= EXCLUDED.checked_at
+	) SELECT checked_at,sequence FROM observation`,
+		id, ordinal, check.Engine, check.Citation, check.BrandMention, check.EvidenceURL, check.Note, check.ID).Scan(&check.CheckedAt, &check.Sequence)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeWebError(w, 409, "observation_conflict", "Запит не існує або ID спостереження вже використано з іншим вмістом")
+			return
+		}
 		webDBError(w, err)
 		return
 	}
@@ -371,7 +395,7 @@ var geoObservationLabels = map[string]string{"yes": "Так", "no": "Не вия
 func writeGEOCSV(w http.ResponseWriter, report geoReport, rows []geoRow) {
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
-	_ = writer.Write([]string{"Запит", "Намір (евристика)", "Цільовий URL", "Збіг термінів, %", "Готовність: частка сигналів, %", "Оцінка", "Прогалини", "Застереження", "Ручні AI-спостереження"})
+	_ = writer.Write([]string{"Запит", "Намір (евристика)", "Цільовий URL", "Збіг термінів, %", "Стара оцінка v1, %", "Оцінка контенту", "Прогалини", "Застереження", "Останні ручні AI-спостереження", "Категорії сигналів", "Googlebot: robots.txt", "OAI-SearchBot: robots.txt", "Google: індексація за директивами", "Google: snippet за директивами", "Джерело контенту", "Модель", "GPTBot: навчання", "HTTP-спостереження", "Лабораторні LCP/CLS", "Збіги абзаців 300–500 символів"})
 	for _, row := range rows {
 		r := row.Result
 		score := ""
@@ -380,9 +404,23 @@ func writeGEOCSV(w http.ResponseWriter, report geoReport, rows []geoRow) {
 		}
 		observations := []string{}
 		for _, c := range row.Citations {
-			observations = append(observations, fmt.Sprintf("%s: цитування — %s; бренд — %s; %s; %s", geoEngineLabels[c.Engine], geoObservationLabels[c.Citation], geoObservationLabels[c.BrandMention], c.EvidenceURL, c.Note))
+			checked := ""
+			if c.CheckedAt != nil {
+				checked = c.CheckedAt.UTC().Format(time.RFC3339)
+			}
+			observations = append(observations, fmt.Sprintf("%s: цитування — %s; бренд — %s; %s; %s; %s", geoEngineLabels[c.Engine], geoObservationLabels[c.Citation], geoObservationLabels[c.BrandMention], c.EvidenceURL, c.Note, checked))
 		}
 		cells := []string{r.Query, geoIntentLabels[r.Intent], r.TargetURL, strconv.Itoa(r.Coverage), score, geoLevelLabels[r.Level], strings.Join(r.Gaps, "\n"), strings.Join(r.Warnings, "\n"), strings.Join(observations, "\n")}
+		categories := []string{}
+		for _, c := range r.Categories {
+			categories = append(categories, fmt.Sprintf("%s: %d / %d", c.Name, c.Passed, c.Total))
+		}
+		search := geo.SearchControls{}
+		if r.Search != nil {
+			search = *r.Search
+		}
+		cells = append(cells, strings.Join(categories, "\n"), geoRuleLabel(search.GooglebotRules), geoRuleLabel(search.OAISearchBotRules), geoRuleLabel(search.GoogleIndexing), geoRuleLabel(search.GoogleSnippet), r.ContentSource, report.Model)
+		cells = append(cells, geoRuleLabel(search.GPTBotRules), structuredReportValue(r.HTTP), structuredReportValue(r.Performance), structuredReportValue(r.BlockMatches))
 		for i := range cells {
 			cells[i] = safeCSVCell(cells[i])
 		}
@@ -396,6 +434,17 @@ func writeGEOCSV(w http.ResponseWriter, report geoReport, rows []geoRow) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="geo-`+report.ID+`.csv"`)
 	_, _ = w.Write(append([]byte{0xef, 0xbb, 0xbf}, buffer.Bytes()...))
+}
+
+func geoRuleLabel(value string) string {
+	switch value {
+	case geo.Allowed:
+		return "Дозволено правилами"
+	case geo.Blocked:
+		return "Заборонено"
+	default:
+		return "Не перевірено"
+	}
 }
 
 func (s *webServer) registerGEO(mux *http.ServeMux) {
@@ -422,4 +471,52 @@ func (s *webServer) registerGEO(mux *http.ServeMux) {
 		s.geoGet(w, r)
 	})
 	mux.HandleFunc("POST /api/geo/reports/{id}/queries/{ordinal}/citation", s.geoSaveCitation)
+	mux.HandleFunc("GET /api/geo/reports/{id}/queries/{ordinal}/observations", s.geoObservations)
+}
+
+func (s *webServer) geoObservations(w http.ResponseWriter, r *http.Request) {
+	id, ok := webRunID(w, r)
+	if !ok {
+		return
+	}
+	ordinal, err := strconv.Atoi(r.PathValue("ordinal"))
+	if err != nil || ordinal < 1 || ordinal > 1000 {
+		writeWebError(w, 400, "invalid_ordinal", "Некоректний номер запиту")
+		return
+	}
+	before := int64(0)
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		before, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || before <= 0 {
+			writeWebError(w, 400, "invalid_cursor", "Некоректний курсор історії")
+			return
+		}
+	}
+	rows, err := s.pool.Query(r.Context(), `SELECT id::text,sequence,engine,citation,brand_mention,evidence_url,note,checked_at
+		FROM geo_citation_observations WHERE report_id=$1 AND ordinal=$2 AND ($3::bigint=0 OR sequence<$3)
+		ORDER BY sequence DESC LIMIT 51`, id, ordinal, before)
+	if err != nil {
+		webDBError(w, err)
+		return
+	}
+	defer rows.Close()
+	items := []geoCitation{}
+	for rows.Next() {
+		var item geoCitation
+		if err = rows.Scan(&item.ID, &item.Sequence, &item.Engine, &item.Citation, &item.BrandMention, &item.EvidenceURL, &item.Note, &item.CheckedAt); err != nil {
+			webDBError(w, err)
+			return
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		webDBError(w, err)
+		return
+	}
+	next := int64(0)
+	if len(items) > 50 {
+		items = items[:50]
+		next = items[49].Sequence
+	}
+	writeWebJSON(w, 200, map[string]any{"items": items, "next": next})
 }

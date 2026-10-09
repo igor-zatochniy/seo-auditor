@@ -60,11 +60,18 @@ func (s *webServer) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		URLs string            `json:"urls"`
-		Mode string            `json:"mode"`
-		Site *siteCrawlOptions `json:"site"`
+		URLs             string            `json:"urls"`
+		Mode             string            `json:"mode"`
+		Site             *siteCrawlOptions `json:"site"`
+		RenderJavaScript bool              `json:"render_javascript"`
 	}
 	if !decodeWebJSON(w, r, min(int64(s.web.MaxURLs)*4096+1024, 8<<20), &body) {
+		return
+	}
+	renderConfig := s.cfg
+	renderConfig.RenderJavaScript = body.RenderJavaScript
+	if err := validateRendering(renderConfig); err != nil {
+		writeWebError(w, 400, "rendering_unavailable", err.Error())
 		return
 	}
 	if body.Mode == "site" {
@@ -76,7 +83,7 @@ func (s *webServer) submit(w http.ResponseWriter, r *http.Request) {
 			writeWebError(w, 400, "invalid_site", err.Error())
 			return
 		}
-		id, err := s.manager.start(r.Context(), nil, "", *body.Site)
+		id, err := s.manager.startWithRendering(r.Context(), nil, "", body.RenderJavaScript, *body.Site)
 		if err != nil {
 			handleStartError(w, err)
 			return
@@ -94,7 +101,7 @@ func (s *webServer) submit(w http.ResponseWriter, r *http.Request) {
 		writeWebError(w, 400, "invalid_urls", err.Error())
 		return
 	}
-	id, err := s.manager.start(r.Context(), urls, "")
+	id, err := s.manager.startWithRendering(r.Context(), urls, "", body.RenderJavaScript)
 	if err != nil {
 		handleStartError(w, err)
 		return

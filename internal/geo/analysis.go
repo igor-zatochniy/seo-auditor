@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/performance"
 	"golang.org/x/net/idna"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -19,7 +20,7 @@ import (
 const (
 	MaxQueries = 1000
 	MaxPages   = 1000
-	Model      = "local-lexical-v1"
+	Model      = "local-lexical-v3"
 )
 
 type Input struct {
@@ -178,24 +179,40 @@ type Check struct {
 	Passed         bool   `json:"passed"`
 	Evidence       string `json:"evidence"`
 	Recommendation string `json:"recommendation"`
+	Category       string `json:"category,omitempty"`
+}
+
+type Category struct {
+	Key    string `json:"key"`
+	Name   string `json:"name"`
+	Passed int    `json:"passed"`
+	Total  int    `json:"total"`
+	Level  string `json:"level"`
 }
 
 type Result struct {
-	Query         string      `json:"query"`
-	Intent        string      `json:"intent"`
-	TargetID      *int64      `json:"target_id"`
-	TargetURL     string      `json:"target_url"`
-	Coverage      int         `json:"coverage"`
-	Matched       []string    `json:"matched"`
-	Missing       []string    `json:"missing"`
-	Readiness     *int        `json:"readiness"`
-	Level         string      `json:"level"`
-	Ambiguous     bool        `json:"ambiguous"`
-	SharedQueries int         `json:"shared_queries"`
-	Alternatives  []Candidate `json:"alternatives"`
-	Checks        []Check     `json:"checks"`
-	Gaps          []string    `json:"gaps"`
-	Warnings      []string    `json:"warnings"`
+	Query         string              `json:"query"`
+	Intent        string              `json:"intent"`
+	TargetID      *int64              `json:"target_id"`
+	TargetURL     string              `json:"target_url"`
+	Coverage      int                 `json:"coverage"`
+	Matched       []string            `json:"matched"`
+	Missing       []string            `json:"missing"`
+	Readiness     *int                `json:"readiness"`
+	Level         string              `json:"level"`
+	Ambiguous     bool                `json:"ambiguous"`
+	SharedQueries int                 `json:"shared_queries"`
+	Alternatives  []Candidate         `json:"alternatives"`
+	Checks        []Check             `json:"checks"`
+	Gaps          []string            `json:"gaps"`
+	Warnings      []string            `json:"warnings"`
+	Categories    []Category          `json:"categories,omitempty"`
+	Search        *SearchControls     `json:"search,omitempty"`
+	ContentSource string              `json:"content_source,omitempty"`
+	HTTP          *HTTPObservation    `json:"http,omitempty"`
+	Performance   *performance.Result `json:"performance,omitempty"`
+	Blocks        *BlockSample        `json:"blocks,omitempty"`
+	BlockMatches  []BlockMatch        `json:"block_matches,omitempty"`
 }
 
 type posting struct {
@@ -225,7 +242,7 @@ func Analyze(ctx context.Context, queries []string, pages []Page) ([]Result, err
 			path, _ := url.PathUnescape(u.EscapedPath())
 			add(path, 1)
 		}
-		if page.Signals != nil && page.Signals.Complete {
+		if page.Signals != nil && page.Signals.Complete && !page.Signals.ContentIncomplete {
 			add(page.Signals.Headings, 3)
 			add(page.Signals.Excerpt, 1)
 		}
@@ -311,14 +328,28 @@ func Analyze(ctx context.Context, queries []string, pages []Page) ([]Result, err
 }
 
 func evaluate(r *Result, page Page, qt []string) {
-	if page.Signals == nil || !page.Signals.Complete || page.Signals.Version != 1 {
+	if page.Signals == nil || !page.Signals.Complete || page.Signals.Version < 1 || page.Signals.Version > 2 {
 		r.Warnings = append(r.Warnings, "Немає нових сигналів контенту. Повторіть SEO-аудит для оцінки готовності.")
 		return
 	}
 	s := page.Signals
-	check := func(name string, passed bool, evidence, recommendation string) {
-		r.Checks = append(r.Checks, Check{name, passed, evidence, recommendation})
-		if !passed {
+	r.HTTP, r.Performance, r.Blocks = s.HTTP, s.Performance, s.Blocks
+	r.BlockMatches = matchBlocks(s.Blocks, qt)
+	r.Search = &SearchControls{GooglebotRules: Unknown, OAISearchBotRules: Unknown, GoogleIndexing: Unknown, GoogleSnippet: Unknown}
+	if s.Version == 2 {
+		copy := s.Search
+		r.Search = &copy
+		r.ContentSource = s.ContentSource
+	} else {
+		r.Warnings = append(r.Warnings, "Сигнали попередньої версії: вибірка могла містити меню; правила пошукових ботів не перевірені. Для нової методики повторіть SEO-аудит.")
+	}
+	if s.ContentIncomplete {
+		r.Warnings = append(r.Warnings, "Перевищено ліміт структури HTML для GEO. Категорії контенту не оцінено; звичайні SEO-метрики збережені.")
+		return
+	}
+	check := func(category, name string, passed bool, evidence, recommendation string) {
+		r.Checks = append(r.Checks, Check{Name: name, Passed: passed, Evidence: evidence, Recommendation: recommendation, Category: category})
+		if !passed && category != "metadata" {
 			r.Gaps = append(r.Gaps, recommendation)
 		}
 	}
@@ -332,27 +363,33 @@ func evaluate(r *Result, page Page, qt []string) {
 			}
 		}
 	}
-	check("Терміни запиту у першому абзаці", matched > 0 && matched*2 >= len(qt), s.FirstParagraph,
+	check("answer", "Терміни запиту у першому абзаці", matched > 0 && matched*2 >= len(qt), s.FirstParagraph,
 		"Перевірте, чи перший абзац прямо відповідає на запит; за потреби додайте стислу відповідь.")
-	check("Головний заголовок", page.H1Count == 1, page.H1, "Перевірте наявність одного змістовного H1.")
-	check("Структура відповіді", s.HasList || s.HasTable, boolEvidence(s.HasList, "Список")+"; "+boolEvidence(s.HasTable, "Таблиця"),
+	check("answer", "Головний заголовок документа", page.H1Count == 1, page.H1, "Перевірте наявність одного змістовного H1.")
+	check("answer", "Структура відповіді", s.HasList || s.HasTable, boolEvidence(s.HasList, "Список")+"; "+boolEvidence(s.HasTable, "Таблиця"),
 		"За доречності структуруйте відповідь списком або таблицею.")
-	check("Авторство", s.HasAuthor, boolEvidence(s.HasAuthor, "Метадані або посилання автора"),
+	check("evidence", "Авторство", s.HasAuthor, boolEvidence(s.HasAuthor, "Метадані або посилання автора"),
 		"Перевірте видиме авторство та відповідальність за зміст; автоматичний сигнал не підтверджує експертність.")
-	check("Зовнішні посилання", page.ExternalLinks > 0, boolEvidence(page.ExternalLinks > 0, "Зовнішні посилання"),
+	check("evidence", "Зовнішні посилання документа", page.ExternalLinks > 0, boolEvidence(page.ExternalLinks > 0, "Зовнішні посилання"),
 		"Для фактичних тверджень додайте релевантні першоджерела. Наявність посилання сама по собі не підтверджує достовірність.")
 	if !s.SchemaIncomplete {
-		check("Розпізнана структурована розмітка", len(s.SchemaTypes) > 0, strings.Join(s.SchemaTypes, ", "),
+		check("metadata", "Розпізнана структурована розмітка", len(s.SchemaTypes) > 0, strings.Join(s.SchemaTypes, ", "),
 			"Перевірте доречну структуровану розмітку; тип має відповідати реальному вмісту сторінки.")
 	} else {
 		r.Warnings = append(r.Warnings, "JSON-LD не перевірено повністю: некоректний блок або перевищено ліміт розбору.")
 	}
 	if r.Intent == "commercial" {
-		check("Табличний блок для порівняння", s.HasTable, boolEvidence(s.HasTable, "HTML-таблиця"),
+		check("answer", "Табличний блок для порівняння", s.HasTable, boolEvidence(s.HasTable, "HTML-таблиця"),
 			"Для порівняльного запиту перевірте наявність критеріїв, альтернатив і доказів. Таблиця доречна не завжди.")
 	}
-	if strings.Contains(fold(page.MetaRobots+" "+page.XRobotsTag), "noindex") || strings.Contains(fold(page.MetaRobots+" "+page.XRobotsTag), "none") {
-		r.Warnings = append(r.Warnings, "Є обмежувальна robots-директива. Перевірте її scope та індексованість окремо.")
+	if r.Search.GoogleIndexing == Blocked || r.Search.GoogleSnippet == Blocked {
+		r.Warnings = append(r.Warnings, "Є обмеження індексації або текстового snippet для Google. Дозвіл robots.txt не скасовує цих директив.")
+	}
+	if r.Search.MaxSnippet != nil && *r.Search.MaxSnippet > 0 {
+		r.Warnings = append(r.Warnings, "max-snippet обмежує обсяг текстового фрагмента; це не гарантує і не виключає AI-цитування.")
+	}
+	if r.Search.DataNoSnippet {
+		r.Warnings = append(r.Warnings, "Виявлено data-nosnippet: окремі фрагменти виключені зі snippet, але це не заборона всієї сторінки.")
 	}
 	if page.Canonical != "" && !page.SelfCanonical {
 		r.Warnings = append(r.Warnings, "Canonical вказує на іншу адресу; перевірте вибір цільової сторінки.")
@@ -360,19 +397,34 @@ func evaluate(r *Result, page Page, qt []string) {
 	if s.SampleTruncated {
 		r.Warnings = append(r.Warnings, "Зіставлення використовує обмежену вибірку тексту, тому відсутній термін може бути далі на сторінці.")
 	}
-	passed := 0
-	for _, c := range r.Checks {
-		if c.Passed {
-			passed++
+	r.Categories = []Category{{Key: "answer", Name: "Структура відповіді"}, {Key: "evidence", Name: "Авторство та посилання"}, {Key: "metadata", Name: "Розмітка (необов'язкова)"}}
+	r.Level = "strong"
+	for i := range r.Categories {
+		c := &r.Categories[i]
+		for _, check := range r.Checks {
+			if check.Category == c.Key {
+				c.Total++
+				if check.Passed {
+					c.Passed++
+				}
+			}
+		}
+		c.Level = "unknown"
+		if c.Total > 0 {
+			c.Level = "weak"
+			if c.Passed == c.Total {
+				c.Level = "strong"
+			} else if c.Passed > 0 {
+				c.Level = "medium"
+			}
+		}
+		// Необов'язкова schema не знижує оцінку контенту.
+		if c.Key != "metadata" && c.Level != "strong" {
+			r.Level = "medium"
 		}
 	}
-	score := int(math.Round(100 * float64(passed) / float64(len(r.Checks))))
-	r.Readiness = &score
-	r.Level = "weak"
-	if score >= 75 {
-		r.Level = "strong"
-	} else if score >= 45 {
-		r.Level = "medium"
+	if r.Categories[0].Passed == 0 {
+		r.Level = "weak"
 	}
 }
 

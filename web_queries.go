@@ -20,6 +20,8 @@ const parsedPagePredicate = "r.scan_status = 'completed' AND r.status_code = 200
 const noindexPredicate = "(COALESCE(r.meta_robots, '') || ',' || COALESCE(r.x_robots_tag, '')) ~* '(^|[[:space:],:;])(noindex|none)($|[[:space:],;])'"
 
 var resultFilters = map[string]string{
+	"rendering_issues":     "r.rendering->>'status' IN ('failed','partial')",
+	"javascript_changes":   "r.rendering->'delta' @> '{\"title\":true}' OR r.rendering->'delta' @> '{\"canonical\":true}' OR r.rendering->'delta' @> '{\"text\":true}' OR r.rendering->'delta' @> '{\"links\":true}' OR r.rendering->'delta' @> '{\"description\":true}' OR r.rendering->'delta' @> '{\"robots\":true}' OR r.rendering->'delta' @> '{\"h1\":true}' OR r.rendering->'delta' @> '{\"json_ld\":true}' OR r.rendering->'delta' @> '{\"hreflang\":true}'",
 	"deep_pages":           "sc.graph_ready AND n.crawl_depth > 3",
 	"orphan_candidates":    "sc.graph_ready AND n.orphan_candidate",
 	"broken_internal":      "sc.graph_ready AND n.broken_internal_links > 0",
@@ -86,9 +88,17 @@ func parseResultQuery(v url.Values) (resultQuery, error) {
 	return q, nil
 }
 
-func reportSelectSQL() string {
+func reportSelectSQL(includeRendering ...bool) string {
 	columns := make([]string, 0, len(reportFields))
 	for _, field := range reportFields {
+		if field.Key == "rendering" && len(includeRendering) > 0 && !includeRendering[0] {
+			columns = append(columns, "NULL::JSONB AS rendering")
+			continue
+		}
+		if field.Key == "rendering_status" {
+			columns = append(columns, "CASE WHEN run.render_javascript THEN COALESCE(r.rendering->>'status','not_applicable') ELSE 'disabled' END AS rendering_status")
+			continue
+		}
 		if field.Group == "Граф сайту" {
 			if field.Key == "site_graph_ready" {
 				columns = append(columns, "sc.graph_ready AS site_graph_ready")
@@ -109,7 +119,7 @@ func reportSelectSQL() string {
 		}
 		columns = append(columns, prefix+field.Key)
 	}
-	return "SELECT " + strings.Join(columns, ",") + " FROM audit_results r JOIN audit_run_targets t USING (run_id, target_id) LEFT JOIN audit_site_nodes n USING (run_id,target_id) LEFT JOIN audit_site_crawls sc ON sc.run_id=r.run_id"
+	return "SELECT " + strings.Join(columns, ",") + " FROM audit_results r JOIN audit_runs run ON run.id=r.run_id JOIN audit_run_targets t USING (run_id, target_id) LEFT JOIN audit_site_nodes n USING (run_id,target_id) LEFT JOIN audit_site_crawls sc ON sc.run_id=r.run_id"
 }
 
 func scanReportRecord(rows pgx.Rows) (reportRecord, error) {
@@ -128,6 +138,12 @@ func scanReportRecord(rows pgx.Rows) (reportRecord, error) {
 
 // Defense in depth for imported data, including URLs embedded in metadata.
 func sanitizeReportRecord(record reportRecord) reportRecord {
+	if v, ok := record["geo_signals"].(map[string]any); ok {
+		sanitizeDiagnosticRecord(v)
+	}
+	if v, ok := record["rendering"].(map[string]any); ok {
+		sanitizeRenderingRecord(v)
+	}
 	for key, value := range record {
 		if text, ok := value.(string); ok {
 			switch key {
@@ -152,7 +168,7 @@ func loadResultPage(ctx context.Context, pool *pgxpool.Pool, id string, q result
 	if !ok {
 		return page, fmt.Errorf("unknown filter")
 	}
-	rows, err := pool.Query(ctx, "SELECT row_to_json(p) FROM ("+reportSelectSQL()+
+	rows, err := pool.Query(ctx, "SELECT row_to_json(p) FROM ("+reportSelectSQL(false)+
 		" WHERE r.run_id=$1 AND r.target_id > $2 AND ($3='' OR position(lower($3) in lower(r.safe_url)) > 0) AND ("+predicate+") ORDER BY r.target_id LIMIT $4) p",
 		id, q.After, q.Search, q.Limit+1)
 	if err != nil {
@@ -176,11 +192,11 @@ func loadResultPage(ctx context.Context, pool *pgxpool.Pool, id string, q result
 const webRunColumns = `run.id::TEXT, CASE WHEN EXISTS(SELECT 1 FROM audit_site_crawls sc WHERE sc.run_id=run.id) THEN 'site' ELSE 'list' END, run.status, run.total_urls, run.successful_urls, run.failed_urls,
 	run.started_at, run.finished_at,
 	(run.targets_captured_at IS NOT NULL AND (run.status IN ('failed','abandoned') OR
-	 (run.status='running' AND run.heartbeat_at < CURRENT_TIMESTAMP - $2::INTERVAL)))`
+	 (run.status='running' AND run.heartbeat_at < CURRENT_TIMESTAMP - $2::INTERVAL))), run.render_javascript`
 
 func scanWebRun(row pgx.Row) (webRun, error) {
 	var run webRun
-	err := row.Scan(&run.ID, &run.Mode, &run.Status, &run.Total, &run.Successful, &run.Failed, &run.StartedAt, &run.FinishedAt, &run.Resumable)
+	err := row.Scan(&run.ID, &run.Mode, &run.Status, &run.Total, &run.Successful, &run.Failed, &run.StartedAt, &run.FinishedAt, &run.Resumable, &run.RenderJavaScript)
 	return run, err
 }
 func loadWebRun(ctx context.Context, pool *pgxpool.Pool, cfg Config, id string) (webRun, error) {

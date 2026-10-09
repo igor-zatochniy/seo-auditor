@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/igor-zatochniy/seo-auditor/internal/seo"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,10 +58,11 @@ func worker(
 		}
 		start := time.Now()
 
-		allowed, err := robotsCache.isAllowedByRobots(operationCtx, robotsClient, target.RequestURL, cfg.RobotsTotalTimeout)
+		allowed, searchRules, err := robotsCache.inspectTarget(operationCtx, robotsClient, target.RequestURL, cfg.RobotsTotalTimeout)
 		if err != nil {
 			wrappedErr := fmt.Errorf("worker %d cannot verify robots.txt for %s: %s", id, target.SafeURL, sanitizeError(err))
 			result := failedScanResult(SEOData{
+				GEO:           &geo.Signals{Search: searchRules},
 				URL:           target.RequestURL,
 				RobotsAllowed: false,
 				RobotsOutcome: robotsOutcomeUnavailable,
@@ -72,6 +75,7 @@ func worker(
 		if !allowed {
 			workerLogger.Warn("Сканування URL заборонено правилами robots.txt", "target_id", target.TargetID, "url", target.SafeURL)
 			results <- Result{Target: target, Data: SEOData{
+				GEO:           &geo.Signals{Search: searchRules},
 				URL:           target.RequestURL,
 				ScanStatus:    scanStatusBlockedByRobots,
 				RobotsAllowed: false,
@@ -81,12 +85,14 @@ func worker(
 			continue
 		}
 		baseData := SEOData{
+			GEO:           &geo.Signals{Search: searchRules},
 			URL:           target.RequestURL,
 			RobotsAllowed: true,
 			RobotsOutcome: robotsOutcomeAllowed,
 		}
 
 		reqCtx, reqCancel := context.WithTimeout(operationCtx, cfg.HTTPTotalTimeout)
+		reqCtx, httpObservation := observeHTTP(reqCtx)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target.RequestURL, nil)
 		if err != nil {
 			reqCancel()
@@ -112,6 +118,7 @@ func worker(
 		}
 		baseData.XRobotsTag, baseData.XRobotsTagTruncated, baseData.XRobotsTagOriginalLength =
 			robotsHeaderDirectives(resp.Header)
+		baseData.GEO.HTTP = httpObservation(resp.StatusCode)
 
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			redirectURL := resp.Header.Get("Location")
@@ -182,6 +189,14 @@ func worker(
 		if target.DiscoverLinks {
 			parse = seo.ParsePageWithLinks
 		}
+		var capture renderCapture
+		if cfg.RenderJavaScript {
+			capture.limit = cfg.MaxHTMLBodyBytes
+			resp.Body = &capturedResponseBody{Reader: io.TeeReader(resp.Body, &capture), Closer: resp.Body}
+			parse = func(r *http.Response, u string, b, t int64) (SEOData, error) {
+				return seo.ParsePageForComparison(r, u, b, t, target.DiscoverLinks)
+			}
+		}
 		data, err := parse(
 			resp,
 			target.RequestURL,
@@ -191,6 +206,13 @@ func worker(
 		resp.Body.Close()
 		reqCancel()
 
+		if data.GEO == nil {
+			data.GEO = &geo.Signals{}
+		}
+		data.GEO.HTTP = baseData.GEO.HTTP
+		data.GEO.Search.GooglebotRules = searchRules.GooglebotRules
+		data.GEO.Search.OAISearchBotRules = searchRules.OAISearchBotRules
+		data.GEO.Search.GPTBotRules = searchRules.GPTBotRules
 		if err != nil {
 			data.RobotsAllowed = true
 			data.RobotsOutcome = robotsOutcomeAllowed
@@ -203,6 +225,15 @@ func worker(
 		}
 
 		data.ScanStatus = scanStatusCompleted
+		if cfg.RenderJavaScript {
+			data.Rendering = renderPageComparison(operationCtx, cfg, target.RequestURL, capture.Bytes(), resp.Header, data, pageClient, robotsClient, robotsCache)
+			data.Rendering.Performance = measurePagePerformance(operationCtx, cfg, target.RequestURL, pageClient, robotsClient, robotsCache)
+		}
+		if data.GEO != nil {
+			if data.Rendering != nil {
+				data.GEO.Performance = data.Rendering.Performance
+			}
+		}
 		data.RobotsAllowed = true
 		data.RobotsOutcome = robotsOutcomeAllowed
 		data.Duration = time.Since(start)
@@ -214,4 +245,9 @@ func worker(
 		case results <- Result{Target: target, Data: data}:
 		}
 	}
+}
+
+type capturedResponseBody struct {
+	io.Reader
+	io.Closer
 }

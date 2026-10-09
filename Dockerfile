@@ -26,6 +26,7 @@ WORKDIR /app
 COPY --from=builder /out/seo-auditor ./seo-auditor
 COPY LICENSE /usr/share/licenses/seo-auditor/LICENSE
 COPY internal/seo/fonts/LICENSE /usr/share/licenses/seo-auditor/LiberationSans-LICENSE
+COPY internal/render/vendor/web-vitals.LICENSE /usr/share/licenses/seo-auditor/web-vitals-LICENSE
 
 USER 10001:10001
 

@@ -1,0 +1,11 @@
+FROM chromedp/headless-shell@sha256:47e3a0c0cbef29e321d16c893cd804996243f710ca7855770dd4f9c4cd2b8627
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libpcre2-8-0=10.46-1~deb13u3 \
+      libssl3t64=3.5.7-1~deb13u3 \
+      openssl-provider-legacy=3.5.7-1~deb13u3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY render-browser.sh /usr/local/bin/render-browser.sh
+ENV HOME=/tmp
+USER 10001:10001
+ENTRYPOINT ["/bin/bash", "/usr/local/bin/render-browser.sh"]
+CMD ["--user-data-dir=/tmp/chromium", "--proxy-server=http://127.0.0.1:9", "--proxy-bypass-list=<-loopback>", "--host-resolver-rules=MAP * ~NOTFOUND", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-quic", "--disable-background-networking", "--disable-extensions", "--disable-sync", "--no-first-run"]

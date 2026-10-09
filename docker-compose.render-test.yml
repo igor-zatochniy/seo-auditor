@@ -1,0 +1,23 @@
+# Лише тестовий CDP-тунель; для звичайного запуску використовуйте docker-compose.render.yml.
+services:
+  browser:
+    extends:
+      file: docker-compose.render.yml
+      service: browser
+  cdp-proxy:
+    image: seo-auditor-browser:local
+    entrypoint: ["socat"]
+    command: ["TCP4-LISTEN:9222,fork", "TCP4:browser:9222"]
+    ports:
+      - "127.0.0.1:9224:9222"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      browser:
+        condition: service_healthy
+    networks: [render-isolated, test-control]
+networks:
+  render-isolated:
+    internal: true
+  test-control:

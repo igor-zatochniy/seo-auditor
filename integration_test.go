@@ -2197,6 +2197,19 @@ func TestMigrationsUpgradeEverySupportedSchemaVersion(t *testing.T) {
 
 			runID := fmt.Sprintf("10000000-0000-4000-8000-%012d", startingVersion)
 			seedMigrationUpgradeFixture(t, ctx, migrationDB, startingVersion, runID)
+			if startingVersion == 15 {
+				if _, err := migrationDB.ExecContext(ctx, `INSERT INTO geo_reports(id,source_run_id,request_hash,domain,model,query_count,page_count,matched_count,ambiguous_count)
+					VALUES ($1,$1,decode(repeat('11',32),'hex'),'example.com','local-lexical-v1',1,1,1,0)`, runID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := migrationDB.ExecContext(ctx, `INSERT INTO geo_query_results(report_id,ordinal,result) VALUES ($1,1,'{"readiness":75}')`, runID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := migrationDB.ExecContext(ctx, `INSERT INTO geo_citation_checks(report_id,ordinal,engine,citation,brand_mention,note,checked_at)
+					VALUES ($1,1,'chatgpt','yes','unknown','Попередній доказ','2026-01-01T12:00:00Z')`, runID); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			if err := applySchemaMigrationsDB(ctx, migrationDB); err != nil {
 				t.Fatalf("upgrade schema version %d to current: %v", startingVersion, err)
@@ -2207,6 +2220,14 @@ func TestMigrationsUpgradeEverySupportedSchemaVersion(t *testing.T) {
 			}
 			if version != requiredSchemaVersion {
 				t.Fatalf("upgraded schema version = %d, want %d", version, requiredSchemaVersion)
+			}
+			if startingVersion == 15 {
+				var preserved bool
+				if err := migrationDB.QueryRowContext(ctx, `SELECT count(*)=1 AND bool_and(o.note=c.note AND o.checked_at=c.checked_at AND q.result='{"readiness":75}'::jsonb)
+					FROM geo_citation_observations o JOIN geo_citation_checks c USING(report_id,ordinal,engine)
+					JOIN geo_query_results q USING(report_id,ordinal) WHERE o.report_id=$1`, runID).Scan(&preserved); err != nil || !preserved {
+					t.Fatalf("Міграція змінила попередній GEO-звіт або дату: %v", err)
+				}
 			}
 			var legacySignalsUnknown bool
 			if err := migrationDB.QueryRowContext(ctx, "SELECT geo_signals IS NULL FROM audit_results WHERE run_id=$1", runID).Scan(&legacySignalsUnknown); err != nil || !legacySignalsUnknown {

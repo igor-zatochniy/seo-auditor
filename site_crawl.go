@@ -91,8 +91,8 @@ func createSiteAuditRun(ctx context.Context, pool *pgxpool.Pool, cfg *Config, op
 		return err
 	}
 	defer rollbackSiteTransaction(tx, *cfg)
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_runs(id,started_at,heartbeat_at,worker_instance_id,owner_generation,status,targets_captured_at,total_urls)
-		VALUES($1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,$2,1,'running',CURRENT_TIMESTAMP,1)`, cfg.RunID, effectiveWorkerInstanceID(*cfg)); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_runs(id,started_at,heartbeat_at,worker_instance_id,owner_generation,status,targets_captured_at,total_urls,render_javascript)
+		VALUES($1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,$2,1,'running',CURRENT_TIMESTAMP,1,$3)`, cfg.RunID, effectiveWorkerInstanceID(*cfg), cfg.RenderJavaScript); err != nil {
 		return err
 	}
 	state := "pending"

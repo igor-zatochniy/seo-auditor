@@ -51,7 +51,7 @@ func TestMappingGapsAndUnknownEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if results[0].TargetID == nil || *results[0].TargetID != 1 || results[0].Coverage != 100 || results[0].Readiness == nil {
+	if results[0].TargetID == nil || *results[0].TargetID != 1 || results[0].Coverage != 100 || len(results[0].Categories) != 3 || results[0].Readiness != nil {
 		t.Fatalf("Хибне зіставлення: %+v", results[0])
 	}
 	if results[1].Readiness != nil || len(results[1].Warnings) == 0 {
@@ -62,6 +62,28 @@ func TestMappingGapsAndUnknownEvidence(t *testing.T) {
 	}
 	if results[3].Intent != "commercial" || len(results[3].Checks) != 7 || results[3].SharedQueries != 2 {
 		t.Fatal("Не збережено пояснення комерційного запиту")
+	}
+}
+
+func TestGEOCategoriesAndSearchRulesStayIndependent(t *testing.T) {
+	s := &Signals{Version: 2, Complete: true, ContentSource: "main", FirstParagraph: "payment protection", HasList: true, HasAuthor: true,
+		Search: SearchControls{GooglebotRules: Blocked, OAISearchBotRules: Allowed, GoogleIndexing: Allowed, GoogleSnippet: Blocked}}
+	page := Page{TargetID: 1, Title: "payment protection", H1Count: 1, ExternalLinks: 1, Signals: s}
+	results, err := Analyze(context.Background(), []string{"payment protection"}, []Page{page})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if r.Readiness != nil || r.Level != "strong" || r.Categories[2].Passed != 0 || r.Search.GooglebotRules != Blocked || r.Search.OAISearchBotRules != Allowed || len(r.Warnings) == 0 {
+		t.Fatalf("Правила або необов'язкова schema змінили оцінку контенту: %+v", r)
+	}
+	if len(r.Gaps) != 0 {
+		t.Fatal("Необов'язкова розмітка подана як прогалина")
+	}
+	s.ContentIncomplete = true
+	results, err = Analyze(context.Background(), []string{"payment protection"}, []Page{page})
+	if err != nil || len(results[0].Categories) != 0 || results[0].Level != "unknown" {
+		t.Fatal("Неповний контент отримав оцінку")
 	}
 }
 

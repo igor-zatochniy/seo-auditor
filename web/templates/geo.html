@@ -6,6 +6,7 @@
   <title>Готовність до GEO · SEO Auditor</title>
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/geo.css">
+  <script src="/static/diagnostics.js" defer></script>
   <script src="/static/geo.js" defer></script>
   <script src="/static/dialogs.js" defer></script>
 </head>
@@ -36,11 +37,13 @@
       <div class="input-footer"><span id="geo-page-label" class="muted"></span><div class="actions"><button id="geo-prev" title="Попередня сторінка" aria-label="Попередня сторінка">←</button><button id="geo-next" title="Наступна сторінка" aria-label="Наступна сторінка">→</button></div></div>
     </section>
     <details class="geo-method"><summary>Методика та межі достовірності</summary><dl>
-      <dt>Джерело</dt><dd>Збережені успішні HTML-сторінки одного завершеного SEO-аудиту, до 1000 сторінок. Свіжість дорівнює даті сканування. JavaScript не виконується.</dd>
+      <dt>Джерело</dt><dd>Збережені успішні HTML-сторінки одного завершеного SEO-аудиту, до 1000 сторінок. Контентні сигнали беруться з початкового HTML, не з виконаного JavaScript. Опційні лабораторні LCP/CLS зберігаються окремо. Свіжість дорівнює даті сканування.</dd>
       <dt>Зіставлення</dt><dd>Точні нормалізовані терміни без стоп-слів: title, H1, опис, шлях URL, заголовки та перші 2000 символів тексту. Кандидат потребує щонайменше 50% збігів. Синоніми, відмінки та переклад не моделюються.</dd>
-      <dt>Готовність</dt><dd>Частка виявлених структурних сигналів: перший абзац із термінами запиту, H1, список або таблиця, авторство, зовнішні посилання, розпізнана JSON-LD. Для порівняльного наміру додається перевірка таблиці. ≥75% — сильні; ≥45% — часткові; нижче — слабкі сигнали. Це не фактори ранжування та не гарантія цитування.</dd>
+      <dt>Контент</dt><dd>Пріоритет main / role="main", далі article, інакше body без явної навігації, бічних блоків та прихованих елементів. Header і footer усередині основного блоку або статті зберігаються. CSS та JavaScript не виконуються.</dd>
+      <dt>Категорії</dt><dd>Структура відповіді, авторство та посилання, необов'язкова розмітка оцінюються окремо: виявлені / перевірені сигнали. Єдиного відсотка GEO немає. Schema не є спеціальною вимогою для AI-відповідей. Старі звіти зберігають попередню методику.</dd>
+      <dt>Пошукові боти</dt><dd>Дозволено правилами / заборонено / не перевірено стосується лише robots.txt та прочитаних директив. Це не підтверджує індексацію чи AI-цитування. OAI-SearchBot використовується для пошуку; блокування GPTBot для навчання не знижує оцінку ChatGPT Search.</dd>
       <dt>Неповні дані</dt><dd>Старі аудити без сигналів контенту не отримують оцінки готовності. Невідоме не означає відсутнє. Невдалий збіг не доводить, що на сайті немає сторінки.</dd>
-      <dt>AI-цитування</dt><dd>Лише ручні спостереження з датою, системою та доказами. Вони не підтверджують загальну видимість бренду. Останнє спостереження для кожної системи замінює попереднє.</dd>
+      <dt>AI-цитування</dt><dd>Лише ручні спостереження з датою, системою та доказами. Нові перевірки доповнюють історію; таблиця й CSV показують останнє спостереження кожної системи. Це не автоматичний моніторинг.</dd>
     </dl></details>
     <section id="geo-history-section"><div class="section-heading"><h2>Останні GEO-звіти</h2><button id="refresh-history" title="Оновити список">Оновити</button></div><div id="geo-history" class="history-list"></div></section>
   </main>
@@ -48,6 +51,7 @@
     <h3>Ручна перевірка AI-цитування</h3>
     <form id="citation-form"><div class="geo-form-grid"><label>AI-система<select id="citation-engine"><option value="google_ai">Google AI Overviews</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="perplexity">Perplexity</option><option value="other">Інша система</option></select></label><label>Цитування домену<select id="citation-value"><option value="unknown">Не перевірено</option><option value="yes">Так</option><option value="no">Не виявлено</option></select></label><label>Згадка бренду<select id="mention-value"><option value="unknown">Не перевірено</option><option value="yes">Так</option><option value="no">Не виявлено</option></select></label></div>
     <label>Посилання на доказ<input type="url" id="evidence-url" maxlength="2048" placeholder="https://..."></label><label>Нотатка або уривок відповіді<textarea id="citation-note" rows="3" maxlength="2000"></textarea></label><div class="input-footer"><span id="citation-status" role="status" class="muted"></span><button id="save-citation" class="primary">Зберегти спостереження</button></div></form>
+    <h3>Історія ручних спостережень</h3><div id="observation-history"></div><button id="history-more" type="button" hidden>Раніші спостереження</button>
   </dialog>
 </body>
 </html>

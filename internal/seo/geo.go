@@ -10,22 +10,35 @@ import (
 )
 
 type geoCollector struct {
-	content, headings, paragraph          boundedTextCollector
-	paragraphSeen, inParagraph, inHeading bool
-	jsonLD                                bool
-	jsonText                              []byte
-	jsonBytes                             int
-	types                                 map[string]bool
-	signals                               geo.Signals
+	regions               [3]geoRegion
+	state                 geoContentState
+	stack                 []geoFrame
+	mainSeen, articleSeen bool
+	jsonLD                bool
+	jsonText              []byte
+	jsonBytes             int
+	types                 map[string]bool
+	signals               geo.Signals
 }
 
 func newGEOCollector() geoCollector {
-	return geoCollector{content: newBoundedTextCollector(2000), headings: newBoundedTextCollector(800),
-		paragraph: newBoundedTextCollector(600), types: make(map[string]bool)}
+	g := geoCollector{types: make(map[string]bool)}
+	for i := range g.regions {
+		g.regions[i] = geoRegion{content: newBoundedTextCollector(2000), headings: newBoundedTextCollector(800), paragraph: newBoundedTextCollector(600)}
+	}
+	g.signals.Search = geo.SearchControls{GooglebotRules: geo.Unknown, OAISearchBotRules: geo.Unknown, GoogleIndexing: geo.Allowed, GoogleSnippet: geo.Allowed}
+	return g
 }
 
 func (p *pageParser) geoStart(name []byte, attrs tagAttributes) {
 	g := &p.geo
+	if p.shadowRootDepth == 0 && bytes.Equal(name, []byte("meta")) && attrs.hasName && attrs.hasContent &&
+		(bytes.EqualFold(bytes.TrimSpace(attrs.name), []byte("robots")) || bytes.EqualFold(bytes.TrimSpace(attrs.name), []byte("googlebot"))) {
+		g.readGoogleDirectives(string(attrs.content))
+	}
+	if attrs.dataNoSnippet && (bytes.Equal(name, []byte("div")) || bytes.Equal(name, []byte("span")) || bytes.Equal(name, []byte("section"))) {
+		g.signals.Search.DataNoSnippet = true
+	}
 	if p.inDocumentHead() && bytes.Equal(name, []byte("meta")) && attrs.hasName &&
 		bytes.EqualFold(attrs.name, []byte("author")) && len(bytes.TrimSpace(attrs.content)) > 0 {
 		g.signals.HasAuthor = true
@@ -38,34 +51,30 @@ func (p *pageParser) geoStart(name []byte, attrs tagAttributes) {
 	if p.documentPhase != documentPhaseBody || p.ignoredTextDepth > 0 {
 		return
 	}
-	switch string(name) {
-	case "p":
-		if !g.paragraphSeen {
-			g.paragraphSeen = true
-			g.inParagraph = true
-		}
-	case "h1", "h2", "h3", "h4", "h5", "h6":
-		g.inHeading = true
-		g.headings.Write([]byte(" "))
-	case "table":
-		g.signals.HasTable = true
-	case "ul", "ol":
-		g.signals.HasList = true
-	case "a":
-		if attrs.hasRel && hasTokenFold(attrs.rel, []byte("author")) {
-			g.signals.HasAuthor = true
-		}
-	}
+	g.startContent(name, attrs)
 }
 
 func (g *geoCollector) text(text []byte) {
-	g.content.Write(text)
-	g.content.Write([]byte(" "))
-	if g.inHeading {
-		g.headings.Write(text)
+	if g.state.excluded || g.signals.ContentIncomplete {
+		return
 	}
-	if g.inParagraph {
-		g.paragraph.Write(text)
+	for i := range g.regions {
+		if !g.regionActive(i) {
+			continue
+		}
+		r := &g.regions[i]
+		r.content.Write(text)
+		r.content.Write([]byte(" "))
+		if g.state.heading {
+			r.headings.Write(text)
+			r.headingText.write(text)
+		}
+		if r.blockActive {
+			r.block.write(text)
+		}
+		if r.inParagraph {
+			r.paragraph.Write(text)
+		}
 	}
 }
 
@@ -85,18 +94,14 @@ func (g *geoCollector) scriptText(text []byte) {
 }
 
 func (g *geoCollector) end(name []byte) {
-	switch string(name) {
-	case "p":
-		g.inParagraph = false
-	case "h1", "h2", "h3", "h4", "h5", "h6":
-		g.inHeading = false
-	case "script":
+	if string(name) == "script" {
 		if g.jsonLD {
 			g.parseSchema()
 		}
 		g.jsonLD = false
 		g.jsonText = nil
 	}
+	g.endContent(name)
 }
 
 func (g *geoCollector) parseSchema() {
@@ -152,13 +157,25 @@ func (g *geoCollector) parseSchema() {
 
 func (g *geoCollector) result() *geo.Signals {
 	s := g.signals
-	s.Version, s.Complete = 1, true
+	s.Version, s.Complete = 2, true
+	index := 0
+	s.ContentSource = "body"
+	if g.mainSeen {
+		index, s.ContentSource = 1, "main"
+	} else if g.articleSeen {
+		index, s.ContentSource = 2, "article"
+	}
+	r := &g.regions[index]
+	r.finishBlock()
+	s.Blocks = &geo.BlockSample{Count: r.blockCount, Complete: !s.ContentIncomplete && r.blockCount <= maxGEOBlocks, Items: r.blocks}
+	s.HasList, s.HasTable = r.hasList, r.hasTable
+	s.HasAuthor = s.HasAuthor || r.hasAuthor
 	var clipped bool
-	s.Excerpt, clipped, _ = g.content.Result()
+	s.Excerpt, clipped, _ = r.content.Result()
 	s.SampleTruncated = clipped
-	s.Headings, clipped, _ = g.headings.Result()
+	s.Headings, clipped, _ = r.headings.Result()
 	s.SampleTruncated = s.SampleTruncated || clipped
-	s.FirstParagraph, _, _ = g.paragraph.Result()
+	s.FirstParagraph, _, _ = r.paragraph.Result()
 	s.SchemaTypes = make([]string, 0, len(g.types))
 	for typ := range g.types {
 		s.SchemaTypes = append(s.SchemaTypes, typ)

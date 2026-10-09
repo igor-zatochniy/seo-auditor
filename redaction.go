@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"net/url"
 	"regexp"
 	"strings"
@@ -130,11 +131,28 @@ func sanitizeError(err error) string {
 }
 
 func sanitizeSEODataForStorage(data SEOData) SEOData {
+	if data.Rendering != nil {
+		data.Rendering.Sanitize(func(v string) string { return sanitizeGEOTextForStorage(v, 8192) }, redactURL)
+	}
 	if data.GEO != nil {
 		signals := *data.GEO
 		signals.Excerpt = sanitizeGEOTextForStorage(signals.Excerpt, 2000)
 		signals.Headings = sanitizeGEOTextForStorage(signals.Headings, 800)
 		signals.FirstParagraph = sanitizeGEOTextForStorage(signals.FirstParagraph, 600)
+		if signals.Blocks != nil {
+			copy := *signals.Blocks
+			copy.Items = append([]geo.TextBlock(nil), copy.Items...)
+			for i := range copy.Items {
+				copy.Items[i].Text = sanitizeGEOTextForStorage(copy.Items[i].Text, 500)
+				copy.Items[i].Heading = sanitizeGEOTextForStorage(copy.Items[i].Heading, 200)
+			}
+			signals.Blocks = &copy
+		}
+		if signals.Performance != nil {
+			copy := *signals.Performance
+			copy.Error = sanitizeGEOTextForStorage(copy.Error, 1000)
+			signals.Performance = &copy
+		}
 		data.GEO = &signals
 	}
 	data.URL = redactURL(data.URL)

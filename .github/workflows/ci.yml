@@ -130,6 +130,37 @@ jobs:
       - name: Run integration tests
         run: go test -tags=integration -count=1 ./...
 
+      - name: Start isolated rendering browser
+        run: docker compose -p render-tests -f docker-compose.render-test.yml up -d --build --wait
+
+      - name: Verify rendering through Compose service DNS
+        run: |
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/render.test" ./internal/render
+          chmod 755 "$RUNNER_TEMP/render.test"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --network render-tests_render-isolated \
+            --env RENDER_TEST_BROWSER_URL=http://browser:9222 \
+            --volume "$RUNNER_TEMP/render.test:/tmp/render.test:ro" \
+            --entrypoint /tmp/render.test seo-auditor:ci \
+            -test.v -test.run '^TestBrowserUsesCapturedHTMLAndBroker$'
+
+      - name: Test JavaScript rendering and persistence
+        env:
+          RENDER_TEST_BROWSER_URL: http://127.0.0.1:9224
+        run: go test -p 1 -race -tags=integration -run 'TestRendering|TestBrowser|TestLab|TestMalformedDebugger|TestRenderComparison|TestComparison' -count=1 ./...
+
+      - name: Scan rendering browser image
+        run: >-
+          docker run --rm
+          --volume /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.65.0@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
+          image --format table --exit-code 1 --ignore-unfixed
+          --severity HIGH,CRITICAL --skip-version-check --timeout 15m seo-auditor-browser:local
+
+      - name: Stop rendering test browser
+        if: always()
+        run: docker compose -p render-tests -f docker-compose.render-test.yml down
+
       - name: Stress test PostgreSQL ownership and shutdown
         if: github.event_name == 'workflow_dispatch' && inputs.freeze_evidence
         shell: bash

@@ -7,10 +7,13 @@
   const runID = location.pathname.match(/^\/audits\/([a-f0-9-]{36})$/i)?.[1];
   defaults.push("html_raw_bytes", "googlebot_2mb_status");
   filters.googlebot_size_risk = "Googlebot: HTML ≥2 MiB";
+	defaults.push("rendering_status");
+	filters.rendering_issues="JavaScript: неповна перевірка";
+	filters.javascript_changes="Зміни після JavaScript";
   Object.assign(filters,{deep_pages:"Понад 3 кліки",orphan_candidates:"Orphan candidates",broken_internal:"Биті внутрішні посилання",redirecting_internal:"Внутрішні редиректи"});
   let fields = [], columns = defaults.slice(), rows = [], cursors = [""], next = "", historyNext = "", historyCursor = "", pollTimer, refreshCount = 0, lastStatus = "", resultRequest = 0;
   const notice = message => { $("notice").textContent = message; $("notice").hidden = !message; };
-  const text = value => value == null || value === "" ? "—" : typeof value === "boolean" ? (value ? "Так" : "Ні") : String(value);
+  const text = value => value == null || value === "" ? "—" : typeof value === "boolean" ? (value ? "Так" : "Ні") : typeof value === "object" ? "Докладніше у звіті сторінки" : String(value);
   const el = (tag, value, cls) => { const node = document.createElement(tag); if(value != null) node.textContent = value; if(cls) node.className = cls; return node; };
   const statusBadge = status => el("span", labels[status] || status, "badge " + (status === "completed" ? "success" : status === "failed" ? "error" : ["redirect","blocked_by_robots","completed_with_errors","abandoned"].includes(status) ? "warning" : ""));
   const metricStatusKeys = new Set(["title_status", "description_status", "description_mobile_status"]);
@@ -51,6 +54,7 @@
     event.preventDefault(); notice(""); $("submit").disabled=true;
     const site=document.querySelector('input[name="mode"]:checked').value==="site";
     const body=site?{mode:"site",site:{root_url:$("root-url").value,max_pages:Number($("max-pages").value),max_depth:Number($("max-depth").value),use_sitemaps:$("use-sitemaps").checked}}:{urls:$("urls").value};
+	body.render_javascript=$("render-javascript").checked;
     try { const run = await api("/api/audits",body); $("urls").value=""; location.assign("/audits/"+run.id); }
     catch(error) { notice(error.message); $("submit").disabled=false; }
   }
@@ -108,16 +112,24 @@
     const body=$("results-table").querySelector("tbody"); body.replaceChildren();
     for(const record of rows) {
       const row=el("tr"); row.tabIndex=0;
-      for(const field of selected) { const td=el("td"); td.append(field.key==="scan_status" ? statusBadge(record[field.key]) : metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : el("span",text(record[field.key]),"cell-text")); row.append(td); }
+      for(const field of selected) { const td=el("td"); td.append(field.key==="rendering_status" ? window.seoRendering.badge(record[field.key]) : field.key==="rendering" ? el("span",["completed","partial","failed"].includes(record.rendering_status) ? "HTML → DOM" : "—") : field.key==="scan_status" ? statusBadge(record[field.key]) : metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : el("span",text(record[field.key]),"cell-text")); row.append(td); }
       row.addEventListener("click",()=>details(record)); row.addEventListener("keydown",e=>{if(e.key==="Enter") details(record);}); body.append(row);
     }
     if(!rows.length) { const row=el("tr"),td=el("td","Результатів за цим фільтром немає","empty"); td.colSpan=Math.max(1,selected.length); row.append(td); body.append(row); }
   }
-  function details(record) {
+	let detailRequest=0;
+  async function details(record) {
+	const serial=++detailRequest;
     $("detail-url").textContent=text(record.safe_url); const content=$("detail-content"); content.replaceChildren();
     let group="",list;
-    for(const field of fields) { if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : document.createTextNode(text(record[field.key]))); list.append(el("dt",field.label),value); }
+    for(const field of fields) { if(field.key==="rendering"||field.key==="rendering_status"||field.key==="geo_signals")continue; if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : document.createTextNode(text(record[field.key]))); list.append(el("dt",field.label),value); }
+	content.append(window.seoDiagnostics.details(record.geo_signals));
+	const rendering=window.seoRendering.details(record);content.prepend(rendering);
     $("details-dialog").showModal();
+	if(["completed","partial","failed"].includes(record.rendering_status)) {
+	 try {const data=await api(`/api/audits/${runID}/results/${encodeURIComponent(record.target_id)}/rendering`);if(serial===detailRequest&&$("details-dialog").open)rendering.replaceWith(window.seoRendering.details({...record,rendering:data}));}
+	 catch(error){if(serial===detailRequest)rendering.append(el("p",error.message,"error"));}
+	}
   }
   function columnOptions() {
     const container=$("column-options"); container.replaceChildren();
@@ -163,6 +175,8 @@
     const fragment=new URLSearchParams(location.hash.slice(1)); const token=fragment.get("access_token");
     if(token) { window.history.replaceState(null,"",location.pathname+location.search); await api("/api/session",{},token); }
     const schema=await api("/api/schema"); fields=schema.fields;
+	$("render-javascript").disabled=!schema.rendering_available;
+	$("render-availability").textContent=schema.rendering_available?"":"Chromium не налаштовано";
     try{const saved=JSON.parse(localStorage.getItem("seo-columns"));if(Array.isArray(saved)&&saved.length) columns=saved.filter(key=>fields.some(f=>f.key===key));}catch{}
     if(!columns.length) columns=defaults.slice();
     $("limit-label").textContent="До "+schema.max_urls.toLocaleString("uk-UA")+" URL";

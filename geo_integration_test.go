@@ -99,7 +99,10 @@ func TestGEOStoredAuditMappingAndCitation(t *testing.T) {
 		app.handler().ServeHTTP(w, r)
 		return w
 	}
-	w := request("POST", "/api/geo/reports/"+report.ID+"/queries/1/citation", `{"engine":"chatgpt","citation":"yes","brand_mention":"yes","evidence_url":"https://example.com/share?token=private-value","note":"Ручний доказ"}`)
+	observationID := newWebRunID()
+	observationBody := fmt.Sprintf(`{"id":%q,"engine":"chatgpt","citation":"yes","brand_mention":"yes","evidence_url":"https://example.com/share?token=private-value","note":"Ручний доказ"}`, observationID)
+	endpoint := "/api/geo/reports/" + report.ID + "/queries/1/citation"
+	w := request("POST", endpoint, observationBody)
 	if w.Code != 200 || strings.Contains(w.Body.String(), "private-value") {
 		t.Fatalf("Спостереження: %d %s", w.Code, w.Body.String())
 	}
@@ -113,6 +116,43 @@ func TestGEOStoredAuditMappingAndCitation(t *testing.T) {
 	w = request("GET", "/api/geo/reports/"+report.ID+"/export/csv", "")
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "Ручний доказ") {
 		t.Fatal("Ручне спостереження не експортовано")
+	}
+	// Повтор доставки не створює нове спостереження і не відновлює старий latest.
+	if w = request("POST", endpoint, observationBody); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if w = request("POST", endpoint, `{"engine":"chatgpt","citation":"no","brand_mention":"no","note":"Наступна перевірка"}`); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if w = request("POST", endpoint, observationBody); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	if w = request("POST", endpoint, strings.Replace(observationBody, "Ручний доказ", "Змінений доказ", 1)); w.Code != 409 {
+		t.Fatal("ID спостереження перезаписано")
+	}
+	w = request("GET", "/api/geo/reports/"+report.ID+"/queries/1/observations", "")
+	var history struct {
+		Items []geoCitation `json:"items"`
+		Next  int64         `json:"next"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &history) != nil || len(history.Items) != 2 || history.Items[0].Note != "Наступна перевірка" || history.Items[1].ID != observationID {
+		t.Fatalf("Історію втрачено: %s", w.Body.String())
+	}
+	w = request("GET", "/api/geo/reports/"+report.ID, "")
+	if json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Rows[0].Citations[0].Citation != "no" {
+		t.Fatal("Повтор старого запиту перезаписав останню перевірку")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO geo_citation_observations(id,report_id,ordinal,engine,citation,brand_mention)
+		SELECT gen_random_uuid(),$1,1,'chatgpt','unknown','unknown' FROM generate_series(1,55)`, report.ID); err != nil {
+		t.Fatal(err)
+	}
+	w = request("GET", "/api/geo/reports/"+report.ID+"/queries/1/observations", "")
+	if json.Unmarshal(w.Body.Bytes(), &history) != nil || len(history.Items) != 50 || history.Next == 0 {
+		t.Fatal("Історія не обмежена сторінкою")
+	}
+	w = request("GET", fmt.Sprintf("/api/geo/reports/%s/queries/1/observations?before=%d", report.ID, history.Next), "")
+	if json.Unmarshal(w.Body.Bytes(), &history) != nil || len(history.Items) != 7 || history.Next != 0 {
+		t.Fatal("Пагінація загубила спостереження")
 	}
 	var count int
 	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM audit_results WHERE run_id=$1", cfg.RunID).Scan(&count); err != nil || count != 1 {

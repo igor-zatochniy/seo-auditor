@@ -43,12 +43,24 @@ func createAuditRun(ctx context.Context, dbPool *pgxpool.Pool, cfg *Config) erro
 	}
 
 	var ownerGeneration int64
+	var savedRendering bool
+	readCtx, stopRead := context.WithTimeout(ctx, effectiveDBFetchTimeout(*cfg))
+	readErr := dbPool.QueryRow(readCtx, "SELECT render_javascript FROM audit_runs WHERE id=$1", cfg.RunID).Scan(&savedRendering)
+	stopRead()
+	if readErr == nil {
+		cfg.RenderJavaScript = savedRendering
+	} else if !errors.Is(readErr, pgx.ErrNoRows) {
+		return readErr
+	}
+	if err := validateRendering(*cfg); err != nil {
+		return err
+	}
 	err := withDBMutationRetry(ctx, *cfg, "acquire_audit_run", func(queryCtx context.Context) error {
 		scanErr := dbPool.QueryRow(
 			queryCtx,
 			`INSERT INTO audit_runs (
-			     id, started_at, heartbeat_at, worker_instance_id, owner_generation, status
-			 ) VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $2, 1, $3)
+			     id, started_at, heartbeat_at, worker_instance_id, owner_generation, status, render_javascript
+			 ) VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $2, 1, $3, $6)
 			 ON CONFLICT (id) DO UPDATE
 			 SET finished_at = NULL,
 			     heartbeat_at = CURRENT_TIMESTAMP,
@@ -62,6 +74,7 @@ func createAuditRun(ctx context.Context, dbPool *pgxpool.Pool, cfg *Config) erro
 			auditRunStatusRunning,
 			auditRunStatusAbandoned,
 			auditRunStatusFailed,
+			cfg.RenderJavaScript,
 		).Scan(&ownerGeneration)
 		if scanErr == pgx.ErrNoRows {
 			return fmt.Errorf("audit run %s already exists and is not resumable", cfg.RunID)

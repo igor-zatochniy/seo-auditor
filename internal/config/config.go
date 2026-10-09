@@ -65,6 +65,9 @@ var (
 )
 
 type Config struct {
+	RenderJavaScript          bool
+	RenderBrowserURL          string
+	RenderTimeout             time.Duration
 	RunID                     string
 	WorkerInstanceID          string
 	OwnerGeneration           int64
@@ -321,7 +324,25 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	renderURL := strings.TrimSpace(os.Getenv("RENDER_BROWSER_URL"))
+	renderEnabled, err := boolFromEnv("RENDER_JAVASCRIPT", false)
+	if err != nil {
+		return Config{}, err
+	}
+	renderTimeout, err := durationFromEnv("RENDER_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if renderTimeout < 5*time.Second || renderTimeout > time.Minute {
+		return Config{}, fmt.Errorf("RENDER_TIMEOUT must be between 5s and 1m")
+	}
+	if renderEnabled && renderURL == "" {
+		return Config{}, fmt.Errorf("RENDER_BROWSER_URL is required for JavaScript rendering")
+	}
 	return Config{
+		RenderJavaScript:          renderEnabled,
+		RenderBrowserURL:          renderURL,
+		RenderTimeout:             renderTimeout,
 		RunID:                     runID,
 		WorkerInstanceID:          workerInstanceID,
 		TargetFingerprintKey:      targetFingerprintKey,

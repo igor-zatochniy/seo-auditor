@@ -96,7 +96,7 @@ func (s *webServer) handler() http.Handler {
 		writeWebJSON(w, 200, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("GET /api/schema", func(w http.ResponseWriter, r *http.Request) {
-		writeWebJSON(w, 200, map[string]any{"fields": reportFields, "max_urls": s.web.MaxURLs})
+		writeWebJSON(w, 200, map[string]any{"fields": reportFields, "max_urls": s.web.MaxURLs, "rendering_available": s.cfg.RenderBrowserURL != ""})
 	})
 	mux.HandleFunc("GET /api/audits", s.history)
 	mux.HandleFunc("POST /api/audits", s.submit)
@@ -104,6 +104,7 @@ func (s *webServer) handler() http.Handler {
 	mux.HandleFunc("GET /api/audits/{id}/progress", s.progress)
 	mux.HandleFunc("GET /api/audits/{id}/analytics", s.analytics)
 	mux.HandleFunc("GET /api/audits/{id}/results", s.results)
+	mux.HandleFunc("GET /api/audits/{id}/results/{target}/rendering", s.renderingDetail)
 	mux.HandleFunc("GET /api/audits/{id}/graph", s.graph)
 	mux.HandleFunc("POST /api/audits/{id}/cancel", s.cancel)
 	mux.HandleFunc("POST /api/audits/{id}/resume", s.resume)

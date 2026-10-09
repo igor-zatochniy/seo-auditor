@@ -37,6 +37,10 @@ func reportValue(v any) string {
 	if v == nil {
 		return ""
 	}
+	switch v.(type) {
+	case map[string]any, []any:
+		return structuredReportValue(v)
+	}
 	return fmt.Sprint(v)
 }
 
@@ -76,6 +80,14 @@ type reportDetail struct{ Label, Value, Group string }
 func recordDetails(record reportRecord) []reportDetail {
 	fields := make([]reportDetail, 0, len(reportFields))
 	for _, f := range reportFields {
+		if f.Key == "geo_signals" {
+			fields = append(fields, diagnosticReportDetails(record[f.Key])...)
+			continue
+		}
+		if f.Key == "rendering" {
+			fields = append(fields, renderingReportDetails(record[f.Key])...)
+			continue
+		}
 		fields = append(fields, reportDetail{f.Label, reportValue(record[f.Key]), f.Group})
 	}
 	return fields

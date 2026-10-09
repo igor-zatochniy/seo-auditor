@@ -28,7 +28,7 @@ func TestGEOStorageSanitizesNullWithoutChangingSEOData(t *testing.T) {
 
 func TestGEOUsesExistingAPISecurity(t *testing.T) {
 	h := testWebApp().handler()
-	for _, path := range []string{"/api/geo/sources", "/api/geo/reports", "/api/geo/reports/00000000-0000-4000-8000-000000000001"} {
+	for _, path := range []string{"/api/geo/sources", "/api/geo/reports", "/api/geo/reports/00000000-0000-4000-8000-000000000001", "/api/geo/reports/00000000-0000-4000-8000-000000000001/queries/1/observations"} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("GET", "http://127.0.0.1:8080"+path, nil))
 		if w.Code != 401 {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
+	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	robotsparser "github.com/igor-zatochniy/seo-auditor/internal/robots"
 )
 
@@ -21,9 +22,12 @@ const (
 )
 
 type robotsPolicy struct {
-	allowAll bool
-	compiled *robotsparser.Policy
-	sitemaps []string
+	allowAll     bool
+	compiled     *robotsparser.Policy
+	googlebot    *robotsparser.Policy
+	oaiSearchBot *robotsparser.Policy
+	gptBot       *robotsparser.Policy
+	sitemaps     []string
 }
 
 func (p robotsPolicy) allows(target *url.URL) bool {
@@ -49,6 +53,8 @@ func (p robotsPolicy) estimatedMemoryBytes() int64 {
 		return 0
 	}
 	weight := p.compiled.EstimatedMemoryBytes()
+	weight += p.googlebot.EstimatedMemoryBytes() + p.oaiSearchBot.EstimatedMemoryBytes()
+	weight += p.gptBot.EstimatedMemoryBytes()
 	for _, location := range p.sitemaps {
 		weight += int64(len(location) + 32)
 	}
@@ -125,14 +131,20 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 	targetURL string,
 	totalTimeout time.Duration,
 ) (bool, error) {
+	allowed, _, err := c.inspectTarget(ctx, client, targetURL, totalTimeout)
+	return allowed, err
+}
+
+func (c *robotsPolicyCache) inspectTarget(ctx context.Context, client *http.Client, targetURL string, totalTimeout time.Duration) (bool, geo.SearchControls, error) {
+	search := geo.SearchControls{GooglebotRules: geo.Unknown, OAISearchBotRules: geo.Unknown, GPTBotRules: geo.Unknown}
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
-		return false, fmt.Errorf("parse target URL for robots.txt: %w", err)
+		return false, search, fmt.Errorf("parse target URL for robots.txt: %w", err)
 	}
 
 	key, err := robotsPolicyCacheKey(parsed)
 	if err != nil {
-		return false, err
+		return false, search, err
 	}
 	robotsCtx, robotsCancel := context.WithTimeout(ctx, totalTimeout)
 	defer robotsCancel()
@@ -141,9 +153,34 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 		return fetchRobotsPolicy(robotsCtx, client, parsed)
 	})
 	if err != nil {
-		return false, err
+		return false, search, err
 	}
-	return policy.allowsContext(robotsCtx, parsed)
+	allowed, err := policy.allowsContext(robotsCtx, parsed)
+	if err != nil {
+		return false, search, err
+	}
+	// Додаткові перевірки не змінюють рішення для власного User-Agent.
+	inspectCtx, cancel := context.WithTimeout(robotsCtx, 50*time.Millisecond)
+	defer cancel()
+	inspect := func(compiled *robotsparser.Policy) string {
+		if policy.allowAll {
+			return geo.Allowed
+		}
+		if compiled == nil {
+			return geo.Unknown
+		}
+		ok, err := compiled.AllowsURLContext(inspectCtx, parsed)
+		if err != nil {
+			return geo.Unknown
+		}
+		if ok {
+			return geo.Allowed
+		}
+		return geo.Blocked
+	}
+	search.GooglebotRules, search.OAISearchBotRules = inspect(policy.googlebot), inspect(policy.oaiSearchBot)
+	search.GPTBotRules = inspect(policy.gptBot)
+	return allowed, search, nil
 }
 
 func robotsPolicyCacheKey(parsed *url.URL) (string, error) {
@@ -189,6 +226,10 @@ func (c *robotsPolicyCache) policy(
 		policyWeight := int64(0)
 		if fetchErr == nil {
 			policyWeight = policy.estimatedMemoryBytes()
+			if policyWeight > c.maxWeight {
+				policy.googlebot, policy.oaiSearchBot, policy.gptBot = nil, nil, nil
+				policyWeight = policy.estimatedMemoryBytes()
+			}
 			if policyWeight > c.maxWeight {
 				fetchErr = fmt.Errorf(
 					"compiled robots.txt policy requires an estimated %d bytes, cache budget is %d bytes",
@@ -364,5 +405,12 @@ func fetchRobotsPolicy(
 	if err != nil {
 		return robotsPolicy{}, fmt.Errorf("compile robots.txt from %s: %w", robotsURL, err)
 	}
-	return robotsPolicy{compiled: compiled, sitemaps: robotsSitemapLocations(string(body))}, nil
+	policy := robotsPolicy{compiled: compiled, sitemaps: robotsSitemapLocations(string(body))}
+	// Лише додаткова GEO-діагностика: без нових HTTP-запитів та без підміни бота.
+	inspectCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	policy.googlebot, _ = robotsparser.CompilePolicyContext(inspectCtx, string(body), "Googlebot")
+	policy.oaiSearchBot, _ = robotsparser.CompilePolicyContext(inspectCtx, string(body), "OAI-SearchBot")
+	policy.gptBot, _ = robotsparser.CompilePolicyContext(inspectCtx, string(body), "GPTBot")
+	return policy, nil
 }

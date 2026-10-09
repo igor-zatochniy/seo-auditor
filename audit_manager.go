@@ -30,6 +30,10 @@ func newAuditManager(ctx context.Context, pool *pgxpool.Pool, cfg Config) *Audit
 }
 
 func (m *AuditManager) start(ctx context.Context, urls []string, resumeID string, siteOptions ...siteCrawlOptions) (string, error) {
+	return m.startWithRendering(ctx, urls, resumeID, m.cfg.RenderJavaScript, siteOptions...)
+}
+
+func (m *AuditManager) startWithRendering(ctx context.Context, urls []string, resumeID string, renderJS bool, siteOptions ...siteCrawlOptions) (string, error) {
 	ctx, cancelInit := context.WithCancel(ctx)
 	stopInit := context.AfterFunc(m.root, cancelInit)
 	defer stopInit()
@@ -40,6 +44,7 @@ func (m *AuditManager) start(ctx context.Context, urls []string, resumeID string
 		return "", errAuditBusy
 	}
 	cfg := m.cfg
+	cfg.RenderJavaScript = renderJS
 	cfg.RunID = newWebRunID()
 	if resumeID != "" {
 		cfg.RunID = resumeID
@@ -53,12 +58,15 @@ func (m *AuditManager) start(ctx context.Context, urls []string, resumeID string
 		if !run.Resumable {
 			return "", errAuditNotResumable
 		}
+		cfg.RenderJavaScript = run.RenderJavaScript
 		if _, err := loadSiteCrawl(ctx, m.pool, cfg); err != nil {
 			return "", err
 		}
 		if err := createAuditRun(ctx, m.pool, &cfg); err != nil {
 			return "", err
 		}
+	} else if err := validateRendering(cfg); err != nil {
+		return "", err
 	} else if len(siteOptions) > 0 {
 		if err := createSiteAuditRun(ctx, m.pool, &cfg, siteOptions[0]); err != nil {
 			return "", err

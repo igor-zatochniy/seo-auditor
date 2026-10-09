@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SEO Auditor</title>
   <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/rendering.js" defer></script>
+  <script src="/static/diagnostics.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/dialogs.js" defer></script>
 </head>
@@ -16,6 +18,7 @@
       <div class="section-heading"><div><p class="eyebrow">РОБОЧИЙ ПРОСТІР</p><h1>Новий аудит</h1></div><span class="muted" id="limit-label"></span></div>
       <form id="audit-form">
         <fieldset class="crawl-mode"><legend>Режим аудиту</legend><label><input type="radio" name="mode" value="list" checked> Список URL</label><label><input type="radio" name="mode" value="site"> Site Crawl</label></fieldset>
+		<label class="checkbox-label"><input type="checkbox" id="render-javascript" disabled> JavaScript і лабораторні LCP/CLS <span class="muted" id="render-availability"></span></label>
         <div id="list-input">
         <label for="urls">URL сторінок</label>
         <textarea id="urls" rows="8" spellcheck="false" placeholder="https://example.com/&#10;https://example.com/about" required></textarea>

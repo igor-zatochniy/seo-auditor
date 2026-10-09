@@ -3,15 +3,16 @@ package main
 import "time"
 
 type webRun struct {
-	ID         string     `json:"id"`
-	Mode       string     `json:"mode"`
-	Status     string     `json:"status"`
-	Total      int64      `json:"total"`
-	Successful int64      `json:"successful"`
-	Failed     int64      `json:"failed"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at"`
-	Resumable  bool       `json:"resumable"`
+	RenderJavaScript bool       `json:"render_javascript"`
+	ID               string     `json:"id"`
+	Mode             string     `json:"mode"`
+	Status           string     `json:"status"`
+	Total            int64      `json:"total"`
+	Successful       int64      `json:"successful"`
+	Failed           int64      `json:"failed"`
+	StartedAt        time.Time  `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at"`
+	Resumable        bool       `json:"resumable"`
 }
 
 type webProgress struct {
@@ -50,6 +51,9 @@ var reportFields = []reportField{
 	{"html_raw_bytes", "HTML після розпакування, bytes", "Розмір HTML"},
 	{"html_size_complete", "HTML прочитано повністю", "Розмір HTML"},
 	{"googlebot_2mb_status", "Googlebot: 2 MiB", "Розмір HTML"},
+	{"rendering_status", "JavaScript: статус", "JavaScript"},
+	{"rendering", "HTML відповіді / DOM після JavaScript", "JavaScript"},
+	{"geo_signals", "Доступ ботів і фрагменти контенту", "GEO-діагностика"},
 	{"crawl_depth", "Кліків від стартової сторінки", "Граф сайту"},
 	{"in_sitemap", "Є в sitemap", "Граф сайту"},
 	{"internal_inlinks_count", "Вхідні внутрішні сторінки", "Граф сайту"},

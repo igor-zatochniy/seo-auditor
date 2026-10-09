@@ -1,0 +1,45 @@
+# Опційний Chromium: без доступу до PostgreSQL, інтернету або портів хоста.
+services:
+  parser:
+    environment:
+      RENDER_BROWSER_URL: http://browser:9222
+    networks:
+      - render-isolated
+    depends_on:
+      browser:
+        condition: service_healthy
+
+  browser:
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    image: seo-auditor-browser:local
+    environment:
+      HOME: /tmp
+    user: "10001:10001"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    shm_size: 128m
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    # Лише перевірка локального CDP, без запитів до зовнішніх сайтів.
+    healthcheck:
+      test: ["CMD-SHELL", "printf 'GET /json/version HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' | socat -T 2 STDIO,ignoreeof TCP4:127.0.0.1:9222 | grep -q webSocketDebuggerUrl"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - render-isolated
+
+networks:
+  render-isolated:
+    internal: true

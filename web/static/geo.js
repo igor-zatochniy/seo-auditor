@@ -4,8 +4,12 @@
   const el = (tag, value, cls) => { const node = document.createElement(tag); if(value != null) node.textContent = String(value); if(cls) node.className = cls; return node; };
   const intents = {commercial:"Комерційне порівняння",transactional:"Транзакційний",informational:"Інформаційний",unknown:"Не визначено"};
   const levels = {strong:"Сильні сигнали",medium:"Часткові сигнали",weak:"Слабкі сигнали",unknown:"Недостатньо даних"};
+	const rules = {allowed:"Дозволено правилами",blocked:"Заборонено",unknown:"Не перевірено"};
+	const engines = {google_ai:"Google AI Overviews",chatgpt:"ChatGPT",gemini:"Gemini",perplexity:"Perplexity",other:"Інша система"};
+	const observations = {yes:"Так",no:"Не виявлено",unknown:"Не перевірено"};
   const reportID = location.pathname.match(/^\/geo\/([a-f0-9-]{36})$/i)?.[1];
   let rows = [], page = 0, current, requestID, lastPayload;
+	let observationID, observationPayload, historyBefore = 0, historyGeneration = 0;
   const notice = message => { $("notice").textContent = message; $("notice").hidden = !message; };
   const date = value => value ? new Date(value).toLocaleString("uk-UA") : "—";
   async function api(path, body, token) {
@@ -61,8 +65,10 @@
       if(r.ambiguous) target.append(badge("Близькі кандидати","warning"));
       row.append(target);
       const coverage = el("td",r.coverage+"%"), bar = el("progress"); bar.max=100; bar.value=r.coverage; bar.setAttribute("aria-label","Збіг термінів"); coverage.append(bar); row.append(coverage);
-      const ready = el("td"); ready.append(badge(levels[r.level]+(r.readiness==null?"":" · "+r.readiness+"%"),r.level==="strong"?"success":r.level==="weak"?"error":"warning")); row.append(ready);
-      row.append(el("td",r.gaps[0] || (r.readiness==null ? "Недостатньо даних для оцінки прогалин" : "Немає прогалин у перевірених сигналах")));
+      const ready = el("td");
+			if(r.categories?.length) for(const c of r.categories) ready.append(el("div",`${c.name}: ${c.total ? c.passed+" / "+c.total : "Не перевірено"}`,"geo-category"));
+			else ready.append(badge(levels[r.level]+(r.readiness==null?"":" · "+r.readiness+"%"),r.level==="strong"?"success":r.level==="weak"?"error":"warning")); row.append(ready);
+      row.append(el("td",r.gaps[0] || (!r.categories?.length && r.readiness==null ? "Недостатньо даних для оцінки прогалин" : "Немає прогалин у перевірених сигналах")));
       const seen = item.citations.filter(c=>c.citation!=="unknown"||c.brand_mention!=="unknown");
       row.append(el("td",seen.length ? "Перевірено систем: "+seen.length : "Не перевірено"));
       row.onclick = () => details(item); row.onkeydown = event => { if(event.key==="Enter") details(item); }; body.append(row);
@@ -81,12 +87,28 @@
     const facts=el("dl");
     for(const [name,value] of [["Намір (евристика)",intents[r.intent]],["Цільовий URL",r.target_url||"Не знайдено в аудиті"],["Збіг термінів",r.coverage+"%"],["Знайдені терміни",r.matched.join(", ")||"—"],["Не знайдені терміни",r.missing.join(", ")||"—"],["Запитів на цю сторінку",r.shared_queries||"—"],["Готовність",levels[r.level]+(r.readiness==null?"":" · "+r.readiness+"%")]]) facts.append(el("dt",name),el("dd",value));
     area.append(facts);
+		area.append(window.seoDiagnostics.details({search:r.search,http:r.http,performance:r.performance,blocks:r.blocks},r.block_matches||[]));
+		if(r.categories?.length) {
+			facts.lastElementChild.remove(); facts.lastElementChild.remove();
+			addList(area,"Категорії сигналів",r.categories.map(c=>`${c.name}: ${c.total ? c.passed+" / "+c.total+" · "+levels[c.level] : "Не перевірено"}`));
+		}
+		const source = {main:"Основний блок main / role=main",article:"Стаття article",body:"Текст body без явних службових блоків"};
+		if(r.content_source) area.append(el("p",source[r.content_source]||r.content_source));
+		const s=r.search;
+		addList(area,"Правила пошукових ботів",[
+			"Googlebot · robots.txt: "+(rules[s?.googlebot_rules]||rules.unknown),
+			"OAI-SearchBot · robots.txt: "+(rules[s?.oai_searchbot_rules]||rules.unknown),
+			"Google · директиви індексації: "+(rules[s?.google_indexing]||rules.unknown),
+			"Google · текстовий snippet: "+(rules[s?.google_snippet]||rules.unknown),
+			...(s?.max_snippet!=null ? ["Ліміт max-snippet: "+s.max_snippet] : []),
+			...(s?.data_nosnippet ? ["data-nosnippet: виявлено обмеження окремих фрагментів"] : [])]);
     addList(area,"Кандидати зі збереженого аудиту",r.alternatives.map(a=>`${a.coverage}% · ${a.url}`));
     addList(area,"Застереження",r.warnings);
     addList(area,"Прогалини та наступні дії",r.gaps);
     if(r.checks.length) area.append(el("h3","Перевірені сигнали"));
     for(const check of r.checks) { const section=el("div",null,"geo-check"),heading=el("strong");heading.append(badge(check.passed?"Виявлено":"Не виявлено",check.passed?"success":"warning"),el("span",check.name));section.append(heading,el("p",check.evidence||"—"));area.append(section); }
     $("citation-engine").value=item.citations[0]?.engine||"google_ai";loadCitation();$("geo-details").showModal();
+		loadObservationHistory(true);
   }
   function loadCitation() {
     const c=current.citations.find(item=>item.engine===$("citation-engine").value);
@@ -98,17 +120,41 @@
     event.preventDefault(); $("save-citation").disabled=true;
     const item=current;
     try {
-      const c=await api(`/api/geo/reports/${reportID}/queries/${item.ordinal}/citation`,{engine:$("citation-engine").value,citation:$("citation-value").value,brand_mention:$("mention-value").value,evidence_url:$("evidence-url").value.trim(),note:$("citation-note").value});
-      item.citations=item.citations.filter(old=>old.engine!==c.engine).concat(c);if(current===item)loadCitation();renderTable();
+			const payload={engine:$("citation-engine").value,citation:$("citation-value").value,brand_mention:$("mention-value").value,evidence_url:$("evidence-url").value.trim(),note:$("citation-note").value};
+			const signature=JSON.stringify([item.ordinal,payload]);
+			if(signature!==observationPayload) { observationID=crypto.randomUUID();observationPayload=signature; }
+      const c=await api(`/api/geo/reports/${reportID}/queries/${item.ordinal}/citation`,{...payload,id:observationID});
+			observationPayload=null;
+      item.citations=item.citations.filter(old=>old.engine!==c.engine).concat(c);if(current===item){loadCitation();loadObservationHistory(true);}renderTable();
     } catch(error) { $("citation-status").textContent=error.message; }
     finally { $("save-citation").disabled=false; }
   }
+	async function loadObservationHistory(reset) {
+		const item=current, generation=++historyGeneration;
+		if(reset) { historyBefore=0;$("observation-history").replaceChildren(); }
+		$("history-more").disabled=true;
+		try {
+			const data=await api(`/api/geo/reports/${reportID}/queries/${item.ordinal}/observations?before=${historyBefore||""}`);
+			if(current!==item||generation!==historyGeneration) return;
+			for(const c of data.items) {
+				const section=el("div",null,"geo-check");
+				section.append(el("strong",`${date(c.checked_at)} · ${engines[c.engine]}`),el("p",`Цитування: ${observations[c.citation]} · Згадка: ${observations[c.brand_mention]}`));
+				if(c.evidence_url) section.append(el("p",c.evidence_url));
+				if(c.note) section.append(el("p",c.note));
+				$("observation-history").append(section);
+			}
+			if(reset&&!data.items.length) $("observation-history").append(el("p","Спостережень ще немає"));
+			historyBefore=data.next;$("history-more").hidden=!data.next;
+		} catch(error) { if(current===item&&generation===historyGeneration) $("observation-history").append(el("p",error.message)); }
+		finally { if(generation===historyGeneration) $("history-more").disabled=false; }
+	}
   async function init() {
     const token=new URLSearchParams(location.hash.slice(1)).get("access_token");
     if(token) { window.history.replaceState(null,"",location.pathname+location.search);await api("/api/session",{},token); }
     $("geo-home").hidden=Boolean(reportID);$("geo-report").hidden=!reportID;
     $("refresh-history").onclick=safe(history);$("geo-form").onsubmit=submit;
     $("citation-form").onsubmit=saveCitation;$("citation-engine").onchange=loadCitation;
+		$("history-more").onclick=()=>loadObservationHistory(false);
     document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>$(button.dataset.close).close());
     $("queries").oninput=()=>{$("query-count").textContent=$("queries").value.split(/\r?\n/).filter(line=>line.trim()).length+" / 1000 запитів";};
     $("clear-queries").onclick=()=>{$("queries").value="";$("queries").oninput();};

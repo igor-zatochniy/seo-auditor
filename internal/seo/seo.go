@@ -30,6 +30,8 @@ const (
 
 // Data contains the full set of metrics collected by the parser.
 type Data struct {
+	Rendering                  *RenderComparison
+	comparison                 *comparisonEvidence
 	GEO                        *geo.Signals
 	URL                        string
 	SafeURLTruncated           bool
@@ -110,7 +112,7 @@ func ParsePageWithLinks(resp *http.Response, targetURL string, maxBodyBytes, max
 	return parsePage(resp, targetURL, maxBodyBytes, maxTokenBytes, true)
 }
 
-func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenBytes int64, collectLinks bool) (data Data, parseErr error) {
+func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenBytes int64, collectLinks bool, comparison ...bool) (data Data, parseErr error) {
 	data = Data{
 		URL:        targetURL,
 		StatusCode: HTTPStatus(resp.StatusCode),
@@ -144,7 +146,12 @@ func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenByte
 	tokenLimit := min(maxTokenBytes, maxBodyBytes+1)
 	tokenizer.SetMaxBuf(int(tokenLimit))
 	parser := newPageParser(&data, targetURL)
+	parser.geo.readSearchHeaders(resp.Header)
 	parser.collectLinks = collectLinks
+	if len(comparison) > 0 && comparison[0] {
+		parser.comparison = newComparisonEvidence()
+		data.comparison = parser.comparison
+	}
 
 	for {
 		tokenType := tokenizer.Next()
@@ -191,6 +198,7 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 }
 
 type tagAttributes struct {
+	hreflang          []byte
 	name              []byte
 	property          []byte
 	content           []byte
@@ -199,6 +207,10 @@ type tagAttributes struct {
 	typeValue         []byte
 	alt               []byte
 	shadowRootMode    []byte
+	role              []byte
+	ariaHidden        []byte
+	hidden            bool
+	dataNoSnippet     bool
 	hasName           bool
 	hasProperty       bool
 	hasContent        bool
@@ -214,6 +226,16 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 	for hasAttributes {
 		key, value, moreAttributes := tokenizer.TagAttr()
 		switch {
+		case bytes.Equal(key, []byte("hreflang")):
+			attributes.hreflang = value
+		case bytes.Equal(key, []byte("role")):
+			attributes.role = value
+		case bytes.Equal(key, []byte("hidden")):
+			attributes.hidden = true
+		case bytes.Equal(key, []byte("aria-hidden")):
+			attributes.ariaHidden = value
+		case bytes.Equal(key, []byte("data-nosnippet")):
+			attributes.dataNoSnippet = true
 		case bytes.Equal(key, []byte("name")):
 			attributes.name = value
 			attributes.hasName = true
@@ -245,6 +267,8 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 }
 
 type pageParser struct {
+	comparison         *comparisonEvidence
+	comparisonH1Depth  int
 	geo                geoCollector
 	data               *Data
 	targetURL          *url.URL
@@ -319,6 +343,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 		p.documentPhase = documentPhaseBody
 	}
 	p.geoStart(name, attributes)
+	p.comparisonStart(name, attributes)
 
 	switch {
 	case bytes.Equal(name, []byte("title")):
@@ -331,6 +356,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 			p.collectTitle = true
 		}
 	case bytes.Equal(name, []byte("h1")):
+		p.comparisonH1Depth++
 		p.data.H1Count++
 		if p.data.H1Count == 1 {
 			p.collectFirstH1 = true
@@ -540,6 +566,14 @@ func (p *pageParser) handleText(text []byte) {
 		return
 	}
 	p.geo.scriptText(text)
+	if p.comparison != nil {
+		if p.comparison.jsonActive {
+			_, _ = p.comparison.jsonLD.Write(text)
+		}
+		if p.comparisonH1Depth > 0 && p.ignoredTextDepth == 0 {
+			_, _ = p.comparison.h1.Write(text)
+		}
+	}
 	if p.linkCollector.active && p.ignoredTextDepth == 0 {
 		p.linkCollector.anchor.Write(text)
 	}
@@ -558,6 +592,10 @@ func (p *pageParser) handleText(text []byte) {
 	if p.documentPhase == documentPhaseBody && !p.collectTitle &&
 		p.ignoredTextDepth == 0 && p.ignoredTitleDepth == 0 {
 		p.bodyWordCounter.Write(text)
+		if p.comparison != nil {
+			_, _ = p.comparison.text.Write(text)
+			p.comparison.sample.Write(text)
+		}
 		p.geo.text(text)
 	}
 }
@@ -580,6 +618,9 @@ func (p *pageParser) handleEndTag(name []byte) {
 		return
 	}
 	p.geo.end(name)
+	if p.comparison != nil && bytes.Equal(name, []byte("script")) {
+		p.comparison.jsonActive = false
+	}
 
 	switch {
 	case bytes.Equal(name, []byte("a")):
@@ -591,6 +632,9 @@ func (p *pageParser) handleEndTag(name []byte) {
 			p.ignoredTitleDepth--
 		}
 	case bytes.Equal(name, []byte("h1")):
+		if p.comparisonH1Depth > 0 {
+			p.comparisonH1Depth--
+		}
 		p.collectFirstH1 = false
 	case bytes.Equal(name, []byte("head")):
 		p.documentPhase = documentPhaseBody
