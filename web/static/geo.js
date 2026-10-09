@@ -64,16 +64,18 @@
       const target = el("td",r.target_url || "Не знайдено в аудиті");
       if(r.ambiguous) target.append(badge("Близькі кандидати","warning"));
       row.append(target);
-      const coverage = el("td",r.coverage+"%"), bar = el("progress"); bar.max=100; bar.value=r.coverage; bar.setAttribute("aria-label","Збіг термінів"); coverage.append(bar); row.append(coverage);
+      const coverage = el("td",r.matching ? r.matching.relevance+" / 100" : r.coverage+"% термінів"), bar = el("progress"); bar.max=100; bar.value=r.matching?.relevance??r.coverage; bar.setAttribute("aria-label","Релевантність зіставлення"); coverage.append(bar); row.append(coverage);
       const ready = el("td");
 			if(r.categories?.length) for(const c of r.categories) ready.append(el("div",`${c.name}: ${c.total ? c.passed+" / "+c.total : "Не перевірено"}`,"geo-category"));
 			else ready.append(badge(levels[r.level]+(r.readiness==null?"":" · "+r.readiness+"%"),r.level==="strong"?"success":r.level==="weak"?"error":"warning")); row.append(ready);
       row.append(el("td",r.gaps[0] || (!r.categories?.length && r.readiness==null ? "Недостатньо даних для оцінки прогалин" : "Немає прогалин у перевірених сигналах")));
+      const entityChecks=r.entities?.checks?.filter(c=>!["unknown","not_applicable"].includes(c.status))||[];
+      row.append(el("td",entityChecks.length?`${entityChecks.filter(c=>c.status==="found").length} / ${entityChecks.length} виявлено`:"Не перевірено"));
       const seen = item.citations.filter(c=>c.citation!=="unknown"||c.brand_mention!=="unknown");
       row.append(el("td",seen.length ? "Перевірено систем: "+seen.length : "Не перевірено"));
       row.onclick = () => details(item); row.onkeydown = event => { if(event.key==="Enter") details(item); }; body.append(row);
     }
-    if(!filtered.length) { const row=el("tr"),cell=el("td","Немає результатів за цим фільтром","empty");cell.colSpan=7;row.append(cell);body.append(row); }
+    if(!filtered.length) { const row=el("tr"),cell=el("td","Немає результатів за цим фільтром","empty");cell.colSpan=8;row.append(cell);body.append(row); }
     $("geo-page-label").textContent=`Сторінка ${page+1} · Запитів: ${filtered.length}`;
     $("geo-prev").disabled=page===0; $("geo-next").disabled=(page+1)*limit>=filtered.length;
   }
@@ -84,12 +86,22 @@
   function details(item) {
     current=item; const r=item.result; $("detail-query").textContent=r.query;
     const area=$("detail-analysis");area.replaceChildren();
+		window.seoDiagnostics.eligibility(area,r.eligibility);
+    area.append(el("h3","Сутності бренду"));
+    const entityLabels={found:"Виявлено",missing:"Не виявлено",mismatch:"Назви відрізняються",unknown:"Недостатньо даних",not_applicable:"Не застосовується"};
+    if(!r.entities)area.append(el("p","Немає сигналів сутностей. Повторіть SEO-аудит і створіть новий GEO-звіт."));
+    for(const check of r.entities?.checks||[]){const section=el("div",null,"geo-check"),title=el("strong");title.append(badge(entityLabels[check.status]||entityLabels.unknown,check.status==="found"?"success":["missing","mismatch"].includes(check.status)?"warning":""),el("span",check.name));section.append(title,el("p",check.evidence.join(" · ")||"—"));area.append(section);}
     const facts=el("dl");
     for(const [name,value] of [["Намір (евристика)",intents[r.intent]],["Цільовий URL",r.target_url||"Не знайдено в аудиті"],["Збіг термінів",r.coverage+"%"],["Знайдені терміни",r.matched.join(", ")||"—"],["Не знайдені терміни",r.missing.join(", ")||"—"],["Запитів на цю сторінку",r.shared_queries||"—"],["Готовність",levels[r.level]+(r.readiness==null?"":" · "+r.readiness+"%")]]) facts.append(el("dt",name),el("dd",value));
     area.append(facts);
-		area.append(window.seoDiagnostics.details({search:r.search,http:r.http,performance:r.performance,blocks:r.blocks},r.block_matches||[]));
+		if(r.matching){
+			facts.append(el("dt","Релевантність зіставлення"),el("dd",r.matching.relevance+" / 100"),el("dt","Зважений IDF-збіг"),el("dd",r.matching.weighted_coverage+"%"),el("dt","Сторінок у корпусі"),el("dd",r.matching.corpus_pages));
+			addList(area,"Збіги фраз",r.matching.phrases||[]);
+			addList(area,"Наближені збіги",(r.matching.approximate||[]).map(m=>`${m.query} → ${m.term} · ${m.kind==="morphology"?"словоформа":"можлива друкарська помилка"}`));
+		}
+		area.append(window.seoDiagnostics.details({search:r.search,http:r.http,performance:r.performance,blocks:r.blocks,eligibility:r.eligibility},r.block_matches||[],false));
 		if(r.categories?.length) {
-			facts.lastElementChild.remove(); facts.lastElementChild.remove();
+			for(const term of facts.querySelectorAll("dt"))if(term.textContent==="Готовність"){term.nextElementSibling.remove();term.remove();}
 			addList(area,"Категорії сигналів",r.categories.map(c=>`${c.name}: ${c.total ? c.passed+" / "+c.total+" · "+levels[c.level] : "Не перевірено"}`));
 		}
 		const source = {main:"Основний блок main / role=main",article:"Стаття article",body:"Текст body без явних службових блоків"};
@@ -102,7 +114,7 @@
 			"Google · текстовий snippet: "+(rules[s?.google_snippet]||rules.unknown),
 			...(s?.max_snippet!=null ? ["Ліміт max-snippet: "+s.max_snippet] : []),
 			...(s?.data_nosnippet ? ["data-nosnippet: виявлено обмеження окремих фрагментів"] : [])]);
-    addList(area,"Кандидати зі збереженого аудиту",r.alternatives.map(a=>`${a.coverage}% · ${a.url}`));
+    addList(area,"Кандидати зі збереженого аудиту",r.alternatives.map(a=>`${a.coverage}% термінів${a.relevance==null?"":` · релевантність ${a.relevance} / 100`} · ${a.url}`));
     addList(area,"Застереження",r.warnings);
     addList(area,"Прогалини та наступні дії",r.gaps);
     if(r.checks.length) area.append(el("h3","Перевірені сигнали"));
@@ -167,6 +179,7 @@
       $("csv-export").href=`/api/geo/reports/${reportID}/export/csv`;
       $("search-query").oninput=()=>{page=0;renderTable();};$("geo-filter").onchange=()=>{page=0;renderTable();};$("geo-page-size").onchange=()=>{page=0;renderTable();};
       $("geo-prev").onclick=()=>{page--;renderTable();};$("geo-next").onclick=()=>{page++;renderTable();};renderTable();
+      await window.seoVisibility.init({api,el,reportID,rows,notice});
     } else {
       const sources=await api("/api/geo/sources");
       for(const source of sources){const option=el("option",date(source.started_at)+" · "+source.total+" URL");option.value=source.id;$("source-list").append(option);}

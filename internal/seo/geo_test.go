@@ -35,7 +35,7 @@ func TestGEOMainContentSelection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			data := parseGEOTest(t, "<body>"+tc.body+"</body>")
 			s := data.GEO
-			if s.Version != 2 || s.ContentSource != tc.source || !strings.Contains(s.Excerpt, tc.excerpt) || s.Headings != tc.heading || s.HasAuthor != tc.author || s.HasTable || s.HasList || s.FirstParagraph != "Real answer" {
+			if s.Version != 3 || s.ContentSource != tc.source || !strings.Contains(s.Excerpt, tc.excerpt) || s.Headings != tc.heading || s.HasAuthor != tc.author || s.HasTable || s.HasList || s.FirstParagraph != "Real answer" {
 				t.Fatalf("Хибна вибірка: %+v", s)
 			}
 			for _, excluded := range []string{"menu", "footer", "aside", "teaser"} {
@@ -44,6 +44,24 @@ func TestGEOMainContentSelection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGEOCleanMainContentDoesNotChangeDocumentMetrics(t *testing.T) {
+	body := `<body><main><header><p>menu</p><ul><li>menu</li></ul></header><form><p>menu</p><table></table></form><div role="form"><p>menu</p></div><nav>menu</nav><aside>menu</aside><dialog>menu</dialog><article><header><h1>Answer</h1><a rel="author">Editor</a></header><p>Real answer<p>Second paragraph<footer><p>menu</p><ul><li>menu</li></ul></footer></article></main></body>`
+	data := parseGEOTest(t, body)
+	s := data.GEO
+	if s.ContentSource != "main" || strings.Contains(s.Excerpt, "menu") || s.HasList || s.HasTable || !s.HasAuthor || s.Headings != "Answer" || s.FirstParagraph != "Real answer" {
+		t.Fatalf("Службовий контент вплинув на GEO: %+v", s)
+	}
+	if data.H1 != "Answer" || data.H1Count != 1 || data.WordCount == 0 {
+		t.Fatal("Звичайні SEO-метрики змінено")
+	}
+	for _, empty := range []string{`<main></main>`, `<main><nav>menu</nav></main>`, `<main hidden>menu</main>`} {
+		data = parseGEOTest(t, `<body>`+empty+`<article><p>Real answer</p></article></body>`)
+		if data.GEO.ContentSource != "article" || data.GEO.FirstParagraph != "Real answer" {
+			t.Fatalf("Порожній main заблокував fallback: %+v", data.GEO)
+		}
 	}
 }
 

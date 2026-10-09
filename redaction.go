@@ -139,6 +139,27 @@ func sanitizeSEODataForStorage(data SEOData) SEOData {
 		signals.Excerpt = sanitizeGEOTextForStorage(signals.Excerpt, 2000)
 		signals.Headings = sanitizeGEOTextForStorage(signals.Headings, 800)
 		signals.FirstParagraph = sanitizeGEOTextForStorage(signals.FirstParagraph, 600)
+		if signals.Entities != nil {
+			copy := *signals.Entities
+			clean := func(records []geo.EntityRecord) []geo.EntityRecord {
+				result := append([]geo.EntityRecord(nil), records...)
+				for i := range result {
+					result[i].Name = sanitizeGEOTextForStorage(result[i].Name, 200)
+					result[i].Types = append([]string(nil), result[i].Types...)
+					for j := range result[i].Types {
+						result[i].Types[j] = sanitizeGEOTextForStorage(result[i].Types[j], 100)
+					}
+					result[i].SameAs = append([]string(nil), result[i].SameAs...)
+					for j := range result[i].SameAs {
+						result[i].SameAs[j] = redactURL(result[i].SameAs[j])
+					}
+				}
+				return result
+			}
+			copy.Organizations, copy.Authors = clean(copy.Organizations), clean(copy.Authors)
+			copy.Publishers, copy.ProductBrands = clean(copy.Publishers), clean(copy.ProductBrands)
+			signals.Entities = &copy
+		}
 		if signals.Blocks != nil {
 			copy := *signals.Blocks
 			copy.Items = append([]geo.TextBlock(nil), copy.Items...)
@@ -154,6 +175,7 @@ func sanitizeSEODataForStorage(data SEOData) SEOData {
 			signals.Performance = &copy
 		}
 		data.GEO = &signals
+		data.GEO.Eligibility = geo.EvaluateEligibility(data.GEO)
 	}
 	data.URL = redactURL(data.URL)
 	data.RedirectURL = redactURL(data.RedirectURL)

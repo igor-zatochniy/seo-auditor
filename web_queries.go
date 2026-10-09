@@ -191,7 +191,7 @@ func loadResultPage(ctx context.Context, pool *pgxpool.Pool, id string, q result
 
 const webRunColumns = `run.id::TEXT, CASE WHEN EXISTS(SELECT 1 FROM audit_site_crawls sc WHERE sc.run_id=run.id) THEN 'site' ELSE 'list' END, run.status, run.total_urls, run.successful_urls, run.failed_urls,
 	run.started_at, run.finished_at,
-	(run.targets_captured_at IS NOT NULL AND (run.status IN ('failed','abandoned') OR
+	(run.targets_captured_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM audit_schedule_runs sr WHERE sr.run_id=run.id) AND (run.status IN ('failed','abandoned') OR
 	 (run.status='running' AND run.heartbeat_at < CURRENT_TIMESTAMP - $2::INTERVAL))), run.render_javascript`
 
 func scanWebRun(row pgx.Row) (webRun, error) {

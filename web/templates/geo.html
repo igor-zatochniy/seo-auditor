@@ -7,11 +7,12 @@
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/geo.css">
   <script src="/static/diagnostics.js" defer></script>
+  <script src="/static/geo-visibility.js" defer></script>
   <script src="/static/geo.js" defer></script>
   <script src="/static/dialogs.js" defer></script>
 </head>
 <body>
-  <header class="app-header"><a class="brand" href="/">SEO Auditor<span class="local-label">ЛОКАЛЬНО</span></a><nav aria-label="Навігація"><a href="/">SEO-аудит</a><a href="/geo" class="active" aria-current="page">Готовність до GEO</a><a href="/audits">Історія SEO</a></nav><span class="connection">PostgreSQL</span></header>
+  <header class="app-header"><a class="brand" href="/">SEO Auditor<span class="local-label">ЛОКАЛЬНО</span></a><nav aria-label="Навігація"><a href="/">SEO-аудит</a><a href="/geo" class="active" aria-current="page">Готовність до GEO</a><a href="/audits">Історія SEO</a><a href="/monitoring">Моніторинг</a></nav><span class="connection">PostgreSQL</span></header>
   <main>
     <div id="notice" role="alert" hidden></div>
     <section id="geo-home">
@@ -33,17 +34,26 @@
       <div id="geo-summary" class="summary"></div>
       <p class="geo-scope">Локальні евристики, не фактична AI-видимість. Збіг термінів не вимірює семантичну якість; оцінка сигналів не є ймовірністю цитування.</p>
       <div class="table-toolbar"><input id="search-query" type="search" aria-label="Пошук запиту або URL" placeholder="Пошук запиту або URL"><select id="geo-filter" aria-label="Фільтр результатів"><option value="all">Усі запити</option><option value="unmapped">Без цільової сторінки</option><option value="ambiguous">Близькі кандидати</option><option value="weak">Слабкі сигнали</option><option value="unknown">Недостатньо даних</option><option value="unchecked">Без ручної перевірки AI</option></select><select id="geo-page-size" aria-label="Рядків на сторінці"><option>25</option><option selected>50</option><option>100</option></select></div>
-      <div class="table-wrap"><table id="geo-table"><thead><tr><th>Запит</th><th>Намір (оцінка)</th><th>Цільова сторінка</th><th>Збіг термінів</th><th>Готовність до GEO</th><th>Основна прогалина</th><th>Ручна перевірка AI</th></tr></thead><tbody></tbody></table></div>
+      <div class="table-wrap"><table id="geo-table"><thead><tr><th>Запит</th><th>Намір (оцінка)</th><th>Цільова сторінка</th><th>Релевантність</th><th>Готовність до GEO</th><th>Основна прогалина</th><th>Сутності бренду</th><th>Ручна перевірка AI</th></tr></thead><tbody></tbody></table></div>
       <div class="input-footer"><span id="geo-page-label" class="muted"></span><div class="actions"><button id="geo-prev" title="Попередня сторінка" aria-label="Попередня сторінка">←</button><button id="geo-next" title="Наступна сторінка" aria-label="Наступна сторінка">→</button></div></div>
+      <section id="geo-visibility" class="visibility-section" aria-labelledby="visibility-heading">
+        <div class="section-heading"><div><p class="eyebrow">ІМПОРТОВАНІ СПОСТЕРЕЖЕННЯ</p><h2 id="visibility-heading">Спостережена видимість</h2></div><button id="visibility-import-open" type="button">Імпортувати CSV</button></div>
+        <div class="table-toolbar"><select id="visibility-import-select" aria-label="Набір спостережень"></select><button id="visibility-delete" type="button" disabled>Видалити імпорт</button></div>
+        <p id="visibility-meta" class="muted"></p><p id="visibility-scope" class="geo-scope"></p>
+        <div class="table-wrap"><table id="visibility-table"><thead><tr><th>Запит / рівень даних</th><th>Спостережений URL</th><th>Локальна релевантність</th><th>Сигнали GEO</th><th>Покази</th><th>Кліки</th><th>Ручні цитування</th></tr></thead><tbody></tbody></table></div>
+        <div class="input-footer"><span id="visibility-page-label" class="muted"></span><div class="actions"><button id="visibility-prev" title="Попередня сторінка" aria-label="Попередня сторінка">←</button><button id="visibility-next" title="Наступна сторінка" aria-label="Наступна сторінка">→</button></div></div>
+      </section>
     </section>
     <details class="geo-method"><summary>Методика та межі достовірності</summary><dl>
       <dt>Джерело</dt><dd>Збережені успішні HTML-сторінки одного завершеного SEO-аудиту, до 1000 сторінок. Контентні сигнали беруться з початкового HTML, не з виконаного JavaScript. Опційні лабораторні LCP/CLS зберігаються окремо. Свіжість дорівнює даті сканування.</dd>
-      <dt>Зіставлення</dt><dd>Точні нормалізовані терміни без стоп-слів: title, H1, опис, шлях URL, заголовки та перші 2000 символів тексту. Кандидат потребує щонайменше 50% збігів. Синоніми, відмінки та переклад не моделюються.</dd>
-      <dt>Контент</dt><dd>Пріоритет main / role="main", далі article, інакше body без явної навігації, бічних блоків та прихованих елементів. Header і footer усередині основного блоку або статті зберігаються. CSS та JavaScript не виконуються.</dd>
+      <dt>Зіставлення</dt><dd>IDF за сторінками вибраного аудиту, ваги title/H1/заголовків, дво- й трислівні фрази, обмежені українські та англійські словоформи. За відсутності точного збігу та словоформ допускається одна друкарська помилка для слів від 5 літер з однаковою першою літерою; числа не виправляються. Ціль потребує ≥50% термінів та ≥50% зваженого збігу. Релевантність не є SEO-рейтингом чи ймовірністю цитування. Синоніми й переклад не моделюються.</dd>
+      <dt>Контент</dt><dd>Пріоритет непорожнього main / role="main", далі article, інакше body. Виключаються nav, aside, form, dialog, footer, приховані та службові role-блоки. Header поза article виключається; заголовок, автор і дата у header статті зберігаються. CSS та JavaScript не виконуються.</dd>
       <dt>Категорії</dt><dd>Структура відповіді, авторство та посилання, необов'язкова розмітка оцінюються окремо: виявлені / перевірені сигнали. Єдиного відсотка GEO немає. Schema не є спеціальною вимогою для AI-відповідей. Старі звіти зберігають попередню методику.</dd>
       <dt>Пошукові боти</dt><dd>Дозволено правилами / заборонено / не перевірено стосується лише robots.txt та прочитаних директив. Це не підтверджує індексацію чи AI-цитування. OAI-SearchBot використовується для пошуку; блокування GPTBot для навчання не знижує оцінку ChatGPT Search.</dd>
       <dt>Неповні дані</dt><dd>Старі аудити без сигналів контенту не отримують оцінки готовності. Невідоме не означає відсутнє. Невдалий збіг не доводить, що на сайті немає сторінки.</dd>
       <dt>AI-цитування</dt><dd>Лише ручні спостереження з датою, системою та доказами. Нові перевірки доповнюють історію; таблиця й CSV показують останнє спостереження кожної системи. Це не автоматичний моніторинг.</dd>
+      <dt>Сутності бренду</dt><dd>Обмежена вибірка JSON-LD, Organization.name / sameAs, author / publisher та Product.brand. Посилання @id розв'язуються лише всередині сторінки. Назви порівнюються без урахування регістру, але юридичні суфікси та синоніми не вгадуються. Наявність sameAs не підтверджує власність або репутацію. Сигнали не змінюють оцінку GEO.</dd>
+      <dt>Спостережена видимість</dt><dd>Окремі імпорти GSC Web, GSC generative AI та зовнішніх AI-спостережень. Web-показники не є AI-показниками. Дані лише URL не приписуються окремим запитам, а відсутні кліки не замінюються нулем. Період, країна та пристрій задають область одного імпорту; імпорти не підсумовуються автоматично.</dd>
     </dl></details>
     <section id="geo-history-section"><div class="section-heading"><h2>Останні GEO-звіти</h2><button id="refresh-history" title="Оновити список">Оновити</button></div><div id="geo-history" class="history-list"></div></section>
   </main>
@@ -52,6 +62,14 @@
     <form id="citation-form"><div class="geo-form-grid"><label>AI-система<select id="citation-engine"><option value="google_ai">Google AI Overviews</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="perplexity">Perplexity</option><option value="other">Інша система</option></select></label><label>Цитування домену<select id="citation-value"><option value="unknown">Не перевірено</option><option value="yes">Так</option><option value="no">Не виявлено</option></select></label><label>Згадка бренду<select id="mention-value"><option value="unknown">Не перевірено</option><option value="yes">Так</option><option value="no">Не виявлено</option></select></label></div>
     <label>Посилання на доказ<input type="url" id="evidence-url" maxlength="2048" placeholder="https://..."></label><label>Нотатка або уривок відповіді<textarea id="citation-note" rows="3" maxlength="2000"></textarea></label><div class="input-footer"><span id="citation-status" role="status" class="muted"></span><button id="save-citation" class="primary">Зберегти спостереження</button></div></form>
     <h3>Історія ручних спостережень</h3><div id="observation-history"></div><button id="history-more" type="button" hidden>Раніші спостереження</button>
+  </dialog>
+  <dialog id="visibility-import-dialog" aria-labelledby="visibility-import-heading"><div class="dialog-heading"><h2 id="visibility-import-heading">Імпорт спостережень</h2><button data-close="visibility-import-dialog" aria-label="Закрити" title="Закрити">×</button></div>
+    <form id="visibility-import-form">
+      <div class="geo-form-grid"><label>Джерело<select id="visibility-source"><option value="gsc_web">Google Search Console · Web</option><option value="gsc_ai">Google Search Console · generative AI</option><option value="ai_observed">Зовнішні AI-спостереження</option></select></label><label>AI-система<select id="visibility-engine" disabled><option value="google_ai">Google AI</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="perplexity">Perplexity</option><option value="other">Інша система</option></select></label></div>
+      <div class="geo-form-grid"><label>Початок періоду<input id="visibility-start" type="date" required></label><label>Кінець періоду<input id="visibility-end" type="date" required></label><label>Країна<input id="visibility-country" maxlength="2" placeholder="US / UA; порожньо — усі"></label><label>Пристрій<select id="visibility-device"><option value="all">Усі</option><option value="desktop">Комп'ютер</option><option value="mobile">Мобільний</option><option value="tablet">Планшет</option></select></label></div>
+      <p id="visibility-import-help" class="geo-scope"></p><label>CSV-файл<input id="visibility-file" type="file" accept=".csv,text/csv" required></label><p class="muted">UTF-8, до 2 МіБ та 5000 рядків. Стовпці: Query, URL або Page, Impressions, Clicks. Усі числа — без розділювачів тисяч.</p>
+      <div class="input-footer"><span id="visibility-import-status" role="status" class="muted"></span><button id="visibility-import-save" class="primary">Зберегти імпорт</button></div>
+    </form>
   </dialog>
 </body>
 </html>

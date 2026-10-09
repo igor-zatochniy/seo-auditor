@@ -125,6 +125,15 @@ func (s *webServer) createGEO(ctx context.Context, input geo.Input, queries []st
 	if err != nil {
 		return empty, err
 	}
+	byTarget := make(map[int64]*geo.Signals, len(pages))
+	for _, page := range pages {
+		byTarget[page.TargetID] = page.Signals
+	}
+	for i := range results {
+		if results[i].TargetID != nil {
+			results[i].Entities = geo.EvaluateEntities(input.Brand, byTarget[*results[i].TargetID])
+		}
+	}
 	matched, ambiguous := 0, 0
 	for _, result := range results {
 		if result.TargetID != nil {
@@ -395,7 +404,7 @@ var geoObservationLabels = map[string]string{"yes": "Так", "no": "Не вия
 func writeGEOCSV(w http.ResponseWriter, report geoReport, rows []geoRow) {
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
-	_ = writer.Write([]string{"Запит", "Намір (евристика)", "Цільовий URL", "Збіг термінів, %", "Стара оцінка v1, %", "Оцінка контенту", "Прогалини", "Застереження", "Останні ручні AI-спостереження", "Категорії сигналів", "Googlebot: robots.txt", "OAI-SearchBot: robots.txt", "Google: індексація за директивами", "Google: snippet за директивами", "Джерело контенту", "Модель", "GPTBot: навчання", "HTTP-спостереження", "Лабораторні LCP/CLS", "Збіги абзаців 300–500 символів"})
+	_ = writer.Write([]string{"Запит", "Намір (евристика)", "Цільовий URL", "Збіг термінів, %", "Стара оцінка v1, %", "Оцінка контенту", "Прогалини", "Застереження", "Останні ручні AI-спостереження", "Категорії сигналів", "Googlebot: robots.txt", "OAI-SearchBot: robots.txt", "Google: індексація за директивами", "Google: snippet за директивами", "Джерело контенту", "Модель", "GPTBot: навчання", "HTTP-спостереження", "Лабораторні LCP/CLS", "Збіги абзаців 300–500 символів", "Google AI: технічні передумови", "ChatGPT Search: технічні передумови", "Зіставлення IDF / фрази / словоформи", "Сутності бренду"})
 	for _, row := range rows {
 		r := row.Result
 		score := ""
@@ -421,6 +430,11 @@ func writeGEOCSV(w http.ResponseWriter, report geoReport, rows []geoRow) {
 		}
 		cells = append(cells, strings.Join(categories, "\n"), geoRuleLabel(search.GooglebotRules), geoRuleLabel(search.OAISearchBotRules), geoRuleLabel(search.GoogleIndexing), geoRuleLabel(search.GoogleSnippet), r.ContentSource, report.Model)
 		cells = append(cells, geoRuleLabel(search.GPTBotRules), structuredReportValue(r.HTTP), structuredReportValue(r.Performance), structuredReportValue(r.BlockMatches))
+		eligibility := r.Eligibility
+		if eligibility == nil {
+			eligibility = geo.EvaluateEligibility(nil)
+		}
+		cells = append(cells, geoEligibilityLabel(eligibility.GoogleAI), geoEligibilityLabel(eligibility.ChatGPTSearch), structuredReportValue(r.Matching), structuredReportValue(r.Entities))
 		for i := range cells {
 			cells[i] = safeCSVCell(cells[i])
 		}
@@ -434,6 +448,15 @@ func writeGEOCSV(w http.ResponseWriter, report geoReport, rows []geoRow) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="geo-`+report.ID+`.csv"`)
 	_, _ = w.Write(append([]byte{0xef, 0xbb, 0xbf}, buffer.Bytes()...))
+}
+
+func geoEligibilityLabel(check geo.EligibilityCheck) string {
+	labels := map[string]string{geo.Allowed: "Заборони не виявлено", geo.Blocked: "Виявлено технічні обмеження", geo.Limited: "Фрагменти обмежено", geo.Unknown: "Недостатньо перевірених даних"}
+	label, ok := labels[check.Status]
+	if !ok {
+		label = labels[geo.Unknown]
+	}
+	return label + ": " + strings.Join(check.Reasons, "; ")
 }
 
 func geoRuleLabel(value string) string {
@@ -472,6 +495,10 @@ func (s *webServer) registerGEO(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /api/geo/reports/{id}/queries/{ordinal}/citation", s.geoSaveCitation)
 	mux.HandleFunc("GET /api/geo/reports/{id}/queries/{ordinal}/observations", s.geoObservations)
+	mux.HandleFunc("POST /api/geo/reports/{id}/visibility/imports", s.visibilitySubmit)
+	mux.HandleFunc("GET /api/geo/reports/{id}/visibility/imports", s.visibilityHistory)
+	mux.HandleFunc("GET /api/geo/reports/{id}/visibility/imports/{importID}", s.visibilityRows)
+	mux.HandleFunc("POST /api/geo/reports/{id}/visibility/imports/{importID}/delete", s.visibilityDelete)
 }
 
 func (s *webServer) geoObservations(w http.ResponseWriter, r *http.Request) {

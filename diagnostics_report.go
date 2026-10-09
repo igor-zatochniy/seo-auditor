@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/igor-zatochniy/seo-auditor/internal/geo"
+)
 
 func sanitizeDiagnosticRecord(record map[string]any) {
 	for key, value := range record {
@@ -28,6 +32,21 @@ func diagnosticReportDetails(value any) []reportDetail {
 		return nil
 	}
 	items := []reportDetail{}
+	if eligibility, ok := s["eligibility"].(map[string]any); ok {
+		for _, item := range []struct{ key, label string }{{"google_ai", "Google AI: технічні передумови"}, {"chatgpt_search", "ChatGPT Search: технічні передумови"}} {
+			check, _ := eligibility[item.key].(map[string]any)
+			state, _ := check["status"].(string)
+			reasons := []string{}
+			if list, ok := check["reasons"].([]any); ok {
+				for _, reason := range list {
+					if text, ok := reason.(string); ok {
+						reasons = append(reasons, text)
+					}
+				}
+			}
+			items = append(items, reportDetail{item.label, geoEligibilityLabel(geo.EligibilityCheck{Status: state, Reasons: reasons}), "AI-пошук"})
+		}
+	}
 	search, _ := s["search"].(map[string]any)
 	for _, f := range []struct{ key, label string }{{"googlebot_rules", "Googlebot"}, {"oai_searchbot_rules", "OAI-SearchBot (пошук)"}, {"gptbot_rules", "GPTBot (навчання)"}, {"google_indexing", "Google: індексація"}, {"google_snippet", "Google: snippet"}} {
 		items = append(items, reportDetail{f.label, geoRuleLabel(fmt.Sprint(search[f.key])), "Правила доступу"})

@@ -68,6 +68,7 @@ func createAuditRun(ctx context.Context, dbPool *pgxpool.Pool, cfg *Config) erro
 			     owner_generation = audit_runs.owner_generation + 1,
 			     status = EXCLUDED.status
 			 WHERE audit_runs.status IN ($4, $5)
+			   AND NOT EXISTS(SELECT 1 FROM audit_schedule_runs sr WHERE sr.run_id=audit_runs.id)
 			 RETURNING owner_generation`,
 			cfg.RunID,
 			effectiveWorkerInstanceID(*cfg),

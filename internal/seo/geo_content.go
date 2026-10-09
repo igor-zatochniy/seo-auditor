@@ -37,6 +37,10 @@ func (g *geoCollector) startContent(name []byte, attrs tagAttributes) {
 		return
 	}
 	tag := string(name)
+	// HTML дозволяє пропускати </p>; новий блок завершує попередній абзац.
+	if geoClosesParagraph(tag) {
+		g.endContent([]byte("p"))
+	}
 	previous := g.state
 	if !geoVoidElement(tag) {
 		if len(g.stack) >= 128 || len(name) > 64 {
@@ -46,9 +50,10 @@ func (g *geoCollector) startContent(name []byte, attrs tagAttributes) {
 		g.stack = append(g.stack, geoFrame{tag, previous})
 	}
 	role := strings.ToLower(strings.TrimSpace(string(attrs.role)))
-	if tag == "nav" || tag == "aside" || tag == "dialog" || role == "navigation" || role == "complementary" || role == "dialog" ||
+	if tag == "nav" || tag == "aside" || tag == "dialog" || tag == "form" || tag == "footer" ||
+		role == "navigation" || role == "complementary" || role == "dialog" || role == "form" || role == "contentinfo" ||
 		attrs.hidden || bytes.EqualFold(bytes.TrimSpace(attrs.ariaHidden), []byte("true")) ||
-		(!g.state.main && !g.state.article && (tag == "header" || tag == "footer" || role == "banner" || role == "contentinfo")) {
+		(!g.state.article && (tag == "header" || role == "banner")) {
 		g.state.excluded = true
 	}
 	if !g.state.excluded {
@@ -87,6 +92,14 @@ func (g *geoCollector) startContent(name []byte, attrs tagAttributes) {
 	if geoVoidElement(tag) {
 		g.state = previous
 	}
+}
+
+func geoClosesParagraph(tag string) bool {
+	switch tag {
+	case "p", "div", "main", "article", "section", "nav", "header", "footer", "aside", "form", "dialog", "ul", "ol", "table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "hr":
+		return true
+	}
+	return false
 }
 
 func geoVoidElement(tag string) bool {

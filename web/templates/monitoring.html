@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Моніторинг · SEO Auditor</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/monitoring.css">
+  <script src="/static/monitoring.js" defer></script>
+  <script src="/static/dialogs.js" defer></script>
+</head>
+<body>
+  <header class="app-header"><a class="brand" href="/">SEO Auditor<span class="local-label">ЛОКАЛЬНО</span></a><nav aria-label="Навігація"><a href="/">SEO-аудит</a><a href="/geo">Готовність до GEO</a><a href="/audits">Історія</a><a href="/monitoring" class="active" aria-current="page">Моніторинг</a></nav><span class="connection">PostgreSQL</span></header>
+  <main>
+    <div id="notice" role="alert" hidden></div>
+    <section aria-labelledby="monitor-title">
+      <div class="section-heading"><div><p class="eyebrow">ПЛАНОВІ АУДИТИ</p><h1 id="monitor-title">Моніторинг змін <span id="unread-count" class="badge"></span></h1></div><div class="actions"><button id="refresh" aria-label="Оновити" title="Оновити">↻</button><button id="new-schedule" class="primary">+ Новий розклад</button></div></div>
+      <div class="table-wrap"><table id="schedules"><thead><tr><th>Розклад / цілі</th><th>Періодичність</th><th>Наступний запуск</th><th>Останній аудит</th><th>Дії</th></tr></thead><tbody></tbody></table></div>
+    </section>
+    <section aria-labelledby="changes-title">
+      <div class="band-heading"><h2 id="changes-title">Сповіщення про зміни</h2><div class="actions"><select id="change-filter" aria-label="Фільтр сповіщень"><option value="all">Усі сповіщення</option><option value="unread">Непрочитані</option></select><button id="read-page">Позначити сторінку прочитаною</button></div></div>
+      <div id="selected-run" class="actions" hidden><span id="selected-run-label"></span><button id="all-changes">Усі аудити</button></div>
+      <div class="table-wrap"><table id="changes"><thead><tr><th>URL / розклад</th><th>Зміна</th><th>Було</th><th>Стало</th><th>Час / звіти</th></tr></thead><tbody></tbody></table></div>
+      <div class="pagination"><span id="change-count" class="muted" role="status"></span><div class="actions"><button id="changes-prev" aria-label="Попередня сторінка" title="Попередня сторінка">←</button><button id="changes-next" aria-label="Наступна сторінка" title="Наступна сторінка">→</button></div></div>
+    </section>
+    <footer><span>SEO Auditor</span><span id="updated" role="status"></span></footer>
+  </main>
+  <dialog id="schedule-dialog" aria-labelledby="schedule-heading">
+    <div class="dialog-heading"><h2 id="schedule-heading">Новий розклад</h2><button type="button" data-close="schedule-dialog" aria-label="Закрити">×</button></div>
+    <form id="schedule-form">
+      <div id="form-error" role="alert" hidden></div>
+      <label for="schedule-name">Назва</label><input id="schedule-name" required maxlength="120" autocomplete="off">
+      <div class="monitor-grid"><label>Інтервал, годин<input id="interval-hours" type="number" min="1" max="720" value="24" required></label><label><span id="time-label">Перший запуск</span><input id="next-run" type="datetime-local" required></label></div>
+      <label class="checkbox-label" id="enabled-label" hidden><input id="schedule-enabled" type="checkbox" checked> Розклад активний</label>
+      <div id="schedule-source">
+        <fieldset class="crawl-mode"><legend>Цілі</legend><label><input type="radio" name="schedule-mode" value="list" checked> Список URL</label><label><input type="radio" name="schedule-mode" value="site"> Обхід сайту</label></fieldset>
+        <div id="schedule-list"><label for="schedule-urls">URL сторінок</label><textarea id="schedule-urls" rows="5" spellcheck="false" placeholder="https://example.com/&#10;https://example.com/about" required></textarea></div>
+        <div id="schedule-site" hidden><label for="schedule-root">Стартовий URL</label><input id="schedule-root" type="url" maxlength="2048" placeholder="https://example.com/" disabled><div class="monitor-grid"><label>Ліміт сторінок<input id="schedule-pages" type="number" min="1" max="1000" value="100" disabled></label><label>Глибина<input id="schedule-depth" type="number" min="0" max="10" value="5" disabled></label></div><label class="checkbox-label"><input id="schedule-sitemaps" type="checkbox" checked disabled> Використовувати sitemap</label></div>
+        <label class="checkbox-label"><input id="schedule-render" type="checkbox" disabled> JavaScript і лабораторні LCP/CLS</label>
+      </div>
+      <div class="actions form-actions"><button type="button" data-close="schedule-dialog">Скасувати</button><button id="save-schedule" class="primary" type="submit">Зберегти розклад</button></div>
+    </form>
+  </dialog>
+  <dialog id="history-dialog" aria-labelledby="schedule-history-heading"><div class="dialog-heading"><h2 id="schedule-history-heading">Історія розкладу</h2><button data-close="history-dialog" aria-label="Закрити">×</button></div><div id="schedule-history"></div></dialog>
+</body>
+</html>

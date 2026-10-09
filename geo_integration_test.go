@@ -67,6 +67,9 @@ func TestGEOStoredAuditMappingAndCitation(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT geo_signals FROM audit_results WHERE run_id=$1", cfg.RunID).Scan(&signals); err != nil || signals == nil || !signals.Complete {
 		t.Fatalf("Сигнали не збережено: %+v %v", signals, err)
 	}
+	if signals.Version != 3 || signals.Eligibility == nil || signals.Eligibility.GoogleAI.Status != geo.Allowed || signals.Eligibility.ChatGPTSearch.Status != geo.Allowed {
+		t.Fatalf("Нову діагностику не збережено: %+v", signals)
+	}
 	if _, err := pool.Exec(ctx, "UPDATE audit_results SET safe_url='https://example.com/page' WHERE run_id=$1", cfg.RunID); err != nil {
 		t.Fatal(err)
 	}

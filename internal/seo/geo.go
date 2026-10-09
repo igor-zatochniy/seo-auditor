@@ -19,6 +19,8 @@ type geoCollector struct {
 	jsonBytes             int
 	types                 map[string]bool
 	signals               geo.Signals
+	entityNodes           []schemaEntityNode
+	entityIncomplete      bool
 }
 
 func newGEOCollector() geoCollector {
@@ -120,6 +122,7 @@ func (g *geoCollector) parseSchema() {
 		}
 		switch item := v.(type) {
 		case map[string]any:
+			g.captureEntity(item)
 			add := func(v any) {
 				s, _ := v.(string)
 				s = strings.TrimPrefix(strings.TrimPrefix(s, "https://schema.org/"), "http://schema.org/")
@@ -135,12 +138,17 @@ func (g *geoCollector) parseSchema() {
 			} else {
 				add(item["@type"])
 			}
-			for _, child := range item {
+			keys := make([]string, 0, len(item))
+			for key := range item {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
 				if nodes >= 2048 {
 					g.signals.SchemaIncomplete = true
 					break
 				}
-				visit(child, depth+1)
+				visit(item[key], depth+1)
 			}
 		case []any:
 			for _, child := range item {
@@ -157,12 +165,12 @@ func (g *geoCollector) parseSchema() {
 
 func (g *geoCollector) result() *geo.Signals {
 	s := g.signals
-	s.Version, s.Complete = 2, true
+	s.Version, s.Complete = 3, true
 	index := 0
 	s.ContentSource = "body"
-	if g.mainSeen {
+	if g.mainSeen && g.regions[1].content.RuneCount() > 0 {
 		index, s.ContentSource = 1, "main"
-	} else if g.articleSeen {
+	} else if g.articleSeen && g.regions[2].content.RuneCount() > 0 {
 		index, s.ContentSource = 2, "article"
 	}
 	r := &g.regions[index]
@@ -181,5 +189,6 @@ func (g *geoCollector) result() *geo.Signals {
 		s.SchemaTypes = append(s.SchemaTypes, typ)
 	}
 	sort.Strings(s.SchemaTypes)
+	s.Entities = g.entitySample()
 	return &s
 }

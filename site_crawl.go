@@ -83,7 +83,6 @@ func createSiteAuditRun(ctx context.Context, pool *pgxpool.Pool, cfg *Config, op
 	if err := validateSiteOptions(&options, cfg.AllowPrivateTargets); err != nil {
 		return err
 	}
-	_, origin, _ := normalizeSiteURL(options.RootURL, cfg.AllowPrivateTargets)
 	ctx, cancel := context.WithTimeout(ctx, cfg.DBWriteTimeout)
 	defer cancel()
 	tx, err := pool.Begin(ctx)
@@ -91,8 +90,23 @@ func createSiteAuditRun(ctx context.Context, pool *pgxpool.Pool, cfg *Config, op
 		return err
 	}
 	defer rollbackSiteTransaction(tx, *cfg)
+	if err = insertSiteAuditRun(ctx, tx, *cfg, options); err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	cfg.OwnerGeneration = 1
+	return nil
+}
+
+func insertSiteAuditRun(ctx context.Context, tx pgx.Tx, cfg Config, options siteCrawlOptions) error {
+	_, origin, err := normalizeSiteURL(options.RootURL, cfg.AllowPrivateTargets)
+	if err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_runs(id,started_at,heartbeat_at,worker_instance_id,owner_generation,status,targets_captured_at,total_urls,render_javascript)
-		VALUES($1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,$2,1,'running',CURRENT_TIMESTAMP,1,$3)`, cfg.RunID, effectiveWorkerInstanceID(*cfg), cfg.RenderJavaScript); err != nil {
+		VALUES($1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,$2,1,'running',CURRENT_TIMESTAMP,1,$3)`, cfg.RunID, effectiveWorkerInstanceID(cfg), cfg.RenderJavaScript); err != nil {
 		return err
 	}
 	state := "pending"
@@ -109,10 +123,6 @@ func createSiteAuditRun(ctx context.Context, pool *pgxpool.Pool, cfg *Config, op
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_site_nodes(run_id,target_id,url_fingerprint,safe_url,frontier_depth) VALUES($1,1,$2,$3,0)`, cfg.RunID, fingerprintURL(cfg.TargetFingerprintKey, options.RootURL), redactURL(options.RootURL)); err != nil {
 		return err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return err
-	}
-	cfg.OwnerGeneration = 1
 	return nil
 }
 

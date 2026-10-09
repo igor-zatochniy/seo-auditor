@@ -33,6 +33,8 @@ type webServer struct {
 }
 
 func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
+	ctx, stopBackground := context.WithCancel(ctx)
+	defer stopBackground()
 	wc, err := appconfig.LoadWeb()
 	if err != nil {
 		slog.Error("Некоректна web-конфігурація", "error", err)
@@ -49,11 +51,15 @@ func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
+	schedulerDone := make(chan struct{})
+	go func() { defer close(schedulerDone); app.runScheduler(ctx) }()
 	slog.Info("SEO Auditor web запущено", "address", wc.Addr)
 	select {
 	case <-ctx.Done():
 	case err := <-done:
+		stopBackground()
 		manager.shutdown()
+		<-schedulerDone
 		if !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("Web-сервер зупинився", "error", err)
 			return exitFatal
@@ -61,6 +67,7 @@ func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
 		return exitSuccess
 	}
 	manager.shutdown()
+	<-schedulerDone
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(stopCtx); err != nil {
@@ -73,6 +80,7 @@ func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
 func (s *webServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerGEO(mux)
+	s.registerSchedules(mux)
 	assets, _ := fs.Sub(webAssets, "web/static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(assets))))
 	page := template.Must(template.ParseFS(webAssets, "web/templates/index.html"))

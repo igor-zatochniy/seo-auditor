@@ -3,10 +3,8 @@ package geo
 import (
 	"context"
 	"errors"
-	"math"
 	"net"
 	"net/url"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -20,7 +18,7 @@ import (
 const (
 	MaxQueries = 1000
 	MaxPages   = 1000
-	Model      = "local-lexical-v3"
+	Model      = "local-lexical-v4"
 )
 
 type Input struct {
@@ -169,9 +167,10 @@ type Page struct {
 }
 
 type Candidate struct {
-	TargetID int64  `json:"target_id"`
-	URL      string `json:"url"`
-	Coverage int    `json:"coverage"`
+	TargetID  int64  `json:"target_id"`
+	URL       string `json:"url"`
+	Coverage  int    `json:"coverage"`
+	Relevance int    `json:"relevance,omitempty"`
 }
 
 type Check struct {
@@ -213,6 +212,9 @@ type Result struct {
 	Performance   *performance.Result `json:"performance,omitempty"`
 	Blocks        *BlockSample        `json:"blocks,omitempty"`
 	BlockMatches  []BlockMatch        `json:"block_matches,omitempty"`
+	Matching      *Matching           `json:"matching,omitempty"`
+	Eligibility   *AIEligibility      `json:"eligibility,omitempty"`
+	Entities      *EntityAssessment   `json:"entities,omitempty"`
 }
 
 type posting struct {
@@ -224,31 +226,9 @@ func Analyze(ctx context.Context, queries []string, pages []Page) ([]Result, err
 	if len(queries) > MaxQueries || len(pages) > MaxPages {
 		return nil, errors.New("перевищено ліміт локального аналізу")
 	}
-	index := make(map[string][]posting)
-	for i, page := range pages {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		weights := map[string]int{}
-		add := func(text string, weight int) {
-			for _, term := range terms(text) {
-				weights[term] = max(weights[term], weight)
-			}
-		}
-		add(page.Title, 4)
-		add(page.H1, 4)
-		add(page.Description, 2)
-		if u, err := url.Parse(page.URL); err == nil {
-			path, _ := url.PathUnescape(u.EscapedPath())
-			add(path, 1)
-		}
-		if page.Signals != nil && page.Signals.Complete && !page.Signals.ContentIncomplete {
-			add(page.Signals.Headings, 3)
-			add(page.Signals.Excerpt, 1)
-		}
-		for term, weight := range weights {
-			index[term] = append(index[term], posting{i, weight})
-		}
+	corpus, err := buildLexicalCorpus(ctx, pages)
+	if err != nil {
+		return nil, err
 	}
 	results := make([]Result, 0, len(queries))
 	counts := map[int64]int{}
@@ -257,58 +237,35 @@ func Analyze(ctx context.Context, queries []string, pages []Page) ([]Result, err
 			return nil, err
 		}
 		qt := terms(query)
-		matches, weights := make([]int, len(pages)), make([]int, len(pages))
-		for _, term := range qt {
-			for _, p := range index[term] {
-				matches[p.page]++
-				weights[p.page] += p.weight
-			}
+		order, err := corpus.rank(ctx, query, qt)
+		if err != nil {
+			return nil, err
 		}
-		order := make([]int, len(pages))
-		for i := range pages {
-			order[i] = i
-		}
-		sort.Slice(order, func(i, j int) bool {
-			a, b := order[i], order[j]
-			if matches[a] != matches[b] {
-				return matches[a] > matches[b]
-			}
-			if weights[a] != weights[b] {
-				return weights[a] > weights[b]
-			}
-			return pages[a].TargetID < pages[b].TargetID
-		})
 		r := Result{Query: query, Intent: intent(query), Level: "unknown", Matched: []string{}, Missing: []string{}, Alternatives: []Candidate{}, Checks: []Check{}, Gaps: []string{}, Warnings: []string{}}
-		for _, i := range order {
-			if matches[i] == 0 || len(r.Alternatives) == 3 {
+		for _, candidate := range order {
+			if len(r.Alternatives) == 3 {
 				break
 			}
-			r.Alternatives = append(r.Alternatives, Candidate{pages[i].TargetID, pages[i].URL, int(math.Round(100 * float64(matches[i]) / float64(len(qt))))})
+			page := pages[candidate.page]
+			r.Alternatives = append(r.Alternatives, Candidate{TargetID: page.TargetID, URL: page.URL, Coverage: candidate.coverage, Relevance: candidate.matching.Relevance})
 		}
-		if len(r.Alternatives) == 0 || r.Alternatives[0].Coverage < 50 {
+		if len(order) == 0 || order[0].coverage < 50 || order[0].matching.WeightedCoverage < 50 {
 			r.Missing = qt
 			r.Gaps = append(r.Gaps, "Відповідну сторінку не знайдено у вибраному аудиті. Перевірте повноту обходу та наявність цільової сторінки.")
 		} else {
 			best := order[0]
-			page := pages[best]
+			page := pages[best.page]
 			id := page.TargetID
 			r.TargetID, r.TargetURL, r.Coverage = &id, page.URL, r.Alternatives[0].Coverage
 			counts[id]++
-			for _, term := range qt {
-				found := false
-				for _, p := range index[term] {
-					if p.page == best {
-						found = true
-						break
-					}
-				}
-				if found {
-					r.Matched = append(r.Matched, term)
-				} else {
-					r.Missing = append(r.Missing, term)
-				}
+			r.Matched, r.Missing, r.Matching = best.matched, best.missing, &best.matching
+			r.Ambiguous = len(order) > 1 && order[1].coverage >= 50 && order[1].matching.WeightedCoverage >= 50 && order[1].matching.Relevance >= best.matching.Relevance-10
+			if len(best.matching.Approximate) > 0 {
+				r.Warnings = append(r.Warnings, "Є збіги словоформ або друкарських помилок; перевірте запропоновану сторінку вручну.")
 			}
-			r.Ambiguous = len(r.Alternatives) > 1 && r.Alternatives[1].Coverage >= max(50, r.Coverage-10)
+			if best.matching.Limited {
+				r.Warnings = append(r.Warnings, "Застосовано ліміти локального індексу або наближеного пошуку; деякі терміни чи фрази могли не потрапити до зіставлення.")
+			}
 			if r.Ambiguous {
 				r.Warnings = append(r.Warnings, "Є близькі кандидати. Це підстава для ручного порівняння, а не доказ канібалізації.")
 			}
@@ -328,15 +285,19 @@ func Analyze(ctx context.Context, queries []string, pages []Page) ([]Result, err
 }
 
 func evaluate(r *Result, page Page, qt []string) {
-	if page.Signals == nil || !page.Signals.Complete || page.Signals.Version < 1 || page.Signals.Version > 2 {
+	if page.Signals == nil || !page.Signals.Complete || page.Signals.Version < 1 || page.Signals.Version > 3 {
 		r.Warnings = append(r.Warnings, "Немає нових сигналів контенту. Повторіть SEO-аудит для оцінки готовності.")
 		return
 	}
 	s := page.Signals
+	r.Eligibility = EvaluateEligibility(s)
+	if r.Eligibility.GoogleAI.Status == Blocked || r.Eligibility.ChatGPTSearch.Status == Blocked {
+		r.Warnings = append(r.Warnings, "Виявлено технічні обмеження AI-пошуку. Перевірте окремі блоки Google AI / ChatGPT Search; оцінка структури контенту їх не скасовує.")
+	}
 	r.HTTP, r.Performance, r.Blocks = s.HTTP, s.Performance, s.Blocks
 	r.BlockMatches = matchBlocks(s.Blocks, qt)
 	r.Search = &SearchControls{GooglebotRules: Unknown, OAISearchBotRules: Unknown, GoogleIndexing: Unknown, GoogleSnippet: Unknown}
-	if s.Version == 2 {
+	if s.Version >= 2 {
 		copy := s.Search
 		r.Search = &copy
 		r.ContentSource = s.ContentSource
@@ -346,6 +307,9 @@ func evaluate(r *Result, page Page, qt []string) {
 	if s.ContentIncomplete {
 		r.Warnings = append(r.Warnings, "Перевищено ліміт структури HTML для GEO. Категорії контенту не оцінено; звичайні SEO-метрики збережені.")
 		return
+	}
+	if s.Version == 2 {
+		r.Warnings = append(r.Warnings, "Вибірка контенту попередньої версії могла містити форми чи службові header/footer. Для уточнення повторіть SEO-аудит.")
 	}
 	check := func(category, name string, passed bool, evidence, recommendation string) {
 		r.Checks = append(r.Checks, Check{Name: name, Passed: passed, Evidence: evidence, Recommendation: recommendation, Category: category})
@@ -357,7 +321,7 @@ func evaluate(r *Result, page Page, qt []string) {
 	matched := 0
 	for _, q := range qt {
 		for _, term := range paragraph {
-			if q == term {
+			if q == term || wordFamily(q) == wordFamily(term) {
 				matched++
 				break
 			}

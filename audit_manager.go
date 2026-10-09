@@ -74,6 +74,12 @@ func (m *AuditManager) startWithRendering(ctx context.Context, urls []string, re
 	} else if err := createExplicitAuditRun(ctx, m.pool, &cfg, urls); err != nil {
 		return "", err
 	}
+	m.launchLocked(cfg)
+	return cfg.RunID, nil
+}
+
+// Викликається лише під m.mu після успішного commit запуску та його цілей.
+func (m *AuditManager) launchLocked(cfg Config) {
 	runCtx, cancel := context.WithCancel(m.root)
 	m.active, m.cancel, m.done = cfg.RunID, cancel, make(chan struct{})
 	go func() {
@@ -88,7 +94,6 @@ func (m *AuditManager) startWithRendering(ctx context.Context, urls []string, re
 		m.active, m.cancel = "", nil
 		close(m.done)
 	}()
-	return cfg.RunID, nil
 }
 
 func (m *AuditManager) cancelRun(id string) bool {

@@ -28,7 +28,7 @@ func TestGEOStorageSanitizesNullWithoutChangingSEOData(t *testing.T) {
 
 func TestGEOUsesExistingAPISecurity(t *testing.T) {
 	h := testWebApp().handler()
-	for _, path := range []string{"/api/geo/sources", "/api/geo/reports", "/api/geo/reports/00000000-0000-4000-8000-000000000001", "/api/geo/reports/00000000-0000-4000-8000-000000000001/queries/1/observations"} {
+	for _, path := range []string{"/api/geo/sources", "/api/geo/reports", "/api/geo/reports/00000000-0000-4000-8000-000000000001", "/api/geo/reports/00000000-0000-4000-8000-000000000001/queries/1/observations", "/api/geo/reports/00000000-0000-4000-8000-000000000001/visibility/imports", "/api/geo/reports/00000000-0000-4000-8000-000000000001/visibility/imports/00000000-0000-4000-8000-000000000002"} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("GET", "http://127.0.0.1:8080"+path, nil))
 		if w.Code != 401 {
@@ -62,6 +62,14 @@ func TestGEOManualCitationValidationAndRedaction(t *testing.T) {
 		if err := validateGEOCitation(&c); err == nil {
 			t.Fatal("Небезпечне посилання прийнято")
 		}
+	}
+}
+
+func TestEntityStorageSanitizesWithoutMutatingInput(t *testing.T) {
+	original := &geo.EntitySample{Version: 1, Complete: true, Organizations: []geo.EntityRecord{{Name: "Brand\x00", Types: []string{"https://example.com/Type?token=private-type"}, SameAs: []string{"https://example.com/?token=private-value"}}}}
+	got := sanitizeSEODataForStorage(SEOData{GEO: &geo.Signals{Entities: original}})
+	if got.GEO.Entities == original || strings.Contains(got.GEO.Entities.Organizations[0].Types[0], "private-type") || strings.Contains(got.GEO.Entities.Organizations[0].SameAs[0], "private-value") || strings.ContainsRune(got.GEO.Entities.Organizations[0].Name, 0) || !strings.Contains(original.Organizations[0].SameAs[0], "private-value") {
+		t.Fatal("Очищення сутностей не ізольоване або URL не замасковано")
 	}
 }
 

@@ -21,6 +21,8 @@ type Signals struct {
 	Blocks            *BlockSample        `json:"blocks,omitempty"`
 	HTTP              *HTTPObservation    `json:"http,omitempty"`
 	Performance       *performance.Result `json:"performance,omitempty"`
+	Eligibility       *AIEligibility      `json:"eligibility,omitempty"`
+	Entities          *EntitySample       `json:"entities,omitempty"`
 }
 
 const (

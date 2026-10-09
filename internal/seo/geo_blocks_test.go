@@ -22,7 +22,7 @@ func TestGEOAnswerBlocksAreBoundedAndContextual(t *testing.T) {
 		{"whitespace", "<p>" + strings.Repeat("a", 150) + " \n\t " + strings.Repeat("b", 149) + "</p>", 1, true, ""},
 		{"hidden", "<p hidden>" + strings.Repeat("a", 300) + "</p>", 0, true, ""},
 		{"template", "<template><p>" + strings.Repeat("a", 300) + "</p></template>", 0, true, ""},
-		{"main_preferred", "<nav><p>" + strings.Repeat("a", 300) + "</p></nav><main><header><h2>Авторська відповідь</h2></header><p>" + strings.Repeat("б", 300) + "</p></main>", 1, true, "Авторська відповідь"},
+		{"main_preferred", "<nav><p>" + strings.Repeat("a", 300) + "</p></nav><main><article><header><h2>Авторська відповідь</h2></header><p>" + strings.Repeat("б", 300) + "</p></article></main>", 1, true, "Авторська відповідь"},
 		{"bounded_sample", strings.Repeat("<p>"+strings.Repeat("a", 300)+"</p>", 20), 20, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
