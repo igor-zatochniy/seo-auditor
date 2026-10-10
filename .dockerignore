@@ -1,5 +1,6 @@
 .env
 .env.*
+web/e2e/node_modules
 !.env.example
 .git
 .gocache
@@ -8,3 +9,14 @@ coverage.out
 *.test
 reports/*.html
 k8s/**/*.local.yaml
+backups/
+*.seobak
+*.seobak.*.partial
+*.dump
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt

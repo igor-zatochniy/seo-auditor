@@ -80,6 +80,7 @@ func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
 func (s *webServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerGEO(mux)
+	s.registerGEOStrategy(mux)
 	s.registerSchedules(mux)
 	assets, _ := fs.Sub(webAssets, "web/static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(assets))))
@@ -114,6 +115,7 @@ func (s *webServer) handler() http.Handler {
 	mux.HandleFunc("GET /api/audits/{id}/results", s.results)
 	mux.HandleFunc("GET /api/audits/{id}/results/{target}/rendering", s.renderingDetail)
 	mux.HandleFunc("GET /api/audits/{id}/graph", s.graph)
+	mux.HandleFunc("GET /api/audits/{id}/international", s.internationalReport)
 	mux.HandleFunc("POST /api/audits/{id}/cancel", s.cancel)
 	mux.HandleFunc("POST /api/audits/{id}/resume", s.resume)
 	mux.HandleFunc("GET /api/audits/{id}/export/{format}", s.export)

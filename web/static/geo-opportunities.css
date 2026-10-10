@@ -1,0 +1,22 @@
+#geo-report > .section-heading > div { min-width: 0; max-width: 100%; }
+#report-reference, #report-title, #report-meta { overflow-wrap: anywhere; }
+#impact-baseline { min-width: 0; max-width: 100%; }
+#geo-opportunity-section td, #geo-impact-section td { overflow-wrap: anywhere; vertical-align: top; }
+#opportunity-table td:nth-child(3) { min-width: 240px; max-width: 400px; }
+#opportunity-table td:nth-child(5) { min-width: 220px; max-width: 350px; }
+#opportunity-table td > small, #opportunity-table td:nth-child(4) > strong { display: block; }
+#opportunity-links td { min-width: 140px; max-width: 300px; }
+#impact-table td { min-width: 160px; max-width: 320px; }
+#impact-chart { display: block; width: 100%; height: auto; aspect-ratio: 25 / 6; border-bottom: 1px solid #dbe3e7; margin: 16px 0; }
+#geo-target-edit select, #geo-target-edit textarea { width: 100%; min-width: 0; max-width: 100%; }
+#geo-target-edit label { display: block; margin: 16px 0; }
+.opportunity-proof { font-size: 13px; margin: 0 0 10px; }
+.opportunity-proof strong { display: block; }
+#opportunity-table .opportunity-high { color: #a4262c; }
+#opportunity-table .opportunity-medium { color: #835b12; }
+#opportunity-table .opportunity-low { color: #32687a; }
+@media (max-width: 640px) {
+  #geo-opportunity-section .actions, #geo-impact-section .table-toolbar { flex-wrap: wrap; }
+  #geo-opportunity-section .section-heading { align-items: flex-start; flex-direction: column; }
+  #impact-chart { aspect-ratio: 5 / 2; }
+}

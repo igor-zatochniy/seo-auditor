@@ -1,0 +1,7 @@
+{
+  "name": "seo-auditor-quality-gate",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Ізольована браузерна перевірка SEO Auditor",
+  "devDependencies": { "playwright": "1.62.1" }
+}

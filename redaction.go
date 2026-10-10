@@ -131,6 +131,15 @@ func sanitizeError(err error) string {
 }
 
 func sanitizeSEODataForStorage(data SEOData) SEOData {
+	if data.International != nil {
+		copy := *data.International
+		copy.Links = append(copy.Links[:0:0], copy.Links...)
+		for i := range copy.Links {
+			copy.Links[i].URL = redactURL(copy.Links[i].URL)
+			copy.Links[i].Language = sanitizeGEOTextForStorage(copy.Links[i].Language, 64)
+		}
+		data.International = &copy
+	}
 	if data.Rendering != nil {
 		data.Rendering.Sanitize(func(v string) string { return sanitizeGEOTextForStorage(v, 8192) }, redactURL)
 	}

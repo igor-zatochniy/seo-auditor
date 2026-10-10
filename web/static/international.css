@@ -1,0 +1,9 @@
+.view-tabs { flex-wrap: wrap; }
+#international table { min-width: 840px; }
+#international td { min-width: 140px; }
+#international td:first-child { min-width: 220px; }
+#international td:last-child { min-width: 240px; }
+#international tbody tr { cursor: default; }
+#international .error-text { color: var(--red); font-size: 12px; }
+#international td p { margin: 0 0 12px; }
+#international td div { margin-bottom: 8px; }

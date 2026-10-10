@@ -62,6 +62,8 @@
       const r = item.result, row = el("tr"); row.tabIndex = 0; row.setAttribute("aria-label","Деталі запиту: "+r.query);
       row.append(el("td",r.query),el("td",intents[r.intent]));
       const target = el("td",r.target_url || "Не знайдено в аудиті");
+      if(item.mapping_mode === "manual") target.append(badge("Ручний вибір","warning"));
+      if(item.confidence) { const label={high:"Висока",medium:"Середня",low:"Низька",unknown:"Недостатньо даних"}[item.confidence.level];const hint=el("small","Впевненість: "+label);hint.title=item.confidence.reason;target.append(hint); }
       if(r.ambiguous) target.append(badge("Близькі кандидати","warning"));
       row.append(target);
       const coverage = el("td",r.matching ? r.matching.relevance+" / 100" : r.coverage+"% термінів"), bar = el("progress"); bar.max=100; bar.value=r.matching?.relevance??r.coverage; bar.setAttribute("aria-label","Релевантність зіставлення"); coverage.append(bar); row.append(coverage);
@@ -175,7 +177,8 @@
       const report=data.report;$("report-reference").textContent="GEO / "+report.id;
       $("report-title").textContent=report.brand||report.domain;$("report-meta").textContent=report.domain+" · "+date(report.created_at)+" · Сторінок: "+report.page_count;
       const source=el("a","Вихідний SEO-аудит");source.href="/audits/"+report.source_run_id;$("report-meta").append(document.createTextNode(" · "),source);
-      for(const [label,value] of [["Усього запитів",report.query_count],["Зіставлено",report.matched_count],["Без сторінки",report.query_count-report.matched_count],["Близькі кандидати",report.ambiguous_count]]){const item=el("div",null,"summary-item");item.append(el("span",label,"summary-label"),el("strong",value,"summary-value"));$("geo-summary").append(item);}
+      const matched=rows.filter(r=>r.result.target_id!=null).length;
+      for(const [label,value] of [["Усього запитів",report.query_count],["Зіставлено",matched],["Без сторінки",report.query_count-matched],["Близькі кандидати",rows.filter(r=>r.result.ambiguous).length]]){const item=el("div",null,"summary-item");item.append(el("span",label,"summary-label"),el("strong",value,"summary-value"));$("geo-summary").append(item);}
       $("csv-export").href=`/api/geo/reports/${reportID}/export/csv`;
       $("search-query").oninput=()=>{page=0;renderTable();};$("geo-filter").onchange=()=>{page=0;renderTable();};$("geo-page-size").onchange=()=>{page=0;renderTable();};
       $("geo-prev").onclick=()=>{page--;renderTable();};$("geo-next").onclick=()=>{page++;renderTable();};renderTable();
@@ -185,6 +188,12 @@
       for(const source of sources){const option=el("option",date(source.started_at)+" · "+source.total+" URL");option.value=source.id;$("source-list").append(option);}
       if(sources.length)$("source-run").value=sources[0].id;$("no-sources").hidden=Boolean(sources.length);
     }
+    try { await window.seoStrategy.init({api,el,reportID,rows,notice}); } catch(error) { notice(error.message); }
+    try { await window.seoOpportunities.init({api,el,reportID,rows,notice,refreshRows:async()=>{
+      const refreshed=await api(`/api/geo/reports/${reportID}`);rows.splice(0,rows.length,...refreshed.rows);renderTable();
+      const totals=$("geo-summary").querySelectorAll("strong"),matched=rows.filter(r=>r.result.target_id!=null).length;
+      totals[1].textContent=matched;totals[2].textContent=rows.length-matched;totals[3].textContent=rows.filter(r=>r.result.ambiguous).length;
+    }}); } catch(error) { notice(error.message); }
     await history();
   }
   init().catch(error=>notice(error.message));

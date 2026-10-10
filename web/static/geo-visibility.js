@@ -38,14 +38,14 @@ window.seoVisibility = (() => {
     $("visibility-import-open").onclick=()=>{$("visibility-import-status").textContent="";$("visibility-import-dialog").showModal();};
     $("visibility-import-select").onchange=safe(async()=>{cursors=[0];page=0;await load();});
     $("visibility-prev").onclick=safe(async()=>{page--;await load();});$("visibility-next").onclick=safe(async()=>{if(next){cursors[++page]=next;await load();}});
-    $("visibility-delete").onclick=safe(async()=>{const id=$("visibility-import-select").value;if(id&&window.confirm("Видалити лише цей імпорт? SEO-результати та ручні спостереження залишаться.")){await api(`${base}/${id}/delete`,{});await history();}});
+    $("visibility-delete").onclick=safe(async()=>{const id=$("visibility-import-select").value;if(id&&window.confirm("Видалити лише цей імпорт? SEO-результати та ручні спостереження залишаться.")){await api(`${base}/${id}/delete`,{});window.dispatchEvent(new Event("geo:visibility-changed"));await history();}});
     $("visibility-import-form").onsubmit=async event=>{
       event.preventDefault();$("visibility-import-save").disabled=true;$("visibility-import-status").textContent="";
       try{
         const file=$("visibility-file").files[0];if(!file||file.size>2*1024*1024)throw new Error("Оберіть CSV-файл до 2 МіБ");
         const input={source:$("visibility-source").value,engine:$("visibility-engine").value,period_start:$("visibility-start").value,period_end:$("visibility-end").value,country:$("visibility-country").value.trim(),device:$("visibility-device").value,csv:await file.text()};
         const signature=JSON.stringify(input);if(signature!==lastPayload){lastPayload=signature;requestID=crypto.randomUUID();}
-        const result=await api(base,{...input,id:requestID});$("visibility-import-dialog").close();await history(result.id);
+        const result=await api(base,{...input,id:requestID});window.dispatchEvent(new Event("geo:visibility-changed"));$("visibility-import-dialog").close();await history(result.id);
       }catch(error){$("visibility-import-status").textContent=error.message;}finally{$("visibility-import-save").disabled=false;}
     };
     await history();

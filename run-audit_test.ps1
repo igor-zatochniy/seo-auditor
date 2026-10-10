@@ -77,6 +77,23 @@ try {
     Assert-Condition (-not (Test-Path -LiteralPath $secondOldArchive -PathType Leaf)) "Host report retention kept the oldest archive."
     Assert-Condition (Test-Path -LiteralPath $latestReport -PathType Leaf) "Host report retention removed latest-report.html."
 
+    & {
+        $dockerCalls = [System.Collections.Generic.List[string]]::new()
+        $previousExitCode = $global:LASTEXITCODE
+        function docker {
+            $dockerCalls.Add(($args -join ' '))
+            $global:LASTEXITCODE = 1
+            if (($args -join ' ') -eq 'compose version') { $global:LASTEXITCODE = 0 }
+        }
+        try {
+            $failed = $false
+            try { Invoke-Audit } catch { $failed = $true }
+            Assert-Condition $failed 'The launcher continued after failed dependencies.'
+            Assert-Condition ($dockerCalls.Count -eq 2) 'The parser was created before healthy dependencies.'
+            Assert-Condition ($dockerCalls[1] -eq 'compose up -d --build --wait postgres egress-guard') 'The launcher did not wait for the egress firewall.'
+        } finally { $global:LASTEXITCODE = $previousExitCode }
+    }
+
     Write-Host "Windows report launcher tests passed."
 } finally {
     Remove-Item -LiteralPath $reportDirectory -Recurse -Force -ErrorAction SilentlyContinue

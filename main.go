@@ -58,6 +58,9 @@ func run() (exitCode int) {
 	if len(os.Args) > 1 {
 		mode = os.Args[1]
 	}
+	if mode == "retention" {
+		return runRetentionCommand(os.Args[2:])
+	}
 	if mode != "run" && mode != "serve" {
 		slog.Error("Невідомий режим; використовуйте run або serve")
 		return exitFatal

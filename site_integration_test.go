@@ -72,7 +72,7 @@ func TestSiteSitemapIndexGzipAndScope(t *testing.T) {
 			fmt.Fprintf(z, `<urlset><url><loc>%s/sitemap-only</loc></url></urlset>`, base)
 			z.Close()
 		case "/leave.xml":
-			http.Redirect(w, r, external.URL+"/map.xml", 302)
+			http.Redirect(w, r, external.URL+"/map.xml", http.StatusFound)
 		case "/denied.xml":
 			t.Error("robots-disallowed sitemap fetched")
 			http.NotFound(w, r)
@@ -126,7 +126,7 @@ func TestSiteCrawlPipelineGraphAndPrivacy(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		case "/move":
-			http.Redirect(w, r, "/final", 301)
+			http.Redirect(w, r, "/final", http.StatusMovedPermanently)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

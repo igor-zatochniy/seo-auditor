@@ -46,6 +46,8 @@ type geoInputError struct{ message string }
 
 func (e geoInputError) Error() string { return e.message }
 
+var errGEOAnalysisBusy = geoInputError{"Інший GEO-аналіз ще виконується. Спробуйте пізніше."}
+
 func (s *webServer) createGEO(ctx context.Context, input geo.Input, queries []string) (geoReport, error) {
 	var empty geoReport
 	// Одна транзакція: стабільне джерело, звіт і всі рядки або повний rollback.
@@ -58,12 +60,25 @@ func (s *webServer) createGEO(ctx context.Context, input geo.Input, queries []st
 		defer cancel()
 		_ = tx.Rollback(cleanup)
 	}()
+	report, err := s.createGEOInTransaction(ctx, tx, input, queries)
+	if err != nil {
+		return empty, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return empty, err
+	}
+	return report, nil
+}
+
+func (s *webServer) createGEOInTransaction(ctx context.Context, tx pgx.Tx, input geo.Input, queries []string) (geoReport, error) {
+	var empty geoReport
+	var err error
 	var locked bool
 	if err = tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(8247310004)").Scan(&locked); err != nil {
 		return empty, err
 	}
 	if !locked {
-		return empty, geoInputError{"Інший GEO-аналіз ще виконується. Спробуйте пізніше."}
+		return empty, errGEOAnalysisBusy
 	}
 	input.Queries = strings.Join(queries, "\n")
 	payload, err := json.Marshal(input)
@@ -157,9 +172,6 @@ func (s *webServer) createGEO(ctx context.Context, input geo.Input, queries []st
 	if err = tx.SendBatch(ctx, batch).Close(); err != nil {
 		return empty, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return empty, err
-	}
 	return report, nil
 }
 
@@ -251,9 +263,14 @@ func (s *webServer) geoHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 type geoRow struct {
-	Ordinal   int           `json:"ordinal"`
-	Result    geo.Result    `json:"result"`
-	Citations []geoCitation `json:"citations"`
+	Ordinal          int             `json:"ordinal"`
+	Result           geo.Result      `json:"result"`
+	Citations        []geoCitation   `json:"citations"`
+	AutomaticResult  *geo.Result     `json:"automatic_result,omitempty"`
+	DecisionRevision int64           `json:"decision_revision"`
+	DecisionReason   string          `json:"decision_reason,omitempty"`
+	MappingMode      string          `json:"mapping_mode,omitempty"`
+	Confidence       *geo.Confidence `json:"confidence,omitempty"`
 }
 
 func loadGEORows(ctx context.Context, tx pgx.Tx, id string) ([]geoRow, error) {
@@ -292,7 +309,7 @@ func (s *webServer) geoGet(w http.ResponseWriter, r *http.Request) {
 		webDBError(w, err)
 		return
 	}
-	rows, err := loadGEORows(r.Context(), tx, id)
+	rows, err := loadEffectiveGEORows(r.Context(), tx, id)
 	if err != nil {
 		webDBError(w, err)
 		return
@@ -435,6 +452,9 @@ func writeGEOCSV(w http.ResponseWriter, report geoReport, rows []geoRow) {
 			eligibility = geo.EvaluateEligibility(nil)
 		}
 		cells = append(cells, geoEligibilityLabel(eligibility.GoogleAI), geoEligibilityLabel(eligibility.ChatGPTSearch), structuredReportValue(r.Matching), structuredReportValue(r.Entities))
+		if row.MappingMode == "manual" {
+			cells[7] += "\nЦіль обрано вручну: " + row.DecisionReason
+		}
 		for i := range cells {
 			cells[i] = safeCSVCell(cells[i])
 		}

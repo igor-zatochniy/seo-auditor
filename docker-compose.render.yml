@@ -3,6 +3,13 @@ services:
   parser:
     environment:
       RENDER_BROWSER_URL: http://browser:9222
+    depends_on:
+      browser:
+        condition: service_healthy
+
+  egress-guard:
+    environment:
+      EGRESS_BROWSER_HOST: browser
     networks:
       - render-isolated
     depends_on:

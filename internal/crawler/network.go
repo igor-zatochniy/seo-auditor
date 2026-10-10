@@ -133,13 +133,17 @@ func NewRobotsHTTPClient(transport http.RoundTripper, maxRedirects int) *http.Cl
 }
 
 func SafeDialContext(dialer *net.Dialer, allowPrivateTargets bool) func(context.Context, string, string) (net.Conn, error) {
+	return safeDialContext(allowPrivateTargets, net.DefaultResolver.LookupNetIP, dialer.DialContext)
+}
+
+func safeDialContext(allowPrivateTargets bool, lookup func(context.Context, string, string) ([]netip.Addr, error), dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, fmt.Errorf("split dial address %q: %w", address, err)
 		}
 
-		ips, err := resolveDialIPs(ctx, network, host)
+		ips, err := resolveDialIPs(ctx, network, host, lookup)
 		if err != nil {
 			return nil, err
 		}
@@ -154,7 +158,7 @@ func SafeDialContext(dialer *net.Dialer, allowPrivateTargets bool) func(context.
 			}
 
 			dialAddress := net.JoinHostPort(ip.String(), port)
-			conn, err := dialer.DialContext(ctx, network, dialAddress)
+			conn, err := dial(ctx, network, dialAddress)
 			if err == nil {
 				return conn, nil
 			}
@@ -264,7 +268,7 @@ func ValidateResolvedTargetIPs(host string, ips []netip.Addr, allowPrivateTarget
 	return nil
 }
 
-func resolveDialIPs(ctx context.Context, network, host string) ([]netip.Addr, error) {
+func resolveDialIPs(ctx context.Context, network, host string, lookup func(context.Context, string, string) ([]netip.Addr, error)) ([]netip.Addr, error) {
 	normalizedHost := strings.Trim(strings.TrimSpace(strings.TrimSuffix(host, ".")), "[]")
 	if normalizedHost == "" {
 		return nil, fmt.Errorf("empty dial host")
@@ -281,7 +285,7 @@ func resolveDialIPs(ctx context.Context, network, host string) ([]netip.Addr, er
 		lookupNetwork = "ip6"
 	}
 
-	ips, err := net.DefaultResolver.LookupNetIP(ctx, lookupNetwork, normalizedHost)
+	ips, err := lookup(ctx, lookupNetwork, normalizedHost)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", normalizedHost, err)
 	}
