@@ -138,7 +138,7 @@ jobs:
           --severity HIGH,CRITICAL --skip-version-check seo-auditor-postgres:ci
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@aa0e114b2e19480f157109b9922bda359bd98b90 # v0.20.8
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: seo-auditor:ci
           artifact-name: seo-auditor.spdx.json
