@@ -661,7 +661,7 @@ func TestAuditRunCompletionUsesPerBatchWriteTimeout(t *testing.T) {
 		WorkerInstanceID:     "bounded-completion-worker",
 		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
 		URLBatchSize:         2,
-		DBWriteTimeout:       800 * time.Millisecond,
+		DBWriteTimeout:       2 * time.Second,
 		DBFetchTimeout:       time.Second,
 	}
 	if err := createAuditRun(ctx, pool, &cfg); err != nil {
@@ -692,7 +692,7 @@ func TestAuditRunCompletionUsesPerBatchWriteTimeout(t *testing.T) {
 			     IF OLD.run_id = '%s'::UUID
 			        AND OLD.request_url <> ''
 			        AND NEW.request_url = '' THEN
-			         PERFORM pg_sleep(0.15);
+			         PERFORM pg_sleep(0.4);
 			     END IF;
 			     RETURN NEW;
 			 END

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/international"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -54,14 +55,16 @@ func (c *robotsPolicyCache) sitemapLocations(ctx context.Context, client *http.C
 	return p.sitemaps, err
 }
 
-// XML tokenization is bounded by decoded bytes, nesting, token count and URL count.
-func parseSitemap(ctx context.Context, reader io.Reader, limit int) (urls []string, index, limited bool, err error) {
+// XML обмежено декодованими байтами, вкладеністю, токенами та кількістю URL.
+func parseSitemap(ctx context.Context, reader io.Reader, limit int, annotations ...map[string]*international.Evidence) (urls []string, index, limited bool, err error) {
 	bounded := &io.LimitedReader{R: reader, N: maxSitemapBytes + 1}
 	d := xml.NewDecoder(bounded)
 	stack := make([]string, 0, 8)
 	var loc strings.Builder
 	inLoc := false
 	root := ""
+	var pageURL string
+	var evidence *international.Evidence
 	for tokens := 0; tokens < 100000; tokens++ {
 		if err = ctx.Err(); err != nil {
 			return
@@ -106,6 +109,35 @@ func parseSitemap(ctx context.Context, reader io.Reader, limit int) (urls []stri
 				inLoc = true
 				loc.Reset()
 			}
+			if !index && len(stack) == 2 && t.Name.Local == "url" {
+				pageURL = ""
+				evidence = &international.Evidence{Links: []international.Alternate{}, Complete: true}
+			}
+			if !index && len(annotations) > 0 && len(stack) == 3 && stack[1] == "url" && t.Name.Local == "link" && t.Name.Space == "http://www.w3.org/1999/xhtml" && evidence != nil {
+				var rel, lang, href string
+				for _, a := range t.Attr {
+					if a.Name.Space != "" {
+						continue
+					}
+					switch a.Name.Local {
+					case "rel":
+						rel = a.Value
+					case "hreflang":
+						lang = a.Value
+					case "href":
+						href = a.Value
+					}
+				}
+				if strings.EqualFold(strings.TrimSpace(rel), "alternate") && lang != "" {
+					if len(evidence.Links) >= international.MaxAlternates || len(href) > 2048 || len(lang) > 64 {
+						evidence.Complete = false
+					} else {
+						u, e := url.Parse(href)
+						valid := e == nil && u.IsAbs() && u.Host != "" && (u.Scheme == "https" || u.Scheme == "http") && u.User == nil && u.Fragment == ""
+						evidence.Links = append(evidence.Links, international.Alternate{Language: strings.TrimSpace(lang), URL: href, Absolute: valid, ValidURL: valid})
+					}
+				}
+			}
 		case xml.CharData:
 			if inLoc {
 				if loc.Len()+len(t) > 2048 {
@@ -124,6 +156,19 @@ func parseSitemap(ctx context.Context, reader io.Reader, limit int) (urls []stri
 						return
 					}
 					urls = append(urls, value)
+					pageURL = value
+				}
+			}
+			if !index && len(stack) == 2 && t.Name.Local == "url" && pageURL != "" && evidence != nil && len(annotations) > 0 && len(annotations[0]) < limit {
+				if old := annotations[0][pageURL]; old != nil {
+					old.Links = append(old.Links, evidence.Links...)
+					old.Complete = old.Complete && evidence.Complete
+					if len(old.Links) > international.MaxAlternates {
+						old.Links = old.Links[:international.MaxAlternates]
+						old.Complete = false
+					}
+				} else {
+					annotations[0][pageURL] = evidence
 				}
 			}
 			stack = stack[:len(stack)-1]
@@ -133,7 +178,7 @@ func parseSitemap(ctx context.Context, reader io.Reader, limit int) (urls []stri
 	return
 }
 
-func fetchSitemap(ctx context.Context, client, robotsClient *http.Client, cache *robotsPolicyCache, cfg Config, site *siteCrawl, raw string, limit int) ([]string, bool, bool, error) {
+func fetchSitemap(ctx context.Context, client, robotsClient *http.Client, cache *robotsPolicyCache, cfg Config, site *siteCrawl, raw string, limit int, annotations ...map[string]*international.Evidence) ([]string, bool, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, cfg.HTTPTotalTimeout)
 	defer cancel()
 	for redirects := 0; redirects <= MaxRobotsRedirects; redirects++ {
@@ -184,7 +229,7 @@ func fetchSitemap(ctx context.Context, client, robotsClient *http.Client, cache 
 			defer z.Close()
 			reader = z
 		}
-		return parseSitemap(ctx, reader, limit)
+		return parseSitemap(ctx, reader, limit, annotations...)
 	}
 	return nil, false, false, fmt.Errorf("sitemap redirect budget exceeded")
 }
@@ -221,7 +266,8 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 			continue
 		}
 		seen[normalized] = true
-		urls, index, cutoff, err := fetchSitemap(ctx, client, robotsClient, cache, cfg, site, normalized, site.MaxPages)
+		annotations := map[string]*international.Evidence{}
+		urls, index, cutoff, err := fetchSitemap(ctx, client, robotsClient, cache, cfg, site, normalized, site.MaxPages, annotations)
 		if ctx.Err() != nil {
 			if parentCtx.Err() != nil {
 				return parentCtx.Err()
@@ -246,6 +292,9 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 				}
 			}
 			continue
+		}
+		if err := saveSitemapHreflang(ctx, pool, cfg, site, annotations); err != nil {
+			return err
 		}
 		for _, u := range urls {
 			normalized, origin, err := normalizeSiteURL(u, cfg.AllowPrivateTargets)

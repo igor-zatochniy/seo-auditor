@@ -10,6 +10,14 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot ".env.example") -Destination (Join-Path $temp ".env.example")
     $settings = Initialize-AuditorEnvironment -Directory $temp
     $before = [IO.File]::ReadAllText((Join-Path $temp ".env"))
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $acl = Get-Acl -LiteralPath (Join-Path $temp '.env')
+        if (-not $acl.AreAccessRulesProtected -or @($acl.Access | Where-Object IsInherited).Count -ne 0) { throw 'Private .env inherits permissions.' }
+        $allowed = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+        foreach ($entry in $acl.Access) {
+            if ($entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowed) { throw 'Unexpected .env reader.' }
+        }
+    }
     if ($settings["WEB_ACCESS_TOKEN"] -notmatch '^[0-9a-f]{64}$') { throw "Access token was not generated." }
     if ($before.Contains("change-me-locally") -or $before.Contains("local-development-only-fingerprint-key")) { throw "Placeholder secrets remain." }
     $again = Initialize-AuditorEnvironment -Directory $temp

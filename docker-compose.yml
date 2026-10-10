@@ -8,8 +8,6 @@ services:
       POSTGRES_USER: ${DB_USER:?DB_USER is required}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       POSTGRES_DB: ${DB_NAME:?DB_NAME is required}
-    ports:
-      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -26,14 +24,46 @@ services:
     networks:
       - seo-network
 
+  egress-guard:
+    build:
+      context: .
+      dockerfile: Dockerfile.egress
+    image: seo-auditor-egress:local
+    environment:
+      EGRESS_POSTGRES_HOST: postgres
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=4m
+      - /run:rw,nosuid,nodev,noexec,size=1m
+    mem_limit: 32m
+    cpus: 0.10
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/firewall-ready && iptables -C OUTPUT -p tcp -j ACCEPT && ip6tables -C OUTPUT -d 2000::/3 -p tcp -j ACCEPT"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - seo-network
+
   parser:
     build:
       context: .
       dockerfile: Dockerfile
     image: seo-auditor:local
     command: ["${AUDITOR_MODE:-serve}"]
-    ports:
-      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    network_mode: service:egress-guard
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
       interval: 5s
@@ -79,7 +109,7 @@ services:
       RATE_LIMIT_INTERVAL: ${RATE_LIMIT_INTERVAL:-500ms}
       MAX_CONCURRENT_PER_HOST: ${MAX_CONCURRENT_PER_HOST:-1}
       ROBOTS_CACHE_TTL: ${ROBOTS_CACHE_TTL:-1h}
-      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+      ALLOW_PRIVATE_TARGETS: "false"
       HTTP_MAX_RETRIES: ${HTTP_MAX_RETRIES:-2}
       DB_MAX_RETRIES: ${DB_MAX_RETRIES:-2}
       RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-200ms}
@@ -87,6 +117,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      egress-guard:
+        condition: service_healthy
+        restart: true
     restart: "no"
     read_only: true
     volumes:
@@ -99,8 +132,6 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: ${STOP_GRACE_PERIOD:-65s}
-    networks:
-      - seo-network
 
 volumes:
   pgdata:

@@ -20,6 +20,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  backup-windows:
+    name: Windows backup checks
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - name: Test private files and encrypted backup
+        shell: pwsh
+        run: |
+          ./run-audit_test.ps1
+          ./start-auditor_test.ps1
+          ./database-backup_test.ps1
+      - name: Test Windows PowerShell 5.1 compatibility
+        shell: powershell
+        run: |
+          ./run-audit_test.ps1
+          ./start-auditor_test.ps1
+          ./database-backup_test.ps1
+
   verify:
     name: Go checks and Docker build
     runs-on: ubuntu-latest
@@ -62,8 +82,8 @@ jobs:
       - name: Run tests with race detector
         run: go test -race -count=1 ./...
 
-      - name: Test dialog dismissal
-        run: node --test web/tests/dialogs.test.cjs
+      - name: Test browser interface behavior
+        run: node --test web/tests/*.test.cjs
 
       - name: Stress test shuffled execution
         if: github.event_name == 'workflow_dispatch' && inputs.freeze_evidence
@@ -124,13 +144,28 @@ jobs:
           artifact-name: seo-auditor.spdx.json
           output-file: ./seo-auditor.spdx.json
 
+      - name: Build egress firewall image
+        run: docker build --pull --file Dockerfile.egress --tag seo-auditor-egress:local .
+
+      - name: Scan egress firewall image
+        run: >-
+          docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.65.0@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
+          image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL
+          --skip-version-check seo-auditor-egress:local
+
       - name: Start integration PostgreSQL
         run: |
           docker tag seo-auditor-postgres:ci seo-auditor-postgres:local
-          docker compose up --no-build --pull never --wait postgres
+          docker compose -f docker-compose.yml -f docker-compose.db-access.yml up --no-build --pull never --wait postgres
 
       - name: Run integration tests
         run: go test -tags=integration -count=1 ./...
+
+      - name: Verify network egress firewall
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.db-access.yml up --no-build --pull never --wait egress-guard
+          sh deploy/test-egress.sh
 
       - name: Start isolated rendering browser
         run: docker compose -p render-tests -f docker-compose.render-test.yml up -d --build --wait

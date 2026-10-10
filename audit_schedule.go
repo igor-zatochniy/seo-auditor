@@ -195,6 +195,11 @@ func (m *AuditManager) startScheduled(ctx context.Context, scheduleID string) (s
 	if err != nil {
 		return "", err
 	}
+	if _, err = tx.Exec(ctx, `INSERT INTO geo_profile_runs(profile_id,run_id,report_id,scheduled_at)
+		SELECT id,$2,gen_random_uuid(),$3 FROM geo_profiles WHERE schedule_id=$1 AND enabled
+		ON CONFLICT(profile_id,run_id) DO NOTHING`, id, cfg.RunID, now); err != nil {
+		return "", err
+	}
 	_, err = tx.Exec(ctx, `UPDATE audit_schedules SET next_run_at=$2 WHERE id=$1`, id, nextScheduleTime(due, now, hours))
 	if err != nil {
 		return "", err
@@ -230,8 +235,10 @@ func (s *webServer) runScheduler(ctx context.Context) {
 			lastRecovery = time.Now()
 			var stale bool
 			checkCtx, stop := context.WithTimeout(ctx, effectiveDBFetchTimeout(s.cfg))
-			err := s.pool.QueryRow(checkCtx, `SELECT EXISTS(SELECT 1 FROM audit_schedule_runs sr JOIN audit_runs r ON r.id=sr.run_id
-			 WHERE r.status='running' AND r.heartbeat_at<CURRENT_TIMESTAMP-$1::INTERVAL)`, effectiveStaleRunThreshold(s.cfg).String()).Scan(&stale)
+			err := s.pool.QueryRow(checkCtx, `SELECT EXISTS(SELECT 1 FROM audit_runs r
+			 WHERE r.status='running' AND r.heartbeat_at<CURRENT_TIMESTAMP-$1::INTERVAL
+			 AND (EXISTS(SELECT 1 FROM audit_schedule_runs sr WHERE sr.run_id=r.id)
+			 OR EXISTS(SELECT 1 FROM geo_competitor_jobs j WHERE j.run_id=r.id AND j.status='scanning')))`, effectiveStaleRunThreshold(s.cfg).String()).Scan(&stale)
 			stop()
 			if err == nil && stale {
 				recoveryCtx, cancel := context.WithTimeout(ctx, s.cfg.FinalizationTimeout)
@@ -256,8 +263,25 @@ func (s *webServer) runScheduler(ctx context.Context) {
 				break
 			}
 		}
+		for range 10 {
+			workCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+			done, err := s.processGEOJob(workCtx)
+			stop()
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("Не вдалося обробити GEO-job", "error", sanitizeError(err))
+				}
+				break
+			}
+			if !done {
+				break
+			}
+		}
 		if _, err := s.manager.startScheduled(ctx, ""); err != nil && !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, errAuditBusy) && ctx.Err() == nil {
 			slog.Warn("Не вдалося запустити плановий аудит", "error", sanitizeError(err))
+		}
+		if _, err := s.manager.startCompetitor(ctx); err != nil && !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, errAuditBusy) && ctx.Err() == nil {
+			slog.Warn("Не вдалося запустити аудит конкурента", "error", sanitizeError(err))
 		}
 		select {
 		case <-ctx.Done():

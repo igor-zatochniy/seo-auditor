@@ -18,9 +18,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func webIntegration(t *testing.T) (context.Context, *pgxpool.Pool, Config) {
+func webIntegration(t *testing.T, budgets ...time.Duration) (context.Context, *pgxpool.Pool, Config) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	budget := 40 * time.Second
+	if len(budgets) > 0 {
+		budget = budgets[0]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	t.Cleanup(cancel)
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {

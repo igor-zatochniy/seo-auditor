@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+web/e2e/node_modules/
 
 # Local secrets
 *.pem
@@ -11,6 +12,10 @@
 *.crt
 secrets/
 credentials/
+backups/
+*.seobak
+*.seobak.*.partial
+*.dump
 
 # Local build and test artifacts
 .gocache/

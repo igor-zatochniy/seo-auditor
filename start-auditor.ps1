@@ -1,5 +1,6 @@
 param([switch]$NoBrowser)
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'private-files.ps1')
 
 function New-AuditorSecret {
     $bytes = New-Object byte[] 32
@@ -22,6 +23,7 @@ function Initialize-AuditorEnvironment {
             $stream.Write($bytes, 0, $bytes.Length)
         } finally { $stream.Dispose() }
     }
+    Protect-AuditorPrivateFile -Path $path
     $content = [IO.File]::ReadAllText($path)
     foreach ($key in @("WEB_ACCESS_TOKEN", "TARGET_FINGERPRINT_KEY")) {
         $match = [regex]::Match($content, ('(?m)^' + $key + '=([^\r\n]*)'))

@@ -1,0 +1,69 @@
+name: Production quality gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      human_dataset:
+        description: 'Шлях до незалежного JSON-набору в репозиторії (необов’язково)'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  isolated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      GOMAXPROCS: '2'
+      GOFLAGS: '-p=1'
+      GOMEMLIMIT: 384MiB
+      SEO_QUALITY_GATE: isolated
+      DATABASE_URL: postgres://postgres:quality-test-only@127.0.0.1:55439/seo_quality_ci?sslmode=disable
+      TARGET_FINGERPRINT_KEY: quality-fixture-only-fingerprint-key
+      GEO_HUMAN_DATASET: ${{ inputs.human_dataset }}
+      QUALITY_CONTAINER_NONCE: ${{ github.run_id }}-${{ github.run_attempt }}
+      QUALITY_BROWSER: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Підготувати ізольовану БД
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.postgres -t seo-quality-postgres .
+          cid=$(docker run -d --memory=512m --cpus=1 --label "seo-auditor.quality-gate=$QUALITY_CONTAINER_NONCE" \
+            -p 127.0.0.1:55439:5432 -e POSTGRES_PASSWORD=quality-test-only -e POSTGRES_DB=seo_quality_ci seo-quality-postgres)
+          echo "QUALITY_DB_CONTAINER=$cid" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 60); do
+            if docker exec "$cid" pg_isready -U postgres -d seo_quality_ci; then break; fi
+            sleep 1
+          done
+          docker exec "$cid" pg_isready -U postgres -d seo_quality_ci
+      - name: Підготувати браузерні тести
+        run: |
+          npm ci --prefix web/e2e
+          web/e2e/node_modules/.bin/playwright install --with-deps chromium
+      - name: Перевірити систему, навантаження, upgrade та Docker recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -tags=integration,qualitygate -count=1 -timeout=25m ./... | tee "$RUNNER_TEMP/seo-quality-gate.jsonl"
+          node --test web/tests/*.test.cjs
+      - name: Підсумок перевірки
+        if: always()
+        shell: bash
+        run: |
+          printf '### Ізольований quality gate\n\nCommit: `%s`\n\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$GEO_HUMAN_DATASET" ]; then
+            printf '**Незалежна людська перевірка точності: НЕ ВИКОНАНА.** Синтетичні тести не замінюють розмітку реальних проєктів.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          printf '\nКонтейнери й БД цього job ізольовані; робочі дані не використовуються. Результат тестів дивіться у логах job.\n' >> "$GITHUB_STEP_SUMMARY"

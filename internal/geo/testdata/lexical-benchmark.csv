@@ -1,0 +1,121 @@
+query,expected_url,cluster
+chargeback prevention,https://example.com/chargebacks,chargebacks
+what is chargeback prevention,https://example.com/chargebacks,chargebacks
+chargeback prevention guide,https://example.com/chargebacks,chargebacks
+chargeback prevention examples,https://example.com/chargebacks,chargebacks
+best chargeback prevention,https://example.com/chargebacks,chargebacks
+how to use chargeback prevention,https://example.com/chargebacks,chargebacks
+chargeback prevention checklist,https://example.com/chargebacks,chargebacks
+chargeback prevention comparison,https://example.com/chargebacks,chargebacks
+chargeback prevention recommendations,https://example.com/chargebacks,chargebacks
+chargeback prevention explained,https://example.com/chargebacks,chargebacks
+stripe integration,https://example.com/stripe,stripe
+what is stripe integration,https://example.com/stripe,stripe
+stripe integration guide,https://example.com/stripe,stripe
+stripe integration examples,https://example.com/stripe,stripe
+best stripe integration,https://example.com/stripe,stripe
+how to use stripe integration,https://example.com/stripe,stripe
+stripe integration checklist,https://example.com/stripe,stripe
+stripe integration comparison,https://example.com/stripe,stripe
+stripe integration recommendations,https://example.com/stripe,stripe
+stripe integration explained,https://example.com/stripe,stripe
+fraud detection,https://example.com/fraud,fraud
+what is fraud detection,https://example.com/fraud,fraud
+fraud detection guide,https://example.com/fraud,fraud
+fraud detection examples,https://example.com/fraud,fraud
+best fraud detection,https://example.com/fraud,fraud
+how to use fraud detection,https://example.com/fraud,fraud
+fraud detection checklist,https://example.com/fraud,fraud
+fraud detection comparison,https://example.com/fraud,fraud
+fraud detection recommendations,https://example.com/fraud,fraud
+fraud detection explained,https://example.com/fraud,fraud
+refund management,https://example.com/refunds,refunds
+what is refund management,https://example.com/refunds,refunds
+refund management guide,https://example.com/refunds,refunds
+refund management examples,https://example.com/refunds,refunds
+best refund management,https://example.com/refunds,refunds
+how to use refund management,https://example.com/refunds,refunds
+refund management checklist,https://example.com/refunds,refunds
+refund management comparison,https://example.com/refunds,refunds
+refund management recommendations,https://example.com/refunds,refunds
+refund management explained,https://example.com/refunds,refunds
+dispute evidence,https://example.com/disputes,disputes
+what is dispute evidence,https://example.com/disputes,disputes
+dispute evidence guide,https://example.com/disputes,disputes
+dispute evidence examples,https://example.com/disputes,disputes
+best dispute evidence,https://example.com/disputes,disputes
+how to use dispute evidence,https://example.com/disputes,disputes
+dispute evidence checklist,https://example.com/disputes,disputes
+dispute evidence comparison,https://example.com/disputes,disputes
+dispute evidence recommendations,https://example.com/disputes,disputes
+dispute evidence explained,https://example.com/disputes,disputes
+payment orchestration,https://example.com/payments,payments
+what is payment orchestration,https://example.com/payments,payments
+payment orchestration guide,https://example.com/payments,payments
+payment orchestration examples,https://example.com/payments,payments
+best payment orchestration,https://example.com/payments,payments
+how to use payment orchestration,https://example.com/payments,payments
+payment orchestration checklist,https://example.com/payments,payments
+payment orchestration comparison,https://example.com/payments,payments
+payment orchestration recommendations,https://example.com/payments,payments
+payment orchestration explained,https://example.com/payments,payments
+subscription billing,https://example.com/subscriptions,subscriptions
+what is subscription billing,https://example.com/subscriptions,subscriptions
+subscription billing guide,https://example.com/subscriptions,subscriptions
+subscription billing examples,https://example.com/subscriptions,subscriptions
+best subscription billing,https://example.com/subscriptions,subscriptions
+how to use subscription billing,https://example.com/subscriptions,subscriptions
+subscription billing checklist,https://example.com/subscriptions,subscriptions
+subscription billing comparison,https://example.com/subscriptions,subscriptions
+subscription billing recommendations,https://example.com/subscriptions,subscriptions
+subscription billing explained,https://example.com/subscriptions,subscriptions
+merchant onboarding,https://example.com/onboarding,onboarding
+what is merchant onboarding,https://example.com/onboarding,onboarding
+merchant onboarding guide,https://example.com/onboarding,onboarding
+merchant onboarding examples,https://example.com/onboarding,onboarding
+best merchant onboarding,https://example.com/onboarding,onboarding
+how to use merchant onboarding,https://example.com/onboarding,onboarding
+merchant onboarding checklist,https://example.com/onboarding,onboarding
+merchant onboarding comparison,https://example.com/onboarding,onboarding
+merchant onboarding recommendations,https://example.com/onboarding,onboarding
+merchant onboarding explained,https://example.com/onboarding,onboarding
+transaction analytics,https://example.com/analytics,analytics
+what is transaction analytics,https://example.com/analytics,analytics
+transaction analytics guide,https://example.com/analytics,analytics
+transaction analytics examples,https://example.com/analytics,analytics
+best transaction analytics,https://example.com/analytics,analytics
+how to use transaction analytics,https://example.com/analytics,analytics
+transaction analytics checklist,https://example.com/analytics,analytics
+transaction analytics comparison,https://example.com/analytics,analytics
+transaction analytics recommendations,https://example.com/analytics,analytics
+transaction analytics explained,https://example.com/analytics,analytics
+identity verification,https://example.com/identity,identity
+what is identity verification,https://example.com/identity,identity
+identity verification guide,https://example.com/identity,identity
+identity verification examples,https://example.com/identity,identity
+best identity verification,https://example.com/identity,identity
+how to use identity verification,https://example.com/identity,identity
+identity verification checklist,https://example.com/identity,identity
+identity verification comparison,https://example.com/identity,identity
+identity verification recommendations,https://example.com/identity,identity
+identity verification explained,https://example.com/identity,identity
+checkout optimization,https://example.com/checkout,checkout
+what is checkout optimization,https://example.com/checkout,checkout
+checkout optimization guide,https://example.com/checkout,checkout
+checkout optimization examples,https://example.com/checkout,checkout
+best checkout optimization,https://example.com/checkout,checkout
+how to use checkout optimization,https://example.com/checkout,checkout
+checkout optimization checklist,https://example.com/checkout,checkout
+checkout optimization comparison,https://example.com/checkout,checkout
+checkout optimization recommendations,https://example.com/checkout,checkout
+checkout optimization explained,https://example.com/checkout,checkout
+risk scoring,https://example.com/risk,risk
+what is risk scoring,https://example.com/risk,risk
+risk scoring guide,https://example.com/risk,risk
+risk scoring examples,https://example.com/risk,risk
+best risk scoring,https://example.com/risk,risk
+how to use risk scoring,https://example.com/risk,risk
+risk scoring checklist,https://example.com/risk,risk
+risk scoring comparison,https://example.com/risk,risk
+risk scoring recommendations,https://example.com/risk,risk
+risk scoring explained,https://example.com/risk,risk

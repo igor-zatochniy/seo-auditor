@@ -15,6 +15,7 @@ import (
 
 	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
+	"github.com/igor-zatochniy/seo-auditor/internal/international"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 )
@@ -30,6 +31,7 @@ const (
 
 // Data contains the full set of metrics collected by the parser.
 type Data struct {
+	International              *international.Evidence
 	Rendering                  *RenderComparison
 	comparison                 *comparisonEvidence
 	GEO                        *geo.Signals
@@ -136,6 +138,9 @@ func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenByte
 	defer func() {
 		data.HTMLRawBytes = &rawBody.bytesRead
 		data.Googlebot2MBStatus = googlebotSizeStatus(rawBody.bytesRead, data.HTMLSizeComplete)
+		if parseErr != nil && data.International != nil {
+			data.International.Complete = false
+		}
 	}()
 	decodedBody, err := charset.NewReader(rawBody, resp.Header.Get("Content-Type"))
 	if err != nil {
@@ -146,6 +151,7 @@ func parsePage(resp *http.Response, targetURL string, maxBodyBytes, maxTokenByte
 	tokenLimit := min(maxTokenBytes, maxBodyBytes+1)
 	tokenizer.SetMaxBuf(int(tokenLimit))
 	parser := newPageParser(&data, targetURL)
+	data.International = &international.Evidence{Links: []international.Alternate{}, Complete: true}
 	parser.geo.readSearchHeaders(resp.Header)
 	parser.collectLinks = collectLinks
 	if len(comparison) > 0 && comparison[0] {
@@ -344,6 +350,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	}
 	p.geoStart(name, attributes)
 	p.comparisonStart(name, attributes)
+	p.collectHreflang(name, attributes)
 
 	switch {
 	case bytes.Equal(name, []byte("title")):

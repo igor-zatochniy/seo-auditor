@@ -114,9 +114,9 @@ function Invoke-Audit {
             throw "Docker Compose v2 plugin недоступний у поточній PowerShell-сесії."
         }
 
-        & docker compose up -d --build --wait postgres
+        & docker compose up -d --build --wait postgres egress-guard
         if ($LASTEXITCODE -ne 0) {
-            throw "Не вдалося запустити PostgreSQL через Docker Compose."
+            throw "Не вдалося запустити PostgreSQL та мережевий захист через Docker Compose."
         }
 
         & docker compose up --build --force-recreate --no-deps --no-start parser
