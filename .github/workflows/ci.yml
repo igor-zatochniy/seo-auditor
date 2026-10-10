@@ -96,7 +96,7 @@ jobs:
         run: go vet ./...
 
       - name: Run staticcheck
-        uses: dominikh/staticcheck-action@288b4e28bae83c59f35f73651aeb5cab746a06fc # v1.4.0
+        uses: dominikh/staticcheck-action@024238d2898c874f26d723e7d0ff4308c35589a2 # v1.4.0
         with:
           version: "2026.1"
           install-go: false
