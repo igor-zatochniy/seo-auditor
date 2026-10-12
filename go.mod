@@ -5,13 +5,13 @@ go 1.26.9
 require (
 	github.com/chromedp/cdproto v0.0.0-20250724212937-08a3db8b4327
 	github.com/chromedp/chromedp v0.14.2
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/mfonda/simhash v0.0.0-20151007195837-79f94a1100d6
-	github.com/pressly/goose/v3 v3.27.3
+	github.com/pressly/goose/v3 v3.28.0
 	golang.org/x/image v0.46.0
 	golang.org/x/net v0.60.0
 	golang.org/x/text v0.42.0
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 )
 
 require (
