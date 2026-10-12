@@ -4,14 +4,49 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
+    groups:
+      go-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "*"
+    # Нові minor/major API rendering потребують окремої адаптації коду.
+    ignore:
+      - dependency-name: github.com/chromedp/chromedp
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
+      - dependency-name: github.com/chromedp/cdproto
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 1
+    groups:
+      container-images:
+        applies-to: version-updates
+        patterns:
+          - "*"
+    ignore:
+      # Major PostgreSQL не можна підміняти без міграції наявного volume.
+      - dependency-name: postgres
+        update-types:
+          - version-update:semver-major
+      # Версію builder оновлюємо узгоджено з go.mod та security-перевірками.
+      - dependency-name: golang
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
