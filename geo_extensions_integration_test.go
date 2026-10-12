@@ -194,7 +194,15 @@ func TestExtendedSiteDiscoveryAndDiskBackedGraph(t *testing.T) {
 		FROM audit_site_nodes src JOIN audit_site_nodes dst ON dst.run_id=src.run_id AND dst.target_id=src.target_id+1 WHERE src.run_id=$1`, cfg.RunID); err != nil {
 		t.Fatal(err)
 	}
-	depths, err := siteDatabaseClickDepths(ctx, pool, cfg)
+	identities := make(map[[32]byte]int64, 10001)
+	for id := int64(1); id <= 10001; id++ {
+		target := fmt.Sprintf("https://example.com/%d", id)
+		if id == 1 {
+			target = "https://example.com/"
+		}
+		identities[[32]byte(fingerprintURL(cfg.TargetFingerprintKey, target))] = id
+	}
+	depths, err := siteDatabaseClickDepths(ctx, pool, cfg, identities)
 	if err != nil || len(depths) != 10001 || depths[10001] != 9999 {
 		t.Fatal("Спрямований граф або нульова вартість redirect", len(depths), depths[10001], err)
 	}

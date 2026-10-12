@@ -181,7 +181,7 @@ func finalizeSiteGraph(ctx context.Context, pool *pgxpool.Pool, cfg Config) erro
 			after, ordinal = e.from, e.ordinal
 		}
 	}
-	depths, err := siteDatabaseClickDepths(ctx, pool, cfg)
+	depths, err := siteDatabaseClickDepths(ctx, pool, cfg, identities)
 	if err != nil {
 		return err
 	}
@@ -233,7 +233,7 @@ func finalizeSiteGraph(ctx context.Context, pool *pgxpool.Pool, cfg Config) erro
 
 // В RAM залишаються відстані та frontier, а не до 5 млн ребер графа.
 // Кеш лише чотирьох пакетів також не створює SQL-запит на кожен крок довгого ланцюга.
-func siteDatabaseClickDepths(ctx context.Context, pool *pgxpool.Pool, cfg Config) (map[int64]int, error) {
+func siteDatabaseClickDepths(ctx context.Context, pool *pgxpool.Pool, cfg Config, identities map[[32]byte]int64) (map[int64]int, error) {
 	const sourceBatchSize = 32
 	depths := map[int64]int{1: 0}
 	queue := []int64{1}
@@ -251,8 +251,9 @@ func siteDatabaseClickDepths(ctx context.Context, pool *pgxpool.Pool, cfg Config
 		arcs, loaded := cache[block]
 		if !loaded {
 			err := withDBReadRetry(ctx, cfg, "site_depth_frontier", func(qctx context.Context) error {
-				rows, err := pool.Query(qctx, `SELECT e.from_target_id,n.target_id,CASE WHEN e.kind='redirect' THEN 0 ELSE 1 END
-				FROM audit_site_edges e JOIN audit_site_nodes n ON n.run_id=e.run_id AND n.url_fingerprint=e.to_fingerprint
+				// Ідентичності вже належать snapshot; JOIN не потрібний для кожного пакета ребер.
+				rows, err := pool.Query(qctx, `SELECT e.from_target_id,e.to_fingerprint,CASE WHEN e.kind='redirect' THEN 0 ELSE 1 END
+				FROM audit_site_edges e
 				WHERE e.run_id=$1 AND e.from_target_id>=$2 AND e.from_target_id<$2+$3 AND e.is_internal AND NOT e.nofollow
 				ORDER BY e.from_target_id,e.ordinal LIMIT $4`, cfg.RunID, block, sourceBatchSize, sourceBatchSize*256+1)
 				if err != nil {
@@ -263,14 +264,23 @@ func siteDatabaseClickDepths(ctx context.Context, pool *pgxpool.Pool, cfg Config
 				count := 0
 				for rows.Next() {
 					var from int64
+					var fingerprint []byte
 					var a graphArc
-					if err := rows.Scan(&from, &a.to, &a.cost); err != nil {
+					if err := rows.Scan(&from, &fingerprint, &a.cost); err != nil {
 						return err
+					}
+					if len(fingerprint) != 32 {
+						return fmt.Errorf("invalid site edge fingerprint")
 					}
 					count++
 					if count > sourceBatchSize*256 {
 						return fmt.Errorf("site depth batch exceeds edge budget")
 					}
+					to, known := identities[[32]byte(fingerprint)]
+					if !known {
+						continue
+					}
+					a.to = to
 					arcs[from] = append(arcs[from], a)
 				}
 				return rows.Err()

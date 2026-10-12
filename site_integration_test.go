@@ -55,6 +55,57 @@ func TestSiteGraphAtConfiguredBudget(t *testing.T) {
 	}
 }
 
+func TestSiteDepthUsesSnapshotIdentities(t *testing.T) {
+	ctx, pool, cfg := webIntegration(t)
+	root := "https://example.com/"
+	if err := createSiteAuditRun(ctx, pool, &cfg, siteCrawlOptions{RootURL: root, MaxPages: 10, MaxDepth: 10}); err != nil {
+		t.Fatal(err)
+	}
+	identities := map[[32]byte]int64{[32]byte(fingerprintURL(cfg.TargetFingerprintKey, root)): 1}
+	for id := int64(2); id <= 6; id++ {
+		target := fmt.Sprintf("https://example.com/%d", id)
+		fp := fingerprintURL(cfg.TargetFingerprintKey, target)
+		if _, err := pool.Exec(ctx, `INSERT INTO audit_run_targets(run_id,target_id,request_url) VALUES($1,$2,$3)`, cfg.RunID, id, target); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO audit_site_nodes(run_id,target_id,url_fingerprint,safe_url,frontier_depth)
+			VALUES($1,$2,$3,$4,1)`, cfg.RunID, id, fp, target); err != nil {
+			t.Fatal(err)
+		}
+		identities[[32]byte(fp)] = id
+	}
+	// Невідомий URL, nofollow і зовнішній URL не змінюють досяжність snapshot.
+	edges := []struct {
+		from, to           int64
+		ordinal            int
+		internal, nofollow bool
+		kind               string
+	}{
+		{1, 99, 1, true, false, "link"},
+		{1, 2, 2, true, false, "link"},
+		{1, 3, 3, true, true, "link"},
+		{1, 4, 4, true, false, "redirect"},
+		{1, 5, 5, false, false, "link"},
+		{4, 6, 1, true, false, "link"},
+		{6, 1, 1, true, false, "link"},
+	}
+	for _, edge := range edges {
+		target := fmt.Sprintf("https://example.com/%d", edge.to)
+		if edge.to == 1 {
+			target = root
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO audit_site_edges(run_id,from_target_id,ordinal,to_fingerprint,safe_url,is_internal,nofollow,kind)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, cfg.RunID, edge.from, edge.ordinal,
+			fingerprintURL(cfg.TargetFingerprintKey, target), target, edge.internal, edge.nofollow, edge.kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	depths, err := siteDatabaseClickDepths(ctx, pool, cfg, identities)
+	if err != nil || len(depths) != 4 || depths[1] != 0 || depths[2] != 1 || depths[4] != 0 || depths[6] != 1 {
+		t.Fatalf("snapshot depths=%v err=%v", depths, err)
+	}
+}
+
 func TestSiteSitemapIndexGzipAndScope(t *testing.T) {
 	ctx, pool, cfg := webIntegration(t)
 	var outsideHits atomic.Int32
