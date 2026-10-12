@@ -14,10 +14,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
+	"github.com/igor-zatochniy/seo-auditor/internal/duplicates"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/igor-zatochniy/seo-auditor/internal/international"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
+	"golang.org/x/text/language"
 )
 
 const (
@@ -31,6 +33,7 @@ const (
 
 // Data contains the full set of metrics collected by the parser.
 type Data struct {
+	ContentSignature           *duplicates.Signature
 	International              *international.Evidence
 	Rendering                  *RenderComparison
 	comparison                 *comparisonEvidence
@@ -204,6 +207,7 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 }
 
 type tagAttributes struct {
+	lang              []byte
 	hreflang          []byte
 	name              []byte
 	property          []byte
@@ -232,6 +236,8 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 	for hasAttributes {
 		key, value, moreAttributes := tokenizer.TagAttr()
 		switch {
+		case bytes.Equal(key, []byte("lang")):
+			attributes.lang = value
 		case bytes.Equal(key, []byte("hreflang")):
 			attributes.hreflang = value
 		case bytes.Equal(key, []byte("role")):
@@ -273,6 +279,7 @@ func readTagAttributes(tokenizer *html.Tokenizer, hasAttributes bool) tagAttribu
 }
 
 type pageParser struct {
+	contentLanguage    string
 	comparison         *comparisonEvidence
 	comparisonH1Depth  int
 	geo                geoCollector
@@ -344,6 +351,11 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	}
 	if p.inertTemplateDepth > 0 {
 		return
+	}
+	if bytes.Equal(name, []byte("html")) && p.shadowRootDepth == 0 && len(attributes.lang) <= 64 {
+		if tag, err := language.Parse(string(attributes.lang)); err == nil && tag != language.Und {
+			p.contentLanguage = tag.String()
+		}
 	}
 	if p.documentPhase == documentPhaseHead && p.shadowRootDepth == 0 && startsBodyContent(name) {
 		p.documentPhase = documentPhaseBody
@@ -654,6 +666,7 @@ func (p *pageParser) handleEndTag(name []byte) {
 
 func (p *pageParser) finalize() {
 	p.data.GEO = p.geo.result()
+	p.data.ContentSignature = p.geo.contentSignature(p.data.GEO.ContentSource, p.contentLanguage)
 	p.finishLink()
 	p.resolveLinks()
 	p.data.MetaRobots, p.data.MetaRobotsTruncated, p.data.MetaRobotsOriginalLength =

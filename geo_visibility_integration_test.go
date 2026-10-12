@@ -9,14 +9,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/pressly/goose/v3"
 )
 
-func visibilityReportFixture(t *testing.T) (*webServer, geoReport, Config) {
+func visibilityReportFixture(t *testing.T, budget ...time.Duration) (*webServer, geoReport, Config) {
 	t.Helper()
-	ctx, pool, cfg := webIntegration(t)
+	ctx, pool, cfg := webIntegration(t, budget...)
 	urls := []string{"https://example.com/report?token=alpha", "https://example.com/report?token=beta"}
 	if err := createExplicitAuditRun(ctx, pool, &cfg, urls); err != nil {
 		t.Fatal(err)

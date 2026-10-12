@@ -42,7 +42,7 @@ func webIntegration(t *testing.T, budgets ...time.Duration) (context.Context, *p
 		t.Fatal(err)
 	}
 	cfg.RunID = newWebRunID()
-	cfg.WorkerInstanceID = "web-integration"
+	cfg.WorkerInstanceID = "web-integration-" + cfg.RunID
 	cfg.Workers = 2
 	cfg.AllowPrivateTargets = true
 	cfg.RateLimitInterval = time.Millisecond
@@ -50,11 +50,85 @@ func webIntegration(t *testing.T, budgets ...time.Duration) (context.Context, *p
 	cfg.ShutdownTimeout = time.Second
 	cfg.FinalizationTimeout = 5 * time.Second
 	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		_, _ = pool.Exec(cleanup, "DELETE FROM audit_runs WHERE worker_instance_id='web-integration'")
+		if err := cleanupWebIntegrationFixtures(pool, cfg.WorkerInstanceID); err != nil {
+			t.Errorf("Не вдалося очистити власні audit fixtures: %v", err)
+		}
 	})
 	return ctx, pool, cfg
+}
+
+func cleanupWebIntegrationFixtures(pool *pgxpool.Pool, workerInstanceID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rows, err := pool.Query(ctx, "SELECT id::text FROM audit_runs WHERE worker_instance_id=$1 ORDER BY id", workerInstanceID)
+	if err != nil {
+		cancel()
+		return err
+	}
+	var runs []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			break
+		}
+		runs = append(runs, id)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	cancel()
+	if err != nil {
+		return err
+	}
+	for _, id := range runs {
+		// Окремі batches обмежують cascade fan-out великих синтетичних корпусів.
+		for level, statement := range []string{
+			`WITH batch AS (
+				SELECT e.ctid FROM audit_site_edges e JOIN audit_runs r ON r.id=e.run_id
+				WHERE e.run_id=$1 AND r.worker_instance_id=$2 LIMIT 2048
+			) DELETE FROM audit_site_edges e USING batch WHERE e.ctid=batch.ctid`,
+			`DELETE FROM geo_corpus_terms WHERE ctid=ANY(ARRAY(
+				SELECT p.ctid FROM geo_corpus_terms p JOIN audit_runs r ON r.id=p.run_id
+				WHERE p.run_id=$1 AND r.worker_instance_id=$2 LIMIT 512
+			))`,
+			`WITH batch AS (
+				SELECT p.ctid FROM geo_corpus_pages p JOIN audit_runs r ON r.id=p.run_id
+				WHERE p.run_id=$1 AND r.worker_instance_id=$2 LIMIT 128
+			) DELETE FROM geo_corpus_pages p USING batch WHERE p.ctid=batch.ctid`,
+			`WITH batch AS (
+				SELECT p.ctid FROM audit_results p JOIN audit_runs r ON r.id=p.run_id
+				WHERE p.run_id=$1 AND r.worker_instance_id=$2 LIMIT 128
+			) DELETE FROM audit_results p USING batch WHERE p.ctid=batch.ctid`,
+			`WITH batch AS (
+				SELECT p.ctid FROM audit_run_targets p JOIN audit_runs r ON r.id=p.run_id
+				WHERE p.run_id=$1 AND r.worker_instance_id=$2 LIMIT 128
+			) DELETE FROM audit_run_targets p USING batch WHERE p.ctid=batch.ctid`,
+			`WITH batch AS (
+				SELECT q.ctid FROM geo_query_results q
+				JOIN geo_reports g ON g.id=q.report_id JOIN audit_runs r ON r.id=g.source_run_id
+				WHERE r.id=$1 AND r.worker_instance_id=$2 LIMIT 64
+			) DELETE FROM geo_query_results q USING batch WHERE q.ctid=batch.ctid`,
+		} {
+			for {
+				ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+				command, err := pool.Exec(ctx, statement, id, workerInstanceID)
+				cancel()
+				if err != nil {
+					return fmt.Errorf("cleanup fixture batch level %d run %s: %w", level+1, id, err)
+				}
+				if command.RowsAffected() == 0 {
+					break
+				}
+			}
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		_, err = pool.Exec(ctx, "DELETE FROM audit_runs WHERE id=$1 AND worker_instance_id=$2", id, workerInstanceID)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("cleanup audit run %s: %w", id, err)
+		}
+	}
+	return nil
 }
 
 func webFixture() *httptest.Server {

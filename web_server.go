@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	appconfig "github.com/igor-zatochniy/seo-auditor/internal/config"
@@ -24,12 +25,13 @@ import (
 var webAssets embed.FS
 
 type webServer struct {
-	pool        *pgxpool.Pool
-	cfg         Config
-	web         appconfig.WebConfig
-	manager     *AuditManager
-	queries     chan struct{}
-	submissions chan struct{}
+	duplicateBusy atomic.Bool
+	pool          *pgxpool.Pool
+	cfg           Config
+	web           appconfig.WebConfig
+	manager       *AuditManager
+	queries       chan struct{}
+	submissions   chan struct{}
 }
 
 func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
@@ -43,7 +45,7 @@ func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
 	manager := newAuditManager(ctx, pool, cfg)
 	app := &webServer{pool: pool, cfg: cfg, web: wc, manager: manager, queries: make(chan struct{}, 3), submissions: make(chan struct{}, 1)}
 	server := &http.Server{Addr: wc.Addr, Handler: app.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
-		WriteTimeout: cfg.ReportExportTimeout + 5*time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+		WriteTimeout: max(cfg.ReportExportTimeout, geoOperationTimeout) + 5*time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	listener, err := net.Listen("tcp", wc.Addr)
 	if err != nil {
 		slog.Error("Не вдалося відкрити web-порт", "error", err)
@@ -116,6 +118,7 @@ func (s *webServer) handler() http.Handler {
 	mux.HandleFunc("GET /api/audits/{id}/results/{target}/rendering", s.renderingDetail)
 	mux.HandleFunc("GET /api/audits/{id}/graph", s.graph)
 	mux.HandleFunc("GET /api/audits/{id}/international", s.internationalReport)
+	mux.HandleFunc("GET /api/audits/{id}/duplicates", s.duplicateReport)
 	mux.HandleFunc("POST /api/audits/{id}/cancel", s.cancel)
 	mux.HandleFunc("POST /api/audits/{id}/resume", s.resume)
 	mux.HandleFunc("GET /api/audits/{id}/export/{format}", s.export)
@@ -179,6 +182,12 @@ func (s *webServer) secure(next http.Handler) http.Handler {
 			}
 			if r.Method == "POST" {
 				timeout = s.cfg.FinalizationTimeout
+			}
+			if isGEOCorpusOperation(r) {
+				timeout = geoOperationTimeout
+			}
+			if strings.HasSuffix(r.URL.Path, "/duplicates") {
+				timeout = 30 * time.Second
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), timeout)
 			defer cancel()

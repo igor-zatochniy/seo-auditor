@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+func TestExtendedSiteCrawlBudgetValidation(t *testing.T) {
+	for _, count := range []int{1001, 10001, 20000} {
+		o := siteCrawlOptions{RootURL: "https://example.com/", MaxPages: count, MaxDepth: 10}
+		if err := validateSiteOptions(&o, false); err != nil {
+			t.Fatal(count, err)
+		}
+	}
+	o := siteCrawlOptions{RootURL: "https://example.com/", MaxPages: 20001, MaxDepth: 10}
+	if err := validateSiteOptions(&o, false); err == nil {
+		t.Fatal("Безмежний обхід дозволено")
+	}
+}
+
 func TestSiteURLScopeAndIdentity(t *testing.T) {
 	for _, pair := range [][2]string{{"https://BÜCHER.de:443", "https://xn--bcher-kva.de/"}, {"https://example.com/a#part", "https://example.com/a"}} {
 		u, _, err := normalizeSiteURL(pair[0], false)

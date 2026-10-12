@@ -149,12 +149,12 @@ func (m *AuditManager) startCompetitor(ctx context.Context) (string, error) {
 	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(8247310021)"); err != nil {
 		return "", err
 	}
-	var setID, requested string
+	var setID, requested, parent string
 	var ordinal, maxPages, hours int
 	var site bool
-	err = tx.QueryRow(ctx, `SELECT j.set_id::text,j.ordinal,j.requested_url,j.site_mode,c.max_pages,c.fresh_hours FROM geo_competitor_jobs j
+	err = tx.QueryRow(ctx, `SELECT j.set_id::text,j.ordinal,j.requested_url,j.site_mode,c.max_pages,c.fresh_hours,c.report_id::text FROM geo_competitor_jobs j
 	 JOIN geo_competitor_sets c ON c.id=j.set_id WHERE j.status='pending' AND NOT c.canceled
-	 ORDER BY c.created_at,j.set_id,j.ordinal LIMIT 1 FOR UPDATE OF j,c SKIP LOCKED`).Scan(&setID, &ordinal, &requested, &site, &maxPages, &hours)
+	 ORDER BY c.created_at,j.set_id,j.ordinal LIMIT 1 FOR UPDATE OF j,c SKIP LOCKED`).Scan(&setID, &ordinal, &requested, &site, &maxPages, &hours, &parent)
 	if err != nil {
 		return "", err
 	}
@@ -166,13 +166,23 @@ func (m *AuditManager) startCompetitor(ctx context.Context) (string, error) {
 		}
 		return "", tx.Commit(ctx)
 	}
+	var selection *competitorDiscovery
+	queryHash := ""
+	if site {
+		selection, err = prepareCompetitorDiscovery(ctx, tx, m.cfg, parent)
+		if err != nil {
+			return "", err
+		}
+		queryHash = selection.QueryHash
+	}
 	var reusable string
 	err = tx.QueryRow(ctx, `SELECT r.id::text FROM audit_runs r WHERE r.status IN ('completed','completed_with_errors')
-	 AND r.finished_at>=CURRENT_TIMESTAMP-make_interval(hours=>$3) AND r.successful_urls BETWEEN 1 AND 1000
+	 AND r.finished_at>=CURRENT_TIMESTAMP-make_interval(hours=>$3) AND r.successful_urls>=1
 	 AND EXISTS(SELECT 1 FROM audit_results a WHERE a.run_id=r.id AND a.scan_status='completed' AND a.status_code=200
 	 AND a.target_fingerprint=$2 AND a.fingerprint_key_id=$4 AND (a.geo_signals->>'version')::int>=3)
-	 AND (NOT $5 OR EXISTS(SELECT 1 FROM audit_site_crawls sc WHERE sc.run_id=r.id AND sc.root_safe_url=$1 AND sc.max_pages>=$6 AND sc.max_depth>=2 AND NOT sc.use_sitemaps))
-	 ORDER BY r.finished_at DESC,r.id DESC LIMIT 1`, normalized, fingerprintURL(m.cfg.TargetFingerprintKey, normalized), hours, m.cfg.TargetFingerprintKeyID, site, maxPages).Scan(&reusable)
+	 AND (NOT $5 OR EXISTS(SELECT 1 FROM audit_site_crawls sc WHERE sc.run_id=r.id AND sc.root_safe_url=$1 AND sc.max_pages>=$6 AND sc.max_depth>=2 AND sc.use_sitemaps
+	 AND sc.competitor_selection->>'version'=$7 AND sc.competitor_selection->>'query_hash'=$8 AND sc.sitemap_state='done'))
+	 ORDER BY r.finished_at DESC,r.id DESC LIMIT 1`, normalized, fingerprintURL(m.cfg.TargetFingerprintKey, normalized), hours, m.cfg.TargetFingerprintKeyID, site, maxPages, geoDiscoveryVersion, queryHash).Scan(&reusable)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
@@ -186,7 +196,10 @@ func (m *AuditManager) startCompetitor(ctx context.Context) (string, error) {
 	cfg := m.cfg
 	cfg.RunID, cfg.OwnerGeneration, cfg.RenderJavaScript = newWebRunID(), 1, false
 	if site {
-		err = insertSiteAuditRun(ctx, tx, cfg, siteCrawlOptions{RootURL: normalized, MaxPages: maxPages, MaxDepth: 2, UseSitemaps: false})
+		err = insertSiteAuditRun(ctx, tx, cfg, siteCrawlOptions{RootURL: normalized, MaxPages: maxPages, MaxDepth: 2, UseSitemaps: true})
+		if err == nil {
+			_, err = tx.Exec(ctx, "UPDATE audit_site_crawls SET competitor_selection=$2 WHERE run_id=$1", cfg.RunID, selection)
+		}
 	} else {
 		err = insertExplicitAuditRun(ctx, tx, cfg, []string{normalized})
 	}
@@ -204,7 +217,7 @@ func (m *AuditManager) startCompetitor(ctx context.Context) (string, error) {
 }
 
 func (s *webServer) processCompetitorReport(ctx context.Context) (bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return false, err
 	}
@@ -253,7 +266,11 @@ func (s *webServer) processCompetitorReport(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, err = s.createGEOInTransaction(ctx, tx, geo.Input{ID: reportID, SourceRunID: runID, Domain: domain, Brand: brand}, queries)
+	var semanticEnabled bool
+	if err = tx.QueryRow(ctx, "SELECT semantic FROM geo_reports WHERE id=$1", parent).Scan(&semanticEnabled); err != nil {
+		return false, err
+	}
+	_, err = s.createGEOInTransaction(ctx, tx, geo.Input{ID: reportID, SourceRunID: runID, Domain: domain, Brand: brand, Semantic: semanticEnabled}, queries)
 	if errors.Is(err, errGEOAnalysisBusy) {
 		return false, nil
 	}
@@ -332,16 +349,17 @@ func (s *webServer) geoCompetitorHistory(w http.ResponseWriter, r *http.Request)
 }
 
 type competitorRow struct {
-	Domain   string                  `json:"domain"`
-	Brand    string                  `json:"brand"`
-	URL      string                  `json:"url"`
-	Status   string                  `json:"status"`
-	Reused   bool                    `json:"reused"`
-	RunID    *string                 `json:"run_id"`
-	ReportID string                  `json:"report_id"`
-	Error    string                  `json:"error"`
-	Rows     []geoRow                `json:"rows"`
-	Gaps     map[int][]geo.SignalGap `json:"gaps"`
+	Domain    string                      `json:"domain"`
+	Brand     string                      `json:"brand"`
+	URL       string                      `json:"url"`
+	Status    string                      `json:"status"`
+	Reused    bool                        `json:"reused"`
+	RunID     *string                     `json:"run_id"`
+	ReportID  string                      `json:"report_id"`
+	Error     string                      `json:"error"`
+	Rows      []geoRow                    `json:"rows"`
+	Gaps      map[int][]geo.SignalGap     `json:"gaps"`
+	Discovery *competitorDiscoverySummary `json:"discovery,omitempty"`
 }
 
 func (s *webServer) geoCompetitorGet(w http.ResponseWriter, r *http.Request) {
@@ -371,14 +389,15 @@ func (s *webServer) geoCompetitorGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := []competitorRow{}
-	rows, err := tx.Query(ctx, "SELECT domain,brand,requested_url,status,reused,run_id::text,report_id::text,error_message FROM geo_competitor_jobs WHERE set_id=$1 ORDER BY ordinal", id)
+	rows, err := tx.Query(ctx, `SELECT j.domain,j.brand,j.requested_url,j.status,j.reused,j.run_id::text,j.report_id::text,j.error_message,
+	 sc.competitor_selection->'summary' FROM geo_competitor_jobs j LEFT JOIN audit_site_crawls sc ON sc.run_id=j.run_id WHERE j.set_id=$1 ORDER BY j.ordinal`, id)
 	if err != nil {
 		webDBError(w, err)
 		return
 	}
 	for rows.Next() {
 		var item competitorRow
-		if err = rows.Scan(&item.Domain, &item.Brand, &item.URL, &item.Status, &item.Reused, &item.RunID, &item.ReportID, &item.Error); err != nil {
+		if err = rows.Scan(&item.Domain, &item.Brand, &item.URL, &item.Status, &item.Reused, &item.RunID, &item.ReportID, &item.Error, &item.Discovery); err != nil {
 			rows.Close()
 			webDBError(w, err)
 			return

@@ -94,6 +94,11 @@ func TestQualityGateTenThousandURLsThousandQueriesFiveCompetitors(t *testing.T) 
 	ctx, pool, cfg := qualityDB(t)
 	qualityFixtureDNS(t)
 	start := time.Now()
+	phase := start
+	logPhase := func(name string) {
+		t.Logf("Фаза %s: %s; загалом: %s", name, time.Since(phase), time.Since(start))
+		phase = time.Now()
+	}
 	var requests atomic.Int64
 	fixture := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -140,6 +145,7 @@ func TestQualityGateTenThousandURLsThousandQueriesFiveCompetitors(t *testing.T) 
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM audit_results WHERE run_id=$1 AND (safe_url LIKE '%quality-secret-%' OR international::text LIKE '%quality-secret-%' OR error_message LIKE '%quality-secret-%')`, large).Scan(&retained); err != nil || retained != 0 {
 		t.Fatal("secret leaked", retained, err)
 	}
+	logPhase("SEO 10000 URL та перевірка приватності")
 	app := testWebApp()
 	app.pool = pool
 	app.cfg = cfg
@@ -148,10 +154,12 @@ func TestQualityGateTenThousandURLsThousandQueriesFiveCompetitors(t *testing.T) 
 		queries[i] = fmt.Sprintf("topic %05d protection", i)
 	}
 	input := geo.Input{ID: newWebRunID(), SourceRunID: large, Domain: "quality-own.test", Brand: "Quality", Queries: strings.Join(queries, "\n")}
-	if _, err := app.createGEO(ctx, input, queries); err == nil {
-		t.Fatal("unbounded 10k GEO corpus accepted")
+	largeReport, err := app.createGEO(ctx, input, queries)
+	if err != nil || largeReport.PageCount != 10000 || largeReport.Corpus == nil || !largeReport.Corpus.Complete || largeReport.Corpus.Pages != 10000 {
+		t.Fatal("Повний PostgreSQL-backed GEO corpus 10000 сторінок", largeReport, err)
 	}
-	// GEO навмисно обмежений 1000 сторінками, без непомітного усічення великого джерела.
+	logPhase("GEO 10000 сторінок / 1000 запитів")
+	// Додатковий малий corpus перевіряє незмінність попереднього сценарію.
 	cfg.RunID = newWebRunID()
 	if err := createExplicitAuditRun(ctx, pool, &cfg, urls[:1000]); err != nil {
 		t.Fatal(err)
@@ -169,6 +177,7 @@ func TestQualityGateTenThousandURLsThousandQueriesFiveCompetitors(t *testing.T) 
 	if report.QueryCount != 1000 {
 		t.Fatal("query count", report)
 	}
+	logPhase("додатковий SEO/GEO corpus 1000 сторінок")
 	app.manager = newAuditManager(ctx, pool, cfg)
 	app.manager.publish = func(context.Context, *pgxpool.Pool, Config, bool) {}
 	t.Cleanup(app.manager.shutdown)
@@ -198,11 +207,13 @@ func TestQualityGateTenThousandURLsThousandQueriesFiveCompetitors(t *testing.T) 
 			t.Fatal("fresh competitors were scanned again")
 		}
 	}
+	logPhase("5 сканувань конкурентів та 5 повторних використань")
 	for _, path := range []string{"/topics", "/opportunities", "/competitors", "/tasks.csv"} {
 		w := strategyRequest(app, "GET", "/api/geo/reports/"+report.ID+path, "")
 		if w.Code != 200 {
 			t.Fatal(path, w.Code, w.Body.String())
 		}
+		logPhase(path)
 	}
 	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM audit_results WHERE run_id=$1", large).Scan(&count); err != nil || count != 10000 {
 		t.Fatal("GEO changed SEO history", count, err)

@@ -145,48 +145,16 @@ func buildLexicalCorpus(ctx context.Context, pages []Page) (*lexicalCorpus, erro
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		doc := lexicalPage{phrases: map[string]bool{}}
-		weights := map[string]int{}
-		add := func(text string, weight int) {
-			words := sequence(text)
-			if len(words) == maxPageTerms {
-				doc.limited = true
-			}
-			for _, term := range words {
-				if _, exists := weights[term]; !exists && len(weights) == maxPageTerms {
-					doc.limited = true
-					continue
-				}
-				weights[term] = max(weights[term], weight)
-			}
-			for n := 2; n <= 3; n++ {
-				for j := 0; j+n <= len(words); j++ {
-					key := phraseKey(words[j : j+n])
-					if len(doc.phrases) < maxPagePhrases {
-						doc.phrases[key] = true
-					} else if !doc.phrases[key] {
-						doc.limited = true
-					}
-				}
-			}
+		profile, err := BuildLexicalProfile(ctx, page)
+		if err != nil {
+			return nil, err
 		}
-		add(page.Title, 4)
-		add(page.H1, 4)
-		if page.Signals != nil && page.Signals.Complete && !page.Signals.ContentIncomplete {
-			add(page.Signals.Headings, 3)
+		doc := lexicalPage{phrases: map[string]bool{}, limited: profile.Limited}
+		for _, phrase := range profile.Phrases {
+			doc.phrases[phrase] = true
 		}
-		add(page.Description, 2)
-		add(pagePath(page.URL), 1)
-		if page.Signals != nil && page.Signals.Complete && !page.Signals.ContentIncomplete {
-			add(page.Signals.Excerpt, 1)
-		}
-		keys := make([]string, 0, len(weights))
-		for key := range weights {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			c.index[key] = append(c.index[key], posting{i, weights[key]})
+		for _, term := range profile.Terms {
+			c.index[term.Term] = append(c.index[term.Term], posting{i, term.Weight})
 		}
 		c.pages[i] = doc
 		c.ids[i] = page.TargetID

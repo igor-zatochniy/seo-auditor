@@ -8,6 +8,8 @@ window.seoOpportunities = {
     const confidence = {high:"Висока",medium:"Середня",low:"Низька",unknown:"Недостатньо даних"};
     const kinds = {technical:"Технічний доступ",content:"Контент",mapping:"Вибір цілі",entity:"Сутності",internal_link:"Перелінковка",competitor_gap:"Відмінність конкурента",intent_review:"Перевірка наміру"};
     let data, taskPage=0, impactPage=0, impact=[], generation=0, chartGeneration=0, historyGeneration=0, impactGeneration=0, decisionID, decisionSignature;
+    let targetCursors=[""], targetNext=null, targetGeneration=0, targetSelection="", targetLabel="", targetTimer;
+    let targetBusy=false, targetNeedsRefresh=false;
     const empty=(table,text,count)=>{const body=$(table).querySelector("tbody");body.replaceChildren();const cell=el("td",text,"empty");cell.colSpan=count;const tr=el("tr");tr.append(cell);body.append(tr);};
     const paginate=(prefix,page,total)=>{ $(prefix+"-page").textContent=total ? `${page*50+1}–${Math.min((page+1)*50,total)} / ${total}` : "0";$(prefix+"-prev").disabled=page===0;$(prefix+"-next").disabled=(page+1)*50>=total; };
     function taskTable() {
@@ -26,13 +28,14 @@ window.seoOpportunities = {
     }
     async function loadPlan() {
       const current=++generation;$("opportunity-refresh").disabled=true;
-      try {const loaded=await api(`/api/geo/reports/${reportID}/opportunities`);if(current!==generation)return;data=loaded;
+      try {const loaded=await api(`/api/geo/reports/${reportID}/opportunities`);if(current!==generation)return false;data=loaded;
         $("opportunity-meta").textContent=`${data.plan.model} · ${data.matching_model} · ${new Date(data.generated_at).toLocaleString("uk-UA")}`;
         $("opportunity-warnings").textContent=[...data.plan.warnings,data.plan.limited?"Показано не більше 500 завдань; частину рекомендацій обмежено.":""].filter(Boolean).join(" ");
-        $("opportunity-counts").textContent=`Завдань: ${data.plan.tasks.length} · Високий: ${data.plan.tasks.filter(t=>t.priority==="high").length} · Посилань: ${data.plan.links.length}`;taskTable();
+        $("opportunity-counts").textContent=`Перевірено сторінок: ${data.plan.checked_pages ?? "Не відомо"} · Завдань: ${data.plan.tasks.length} · Високий: ${data.plan.tasks.filter(t=>t.priority==="high").length} · Посилань: ${data.plan.links.length}`;taskTable();
         const body=$("opportunity-links").querySelector("tbody");body.replaceChildren();
         for(const l of data.plan.links){const tr=el("tr");for(const v of [l.source_url,l.target_url,l.suggested_anchor,l.observed_inlinks,`${confidence[l.confidence.level]} · ${l.confidence.reason} · ${l.reason}`])tr.append(el("td",v));body.append(tr);}
         if(!data.plan.links.length)empty("opportunity-links","Недостатньо даних графа або відповідних відсутніх зв'язків",5);
+        return true;
       } finally {if(current===generation)$("opportunity-refresh").disabled=false;}
     }
     $("opportunity-export").href=`/api/geo/reports/${reportID}/tasks.csv`;
@@ -40,23 +43,47 @@ window.seoOpportunities = {
     $("opportunity-search").oninput=()=>{taskPage=0;taskTable();};$("opportunity-priority").onchange=()=>{taskPage=0;taskTable();};
     $("opportunity-prev").onclick=()=>{taskPage--;taskTable();};$("opportunity-next").onclick=()=>{taskPage++;taskTable();};
     async function targetQuery() {
+      const g=++historyGeneration;
       const selected=data.rows.find(r=>r.ordinal===Number($("target-edit-query").value));if(!selected)return;
       $("target-edit-original").textContent=`Автоматична ціль: ${(selected.automatic_result||selected.result).target_url||"Не знайдено"} · ${selected.mapping_mode==="manual"?"Зараз застосовано ручне рішення":"Автоматичний вибір"}`;
-      $("target-edit-page").value=selected.mapping_mode==="manual"?String(selected.result.target_id):"";$("target-edit-reason").value="";$("target-edit-status").textContent="";
-      const g=++historyGeneration,items=await api(`/api/geo/reports/${reportID}/queries/${selected.ordinal}/target-history`);if(g!==historyGeneration)return;
+      targetSelection=selected.mapping_mode==="manual"?String(selected.result.target_id):"";targetLabel=selected.result.target_url||"";
+      $("target-edit-reason").value="";$("target-edit-status").textContent="";
+      await loadTargets();
+      if(g!==historyGeneration)return;
+      const items=await api(`/api/geo/reports/${reportID}/queries/${selected.ordinal}/target-history`);if(g!==historyGeneration)return;
       $("target-edit-history").replaceChildren();for(const item of items){const block=el("div",null,"geo-check");block.append(el("strong",`${new Date(item.at).toLocaleString("uk-UA")} · Ревізія ${item.revision}`),el("p",item.url||"Повернення до автоматичного вибору"),el("p",item.reason));$("target-edit-history").append(block);}if(!items.length)$("target-edit-history").append(el("p","Ручних рішень ще немає"));
     }
     $("target-edit-open").onclick=safe(async()=>{
-      if(!data)await loadPlan();$("target-edit-query").replaceChildren();$("target-edit-page").replaceChildren();const automatic=el("option","Автоматичний вибір (скасувати ручне рішення)");automatic.value="";$("target-edit-page").append(automatic);
+      if(targetBusy)return;
+      if(!data||targetNeedsRefresh){if(!await loadPlan())return;targetNeedsRefresh=false;}
+      $("target-edit-query").replaceChildren();targetCursors=[""];$("target-edit-search").value="";
       for(const row of data.rows){const o=el("option",row.result.query);o.value=row.ordinal;$("target-edit-query").append(o);}
-      for(const p of data.targets.filter(p=>p.http_status===200&&p.scan_status==="completed")){const o=el("option",`Ціль №${p.target_id} · ${p.url} · ${p.title||"Без title"}`);o.value=p.target_id;$("target-edit-page").append(o);}await targetQuery();$("geo-target-edit").showModal();
+      await targetQuery();$("geo-target-edit").showModal();
     });
+    async function loadTargets() {
+      const g=++targetGeneration,params=new URLSearchParams({search:$("target-edit-search").value.trim()});
+      if(targetCursors.at(-1))params.set("after",targetCursors.at(-1));
+      $("target-edit-save").disabled=true;$("target-edit-page").disabled=true;$("target-edit-prev").disabled=true;$("target-edit-next").disabled=true;
+      let loaded=false;
+      try {const list=await api(`/api/geo/reports/${reportID}/targets?${params}`);if(g!==targetGeneration)return;
+        const select=$("target-edit-page");select.replaceChildren();const automatic=el("option","Автоматичний вибір (скасувати ручне рішення)");automatic.value="";select.append(automatic);
+        for(const p of list.targets){const o=el("option",`Ціль №${p.target_id} · ${p.url} · ${p.title||"Без title"}`);o.value=String(p.target_id);select.append(o);}
+        if(targetSelection&&!list.targets.some(p=>String(p.target_id)===targetSelection)){const o=el("option",`Обрана ціль №${targetSelection} · ${targetLabel}`);o.value=targetSelection;select.append(o);}select.value=targetSelection;
+        targetNext=list.next_after;$("target-edit-page-label").textContent=`Сторінка ${targetCursors.length} · У вибірці: ${list.targets.length} · У домені: ${list.total}`;
+        $("target-edit-prev").disabled=targetCursors.length===1;$("target-edit-next").disabled=!targetNext;
+        loaded=true;
+      } finally {if(g===targetGeneration){$("target-edit-save").disabled=!loaded;$("target-edit-page").disabled=!loaded;}}
+    }
+    $("target-edit-page").onchange=()=>{targetSelection=$("target-edit-page").value;targetLabel=$("target-edit-page").selectedOptions[0]?.textContent||"";};
+    $("target-edit-search").oninput=()=>{clearTimeout(targetTimer);targetGeneration++;targetCursors=[""];targetTimer=setTimeout(safe(loadTargets),250);};
+    $("target-edit-prev").onclick=safe(async()=>{if(targetCursors.length>1){targetCursors.pop();await loadTargets();}});
+    $("target-edit-next").onclick=safe(async()=>{if(targetNext){targetCursors.push(targetNext);await loadTargets();}});
     $("target-edit-query").onchange=safe(targetQuery);
     $("target-edit-form").onsubmit=async event=>{
-      event.preventDefault();const row=data.rows.find(r=>r.ordinal===Number($("target-edit-query").value));if(!row)return;
+      event.preventDefault();if(targetBusy)return;const row=data.rows.find(r=>r.ordinal===Number($("target-edit-query").value));if(!row)return;
       const payload={target_id:$("target-edit-page").value?Number($("target-edit-page").value):null,expected_revision:row.decision_revision||0,reason:$("target-edit-reason").value};const signature=JSON.stringify([row.ordinal,payload]);if(signature!==decisionSignature){decisionID=crypto.randomUUID();decisionSignature=signature;}
-      $("target-edit-save").disabled=true;$("target-edit-status").textContent="Збереження…";
-      try{await api(`/api/geo/reports/${reportID}/queries/${row.ordinal}/target`,{...payload,id:decisionID});invalidateImpact();invalidateSeries();$("geo-target-edit").close();await refreshRows();await loadPlan();window.dispatchEvent(new Event("geo:targets-changed"));await series();}catch(error){$("target-edit-status").textContent=error.message;if(!$("geo-target-edit").open)notice(error.message);}finally{$("target-edit-save").disabled=false;}
+      targetBusy=true;$("target-edit-open").disabled=true;$("target-edit-save").disabled=true;$("target-edit-status").textContent="Збереження…";
+      try{await api(`/api/geo/reports/${reportID}/queries/${row.ordinal}/target`,{...payload,id:decisionID});targetNeedsRefresh=true;invalidateImpact();invalidateSeries();$("geo-target-edit").close();await refreshRows();if(await loadPlan())targetNeedsRefresh=false;window.dispatchEvent(new Event("geo:targets-changed"));await series();}catch(error){$("target-edit-status").textContent=error.message;if(!$("geo-target-edit").open)notice(error.message);}finally{targetBusy=false;$("target-edit-open").disabled=false;$("target-edit-save").disabled=false;}
     };
     function impactTable() {
       impactPage=Math.max(0,Math.min(impactPage,Math.ceil(impact.length/50)-1));const body=$("impact-table").querySelector("tbody");body.replaceChildren();

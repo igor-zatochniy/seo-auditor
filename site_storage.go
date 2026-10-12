@@ -29,11 +29,25 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 		sitemap bool
 	}
 	nodes := make(map[string]node)
-	rows, err := tx.Query(ctx, `SELECT target_id,url_fingerprint,frontier_depth,in_sitemap FROM audit_site_nodes WHERE run_id=$1`, cfg.RunID)
+	// Читаємо лише ідентичності поточного пакета, не весь граф на кожну сторінку.
+	fingerprints := make([][]byte, 0, len(candidates))
+	for _, candidate := range candidates {
+		normalized, origin, err := normalizeSiteURL(candidate.url, cfg.AllowPrivateTargets)
+		if err == nil && origin == site.Origin {
+			fingerprints = append(fingerprints, fingerprintURL(cfg.TargetFingerprintKey, normalized))
+		}
+	}
+	var maxID int64
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT total_urls,COALESCE((SELECT target_id FROM audit_site_nodes
+		WHERE run_id=$1 ORDER BY target_id DESC LIMIT 1),0) FROM audit_runs WHERE id=$1`, cfg.RunID).Scan(&total, &maxID); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT target_id,url_fingerprint,frontier_depth,in_sitemap FROM audit_site_nodes
+		WHERE run_id=$1 AND url_fingerprint=ANY($2::bytea[])`, cfg.RunID, fingerprints)
 	if err != nil {
 		return err
 	}
-	var maxID int64
 	for rows.Next() {
 		var n node
 		var fingerprint []byte
@@ -72,11 +86,12 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 			}
 			continue
 		}
-		if candidate.depth%sitemapFrontierBase > site.MaxDepth || len(nodes) >= site.MaxPages {
+		if candidate.depth%sitemapFrontierBase > site.MaxDepth || total >= site.MaxPages {
 			limited = true
 			continue
 		}
 		maxID++
+		total++
 		nodes[string(fp)] = node{id: maxID, depth: candidate.depth, sitemap: candidate.sitemap}
 		targets = append(targets, []any{cfg.RunID, maxID, normalized})
 		identities = append(identities, []any{cfg.RunID, maxID, fp, redactURL(normalized), candidate.depth, candidate.sitemap})
@@ -88,7 +103,7 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 		if _, err = tx.CopyFrom(ctx, pgx.Identifier{"audit_site_nodes"}, []string{"run_id", "target_id", "url_fingerprint", "safe_url", "frontier_depth", "in_sitemap"}, pgx.CopyFromRows(identities)); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE audit_runs SET total_urls=$2 WHERE id=$1`, cfg.RunID, len(nodes)); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE audit_runs SET total_urls=$2 WHERE id=$1`, cfg.RunID, total); err != nil {
 			return err
 		}
 	}

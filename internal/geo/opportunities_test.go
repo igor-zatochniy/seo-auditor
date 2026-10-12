@@ -86,6 +86,21 @@ func TestOpportunityPlanRetainsHighPrioritiesAtTaskLimit(t *testing.T) {
 		t.Fatal(len(p.Tasks), p.Limited, err)
 	}
 }
+
+func TestOpportunityPlanChecksFullStreamAfterDisplayLimit(t *testing.T) {
+	input := PlanInput{WalkFacts: func(visit func(PageFacts) error) error {
+		for id := int64(1); id <= 10001; id++ {
+			if err := visit(PageFacts{TargetID: id, ScanStatus: "failed", ErrorCode: "network_error"}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+	plan, err := BuildOpportunityPlan(context.Background(), input)
+	if err != nil || plan.CheckedPages != 10001 || !plan.Limited || len(plan.Tasks) != 500 {
+		t.Fatal("Перевірку корпусу обрізано лімітом відображення", plan.CheckedPages, len(plan.Tasks), plan.Limited, err)
+	}
+}
 func TestChosenTargetPreservesLowCoverageAndConfidence(t *testing.T) {
 	input := opportunityFixture()
 	r, err := AnalyzeChosenTarget(context.Background(), "unrelated dinosaurs", input.Pages, 2)

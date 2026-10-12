@@ -6,9 +6,11 @@
   <title>SEO Auditor</title>
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/international.css">
+  <link rel="stylesheet" href="/static/duplicates.css">
   <script src="/static/rendering.js" defer></script>
   <script src="/static/diagnostics.js" defer></script>
   <script src="/static/international.js" defer></script>
+  <script src="/static/duplicates.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/dialogs.js" defer></script>
 </head>
@@ -27,7 +29,7 @@
         </div>
         <div id="site-input" hidden>
           <label for="root-url">Стартовий URL</label><input id="root-url" type="url" placeholder="https://example.com/" maxlength="2048" disabled>
-          <div class="crawl-options"><label for="max-pages">Ліміт сторінок<input id="max-pages" type="number" min="1" max="1000" value="100" required disabled></label><label for="max-depth">Глибина обходу<input id="max-depth" type="number" min="0" max="10" value="5" required disabled></label><label class="checkbox-label"><input id="use-sitemaps" type="checkbox" checked disabled> Sitemap discovery</label></div>
+          <div class="crawl-options"><label for="max-pages">Ліміт сторінок<input id="max-pages" type="number" min="1" max="20000" value="100" required disabled></label><label for="max-depth">Глибина обходу<input id="max-depth" type="number" min="0" max="10" value="5" required disabled></label><label class="checkbox-label"><input id="use-sitemaps" type="checkbox" checked disabled> Пошук через sitemap</label></div>
         </div>
         <div class="input-footer"><div class="input-counts"><span>URL <strong id="url-count">0</strong></span><span>Повтори <strong id="duplicate-count">0</strong></span><span>Некоректні <strong id="invalid-count">0</strong></span></div><div class="actions"><button type="button" id="clear">Очистити</button><button class="primary" id="submit" type="submit">Запустити аудит <span aria-hidden="true">→</span></button></div></div>
       </form>
@@ -38,7 +40,7 @@
       <div class="summary" id="summary"></div>
       <div class="progress-line"><progress id="run-progress" max="100" value="0" aria-label="Прогрес аудиту"></progress><strong id="percentage">0%</strong></div>
       <div class="target-states" id="target-states"></div>
-      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button><button role="tab" id="tab-international" aria-selected="false" aria-controls="international">Міжнародне SEO</button></div>
+      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button><button role="tab" id="tab-international" aria-selected="false" aria-controls="international">Міжнародне SEO</button><button role="tab" id="tab-duplicates" aria-selected="false" aria-controls="duplicates">Дублі контенту</button></div>
       <section id="overview" role="tabpanel" aria-labelledby="tab-overview"><div class="band-heading"><h2>Технічні сигнали</h2><span class="muted" id="parsed-count"></span></div><div id="analytics" class="charts"></div><p class="metric-note">HTML-сигнали враховують лише успішно розібрані сторінки HTTP 200. Non-self canonical, відсутність JSON-LD та блокування robots.txt не є універсальними SEO-помилками. Noindex / none враховує будь-який scope директиви.</p></section>
       <section id="pages" role="tabpanel" aria-labelledby="tab-pages" hidden>
         <div class="table-toolbar"><input id="search" type="search" placeholder="Пошук URL" aria-label="Пошук URL" maxlength="512"><select id="filter" aria-label="Фільтр результатів"></select><select id="page-size" aria-label="Рядків на сторінці"><option value="50">50 рядків</option><option value="100">100 рядків</option><option value="200">200 рядків</option></select><button id="columns-button">Колонки</button></div>
@@ -50,6 +52,14 @@
         <p id="international-status" class="metric-note" role="status"></p>
         <div class="table-wrap" tabindex="0" aria-label="Діагностика hreflang"><table><thead><tr><th>Сторінка / HTTP</th><th>Джерело</th><th>Hreflang / альтернатива / HTTP</th><th>Висновки</th></tr></thead><tbody id="international-rows"></tbody></table></div>
         <div class="pagination"><button id="international-previous" aria-label="Попередні сторінки hreflang" title="Попередні сторінки">←</button><button id="international-next" aria-label="Наступні сторінки hreflang" title="Наступні сторінки">→</button></div>
+      </section>
+      <section id="duplicates" role="tabpanel" aria-labelledby="tab-duplicates" hidden>
+        <div class="band-heading"><h2>Дублі та canonical</h2><button id="duplicates-refresh" title="Оновити групи дублів" aria-label="Оновити групи дублів">↻</button></div>
+        <div id="duplicates-summary" class="target-states"></div>
+        <p id="duplicates-status" class="metric-note" role="status"></p>
+        <p class="metric-note">Точний збіг означає однаковий нормалізований основний текст, не однаковий HTML. Схожість SimHash — евристика; група може містити транзитивні збіги. Регіональні й товарні варіанти та перекриття тем потребують ручної перевірки, не є автоматичною канібалізацією.</p>
+        <div class="table-wrap" tabindex="0" aria-label="Групи дублів"><table><thead><tr><th>Група / сторінки</th><th>URL</th><th>Контекст</th><th>Canonical / тематика</th></tr></thead><tbody id="duplicates-rows"></tbody></table></div>
+        <div class="pagination"><button id="duplicates-previous" aria-label="Попередні групи" title="Попередні групи">←</button><button id="duplicates-next" aria-label="Наступні групи" title="Наступні групи">→</button></div>
       </section>
       <section id="graph" role="tabpanel" aria-labelledby="tab-graph" hidden>
         <div class="band-heading"><h2>Граф сайту</h2><span id="graph-status" class="badge"></span></div>
@@ -64,5 +74,6 @@
   </main>
   <dialog id="details-dialog"><div class="dialog-heading"><h2>Деталі сторінки</h2><button data-close="details-dialog" aria-label="Закрити" title="Закрити">×</button></div><p id="detail-url" class="detail-url"></p><div id="detail-content"></div></dialog>
   <dialog id="columns-dialog"><div class="dialog-heading"><h2>Колонки</h2><button data-close="columns-dialog" aria-label="Закрити" title="Закрити">×</button></div><div id="column-options"></div><button id="reset-columns">Відновити типові</button></dialog>
+  <dialog id="duplicates-dialog"><div class="dialog-heading"><h2>Сторінки групи</h2><button data-close="duplicates-dialog" aria-label="Закрити" title="Закрити">×</button></div><p id="duplicates-member-status" role="status"></p><div class="table-wrap"><table><thead><tr><th>URL / мова / слова</th><th>Title / H1</th><th>Canonical</th></tr></thead><tbody id="duplicates-member-rows"></tbody></table></div><div class="pagination"><button id="duplicates-member-previous" title="Попередні сторінки" aria-label="Попередні сторінки">←</button><button id="duplicates-member-next" title="Наступні сторінки" aria-label="Наступні сторінки">→</button></div></dialog>
 </body>
 </html>

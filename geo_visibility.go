@@ -138,36 +138,6 @@ func (s *webServer) bindVisibilityRecords(ctx context.Context, tx pgx.Tx, report
 	if err != nil {
 		return err
 	}
-	targets := map[string]int64{}
-	rows, err = tx.Query(ctx, `SELECT target_id,target_fingerprint FROM audit_results
-		WHERE run_id=$1 AND fingerprint_key_id=$2 AND scan_status='completed' AND status_code=200
-		ORDER BY target_id LIMIT $3`, sourceID, s.cfg.TargetFingerprintKeyID, geo.MaxPages+1)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var id int64
-		var fingerprint []byte
-		if err = rows.Scan(&id, &fingerprint); err != nil {
-			rows.Close()
-			return err
-		}
-		if len(targets) >= geo.MaxPages {
-			rows.Close()
-			return geoInputError{"Джерело перевищує ліміт 1000 успішних сторінок."}
-		}
-		key := string(fingerprint)
-		if _, exists := targets[key]; exists {
-			targets[key] = 0
-		} else {
-			targets[key] = id
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
 	seen := map[string]bool{}
 	for i := range records {
 		if err = ctx.Err(); err != nil {
@@ -192,8 +162,16 @@ func (s *webServer) bindVisibilityRecords(ctx context.Context, tx pgx.Tx, report
 				parsed.Path = "/"
 			}
 			identityURL = parsed.String()
-			if id := targets[string(fingerprintURL(s.cfg.TargetFingerprintKey, normalized))]; id != 0 {
-				r.TargetID = &id
+			// Запитуються лише identity із CSV; два targets із тим самим fingerprint залишаються неоднозначними.
+			var target int64
+			var count int
+			if err = tx.QueryRow(ctx, `SELECT COALESCE(MIN(target_id),0),COUNT(*) FROM audit_results
+ WHERE run_id=$1 AND fingerprint_key_id=$2 AND target_fingerprint=$3 AND scan_status='completed' AND status_code=200`,
+				sourceID, s.cfg.TargetFingerprintKeyID, fingerprintURL(s.cfg.TargetFingerprintKey, normalized)).Scan(&target, &count); err != nil {
+				return err
+			}
+			if count == 1 {
+				r.TargetID = &target
 			}
 		}
 		identity := geo.QueryKey(r.Query) + "\x00" + identityURL

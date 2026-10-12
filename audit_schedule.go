@@ -264,7 +264,7 @@ func (s *webServer) runScheduler(ctx context.Context) {
 			}
 		}
 		for range 10 {
-			workCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+			workCtx, stop := context.WithTimeout(ctx, geoOperationTimeout)
 			done, err := s.processGEOJob(workCtx)
 			stop()
 			if err != nil {
