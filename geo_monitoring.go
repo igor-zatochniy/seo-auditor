@@ -21,6 +21,7 @@ type geoProfileInput struct {
 	Domain     string `json:"domain"`
 	Brand      string `json:"brand"`
 	Queries    string `json:"queries"`
+	Semantic   bool   `json:"semantic,omitempty"`
 }
 
 func (s *webServer) storeGEOProfile(ctx context.Context, input geoProfileInput) error {
@@ -82,7 +83,7 @@ func (s *webServer) storeGEOProfile(ctx context.Context, input geoProfileInput) 
 	if total >= 100 || perSchedule >= 10 {
 		return geoInputError{"Дозволено 100 GEO-профілів загалом і 10 на розклад."}
 	}
-	_, err = tx.Exec(ctx, "INSERT INTO geo_profiles(id,schedule_id,name,domain,brand,queries,request_hash) VALUES($1,$2,$3,$4,$5,$6,$7)", input.ID, input.ScheduleID, input.Name, input.Domain, input.Brand, queries, hash)
+	_, err = tx.Exec(ctx, "INSERT INTO geo_profiles(id,schedule_id,name,domain,brand,queries,request_hash,semantic) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", input.ID, input.ScheduleID, input.Name, input.Domain, input.Brand, queries, hash, input.Semantic)
 	if err != nil {
 		return err
 	}
@@ -104,18 +105,19 @@ func (s *webServer) processGEOJob(ctx context.Context) (bool, error) {
 }
 
 func (s *webServer) processGEOProfileJob(ctx context.Context) (bool, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return false, err
 	}
 	defer rollbackSiteTransaction(tx, s.cfg)
 	var profileID, runID, reportID, status, domain, brand string
 	var queries []string
-	err = tx.QueryRow(ctx, `SELECT j.profile_id::text,j.run_id::text,j.report_id::text,r.status,p.domain,p.brand,p.queries
+	var semanticEnabled bool
+	err = tx.QueryRow(ctx, `SELECT j.profile_id::text,j.run_id::text,j.report_id::text,r.status,p.domain,p.brand,p.queries,p.semantic
 	 FROM geo_profile_runs j JOIN geo_profiles p ON p.id=j.profile_id JOIN audit_runs r ON r.id=j.run_id
 	 WHERE j.status='pending' AND r.status<>'running' AND NOT EXISTS(SELECT 1 FROM geo_profile_runs older
 	 WHERE older.profile_id=j.profile_id AND older.status='pending' AND (older.scheduled_at,older.run_id)<(j.scheduled_at,j.run_id))
-	 ORDER BY j.scheduled_at,j.profile_id,j.run_id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`).Scan(&profileID, &runID, &reportID, &status, &domain, &brand, &queries)
+	 ORDER BY j.scheduled_at,j.profile_id,j.run_id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`).Scan(&profileID, &runID, &reportID, &status, &domain, &brand, &queries, &semanticEnabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -129,7 +131,7 @@ func (s *webServer) processGEOProfileJob(ctx context.Context) (bool, error) {
 		}
 		return true, tx.Commit(ctx)
 	}
-	report, err := s.createGEOInTransaction(ctx, tx, geo.Input{ID: reportID, SourceRunID: runID, Domain: domain, Brand: brand}, queries)
+	report, err := s.createGEOInTransaction(ctx, tx, geo.Input{ID: reportID, SourceRunID: runID, Domain: domain, Brand: brand, Semantic: semanticEnabled}, queries)
 	if errors.Is(err, errGEOAnalysisBusy) {
 		return false, nil
 	}
@@ -220,7 +222,8 @@ func (s *webServer) geoTopics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rollbackSiteTransaction(tx, s.cfg)
-	if _, err = scanGEOReport(tx.QueryRow(r.Context(), "SELECT "+geoReportColumns+" FROM geo_reports WHERE id=$1", id)); err != nil {
+	report, err := scanGEOReport(tx.QueryRow(r.Context(), "SELECT "+geoReportColumns+" FROM geo_reports WHERE id=$1", id))
+	if err != nil {
 		webDBError(w, err)
 		return
 	}
@@ -234,7 +237,11 @@ func (s *webServer) geoTopics(w http.ResponseWriter, r *http.Request) {
 		webDBError(w, err)
 		return
 	}
-	writeWebJSON(w, 200, map[string]any{"model": geo.TopicModel, "topics": topics})
+	model := geo.TopicModel
+	if report.Semantic {
+		model = geo.SemanticTopicModel
+	}
+	writeWebJSON(w, 200, map[string]any{"model": model, "topics": topics})
 }
 
 func (s *webServer) geoProfileCreate(w http.ResponseWriter, r *http.Request) {

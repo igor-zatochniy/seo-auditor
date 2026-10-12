@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/duplicates"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 )
 
@@ -27,6 +28,7 @@ func newGEOCollector() geoCollector {
 	g := geoCollector{types: make(map[string]bool)}
 	for i := range g.regions {
 		g.regions[i] = geoRegion{content: newBoundedTextCollector(2000), headings: newBoundedTextCollector(800), paragraph: newBoundedTextCollector(600)}
+		g.regions[i].signature = duplicates.NewCollector()
 	}
 	g.signals.Search = geo.SearchControls{GooglebotRules: geo.Unknown, OAISearchBotRules: geo.Unknown, GoogleIndexing: geo.Allowed, GoogleSnippet: geo.Allowed}
 	return g
@@ -65,6 +67,7 @@ func (g *geoCollector) text(text []byte) {
 			continue
 		}
 		r := &g.regions[i]
+		r.signature.Write(text)
 		r.content.Write(text)
 		r.content.Write([]byte(" "))
 		if g.state.heading {
@@ -191,4 +194,14 @@ func (g *geoCollector) result() *geo.Signals {
 	sort.Strings(s.SchemaTypes)
 	s.Entities = g.entitySample()
 	return &s
+}
+
+func (g *geoCollector) contentSignature(source, language string) *duplicates.Signature {
+	index := 0
+	if source == "main" {
+		index = 1
+	} else if source == "article" {
+		index = 2
+	}
+	return g.regions[index].signature.Result(source, language, !g.signals.ContentIncomplete)
 }

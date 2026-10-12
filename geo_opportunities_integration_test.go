@@ -101,11 +101,17 @@ func TestGEOOpportunityExportAndImpactPreserveSource(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	var plan struct {
-		Plan    geo.OpportunityPlan `json:"plan"`
-		Targets []geo.PageFacts     `json:"targets"`
+		Plan geo.OpportunityPlan `json:"plan"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &plan); err != nil || plan.Plan.Model != geo.OpportunityModel || len(plan.Targets) != 2 || len(plan.Plan.Warnings) == 0 {
+	if err := json.Unmarshal(w.Body.Bytes(), &plan); err != nil || plan.Plan.Model != geo.OpportunityModel || plan.Plan.CheckedPages != 2 || len(plan.Plan.Warnings) == 0 {
 		t.Fatal(plan, err)
+	}
+	w = strategyRequest(app, "GET", "/api/geo/reports/"+report.ID+"/targets", "")
+	var targetPage struct {
+		Targets []geo.PageFacts `json:"targets"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &targetPage); err != nil || w.Code != 200 || len(targetPage.Targets) != 2 {
+		t.Fatal(w.Code, w.Body.String(), err)
 	}
 	w = strategyRequest(app, "GET", "/api/geo/reports/"+report.ID+"/tasks.csv", "")
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "Модель плану") {

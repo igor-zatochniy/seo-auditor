@@ -22,23 +22,25 @@ import (
 )
 
 type geoReport struct {
-	ID             string    `json:"id"`
-	SourceRunID    string    `json:"source_run_id"`
-	Domain         string    `json:"domain"`
-	Brand          string    `json:"brand"`
-	Model          string    `json:"model"`
-	QueryCount     int       `json:"query_count"`
-	PageCount      int       `json:"page_count"`
-	MatchedCount   int       `json:"matched_count"`
-	AmbiguousCount int       `json:"ambiguous_count"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string            `json:"id"`
+	SourceRunID    string            `json:"source_run_id"`
+	Domain         string            `json:"domain"`
+	Brand          string            `json:"brand"`
+	Model          string            `json:"model"`
+	QueryCount     int               `json:"query_count"`
+	PageCount      int               `json:"page_count"`
+	MatchedCount   int               `json:"matched_count"`
+	AmbiguousCount int               `json:"ambiguous_count"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Corpus         *geoCorpusSummary `json:"corpus,omitempty"`
+	Semantic       bool              `json:"semantic"`
 }
 
-const geoReportColumns = `id::text,source_run_id::text,domain,brand,model,query_count,page_count,matched_count,ambiguous_count,created_at`
+const geoReportColumns = `id::text,source_run_id::text,domain,brand,model,query_count,page_count,matched_count,ambiguous_count,created_at,corpus,semantic`
 
 func scanGEOReport(row pgx.Row) (geoReport, error) {
 	var report geoReport
-	err := row.Scan(&report.ID, &report.SourceRunID, &report.Domain, &report.Brand, &report.Model, &report.QueryCount, &report.PageCount, &report.MatchedCount, &report.AmbiguousCount, &report.CreatedAt)
+	err := row.Scan(&report.ID, &report.SourceRunID, &report.Domain, &report.Brand, &report.Model, &report.QueryCount, &report.PageCount, &report.MatchedCount, &report.AmbiguousCount, &report.CreatedAt, &report.Corpus, &report.Semantic)
 	return report, err
 }
 
@@ -104,50 +106,13 @@ func (s *webServer) createGEOInTransaction(ctx context.Context, tx pgx.Tx, input
 	if sourceStatus != "completed" && sourceStatus != "completed_with_errors" {
 		return empty, geoInputError{"Оберіть завершений SEO-аудит."}
 	}
-	rows, err := tx.Query(ctx, `SELECT target_id,safe_url,COALESCE(title,''),COALESCE(description,''),COALESCE(h1,''),
-		COALESCE(h1_count,0),COALESCE(external_links_count,0),COALESCE(word_count,0),COALESCE(meta_robots,''),COALESCE(x_robots_tag,''),
-		COALESCE(canonical_url,''),COALESCE(is_self_canonical,FALSE),geo_signals
-		FROM audit_results WHERE run_id=$1 AND scan_status='completed' AND status_code=200 ORDER BY target_id LIMIT $2`, input.SourceRunID, geo.MaxPages+1)
+	corpus, err := ensureGEOCorpus(ctx, tx, input.SourceRunID, input.Domain)
 	if err != nil {
 		return empty, err
 	}
-	pages := []geo.Page{}
-	count := 0
-	for rows.Next() {
-		count++
-		var page geo.Page
-		if err = rows.Scan(&page.TargetID, &page.URL, &page.Title, &page.Description, &page.H1, &page.H1Count, &page.ExternalLinks, &page.WordCount,
-			&page.MetaRobots, &page.XRobotsTag, &page.Canonical, &page.SelfCanonical, &page.Signals); err != nil {
-			rows.Close()
-			return empty, err
-		}
-		if geo.InDomain(page.URL, input.Domain) {
-			pages = append(pages, page)
-		}
-	}
-	err = rows.Err()
-	rows.Close()
+	results, err := corpus.analyze(ctx, queries, input.Brand, input.Semantic)
 	if err != nil {
 		return empty, err
-	}
-	if count > geo.MaxPages {
-		return empty, geoInputError{"Джерело має понад 1000 успішних сторінок. Створіть окремий обмежений SEO-аудит."}
-	}
-	if len(pages) == 0 {
-		return empty, geoInputError{"У цьому аудиті немає успішних HTML-сторінок указаного домену."}
-	}
-	results, err := geo.Analyze(ctx, queries, pages)
-	if err != nil {
-		return empty, err
-	}
-	byTarget := make(map[int64]*geo.Signals, len(pages))
-	for _, page := range pages {
-		byTarget[page.TargetID] = page.Signals
-	}
-	for i := range results {
-		if results[i].TargetID != nil {
-			results[i].Entities = geo.EvaluateEntities(input.Brand, byTarget[*results[i].TargetID])
-		}
 	}
 	matched, ambiguous := 0, 0
 	for _, result := range results {
@@ -158,10 +123,14 @@ func (s *webServer) createGEOInTransaction(ctx context.Context, tx pgx.Tx, input
 			ambiguous++
 		}
 	}
+	model := geo.Model
+	if input.Semantic {
+		model = geo.SemanticModel
+	}
 	report, err := scanGEOReport(tx.QueryRow(ctx, `INSERT INTO geo_reports
-		(id,source_run_id,request_hash,domain,brand,model,query_count,page_count,matched_count,ambiguous_count)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING `+geoReportColumns,
-		input.ID, input.SourceRunID, fingerprint[:], input.Domain, input.Brand, geo.Model, len(queries), len(pages), matched, ambiguous))
+		(id,source_run_id,request_hash,domain,brand,model,query_count,page_count,matched_count,ambiguous_count,corpus,semantic)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING `+geoReportColumns,
+		input.ID, input.SourceRunID, fingerprint[:], input.Domain, input.Brand, model, len(queries), corpus.summary.Pages, matched, ambiguous, corpus.summary, input.Semantic))
 	if err != nil {
 		return empty, err
 	}
@@ -514,6 +483,9 @@ func (s *webServer) registerGEO(mux *http.ServeMux) {
 		s.geoGet(w, r)
 	})
 	mux.HandleFunc("POST /api/geo/reports/{id}/queries/{ordinal}/citation", s.geoSaveCitation)
+	mux.HandleFunc("POST /api/geo/reports/{id}/queries/{ordinal}/answer/preview", s.geoAnswerPreview)
+	mux.HandleFunc("POST /api/geo/reports/{id}/queries/{ordinal}/answer", s.geoAnswerSave)
+	mux.HandleFunc("GET /api/geo/reports/{id}/queries/{ordinal}/answers", s.geoAnswerHistory)
 	mux.HandleFunc("GET /api/geo/reports/{id}/queries/{ordinal}/observations", s.geoObservations)
 	mux.HandleFunc("POST /api/geo/reports/{id}/visibility/imports", s.visibilitySubmit)
 	mux.HandleFunc("GET /api/geo/reports/{id}/visibility/imports", s.visibilityHistory)

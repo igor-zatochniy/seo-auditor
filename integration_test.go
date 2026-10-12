@@ -2164,6 +2164,9 @@ func TestMigrationsUpgradeEverySupportedSchemaVersion(t *testing.T) {
 
 	for startingVersion := int64(1); startingVersion < requiredSchemaVersion; startingVersion++ {
 		t.Run(fmt.Sprintf("from_v%02d", startingVersion), func(t *testing.T) {
+			// Кожна версія має окремий bounded бюджет, незалежний від довжини матриці.
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+			defer cancel()
 			schemaName := fmt.Sprintf("migration_matrix_%02d_%d", startingVersion, time.Now().UnixNano())
 			if _, err := adminDB.ExecContext(ctx, `CREATE SCHEMA `+quoteSQLIdentifier(schemaName)); err != nil {
 				t.Fatalf("create temporary schema: %v", err)

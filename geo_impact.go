@@ -18,7 +18,13 @@ func loadImpactSamples(ctx context.Context, tx pgx.Tx, report geoReport) ([]geo.
 	if err != nil {
 		return nil, err
 	}
-	keys, err := tx.Query(ctx, "SELECT target_id,target_fingerprint,fingerprint_key_id FROM audit_results WHERE run_id=$1 ORDER BY target_id LIMIT 1001", report.SourceRunID)
+	ids := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		if row.Result.TargetID != nil {
+			ids = append(ids, *row.Result.TargetID)
+		}
+	}
+	keys, err := tx.Query(ctx, "SELECT target_id,target_fingerprint,fingerprint_key_id FROM audit_results WHERE run_id=$1 AND target_id=ANY($2::bigint[])", report.SourceRunID, ids)
 	if err != nil {
 		return nil, err
 	}

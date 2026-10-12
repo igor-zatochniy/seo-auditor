@@ -50,7 +50,7 @@ func ClusterTopics(ctx context.Context, results []Result) ([]Topic, error) {
 			return nil, err
 		}
 		v := topicVector{}
-		for _, term := range terms(r.Query) {
+		for _, term := range TopicTerms(r) {
 			v[wordFamily(term)] = 1
 			if len(v) >= 24 {
 				break

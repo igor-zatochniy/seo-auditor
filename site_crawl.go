@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const maxSitePages = 1000
+const maxSitePages = 20000
 const sitemapFrontierBase = 1000
 
 type siteCrawlOptions struct {
@@ -26,11 +26,12 @@ type siteCrawlOptions struct {
 }
 
 type siteCrawl struct {
-	Origin       string
-	MaxPages     int
-	MaxDepth     int
-	UseSitemaps  bool
-	SitemapState string
+	Origin              string
+	MaxPages            int
+	MaxDepth            int
+	UseSitemaps         bool
+	SitemapState        string
+	CompetitorSelection *competitorDiscovery
 }
 
 func normalizeSiteURL(raw string, allowPrivate bool) (string, string, error) {
@@ -63,7 +64,7 @@ func normalizeSiteURL(raw string, allowPrivate bool) (string, string, error) {
 
 func validateSiteOptions(options *siteCrawlOptions, allowPrivate bool) error {
 	if options.MaxPages < 1 || options.MaxPages > maxSitePages || options.MaxDepth < 0 || options.MaxDepth > 10 {
-		return fmt.Errorf("site crawl: 1–1000 сторінок, глибина 0–10")
+		return fmt.Errorf("site crawl: 1–20000 сторінок, глибина 0–10")
 	}
 	root, _, err := normalizeSiteURL(options.RootURL, allowPrivate)
 	if err != nil {
@@ -131,8 +132,8 @@ func loadSiteCrawl(ctx context.Context, pool *pgxpool.Pool, cfg Config) (*siteCr
 	defer cancel()
 	var site siteCrawl
 	var keyCheck []byte
-	err := pool.QueryRow(ctx, `SELECT origin,max_pages,max_depth,use_sitemaps,sitemap_state,key_check FROM audit_site_crawls WHERE run_id=$1`, cfg.RunID).
-		Scan(&site.Origin, &site.MaxPages, &site.MaxDepth, &site.UseSitemaps, &site.SitemapState, &keyCheck)
+	err := pool.QueryRow(ctx, `SELECT origin,max_pages,max_depth,use_sitemaps,sitemap_state,key_check,competitor_selection FROM audit_site_crawls WHERE run_id=$1`, cfg.RunID).
+		Scan(&site.Origin, &site.MaxPages, &site.MaxDepth, &site.UseSitemaps, &site.SitemapState, &keyCheck, &site.CompetitorSelection)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -141,6 +142,9 @@ func loadSiteCrawl(ctx context.Context, pool *pgxpool.Pool, cfg Config) (*siteCr
 	}
 	if !bytes.Equal(keyCheck, fingerprintURL(cfg.TargetFingerprintKey, "site-crawl:"+cfg.RunID)) {
 		return nil, fmt.Errorf("site crawl requires the original fingerprint key to resume")
+	}
+	if site.CompetitorSelection != nil && (site.CompetitorSelection.Version != geoDiscoveryVersion || len(site.CompetitorSelection.Queries) == 0 || len(site.CompetitorSelection.Queries) > 1000 || site.MaxPages > 50) {
+		return nil, fmt.Errorf("invalid competitor discovery snapshot")
 	}
 	return &site, nil
 }

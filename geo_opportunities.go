@@ -21,6 +21,7 @@ import (
 func (s *webServer) registerGEOOpportunities(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/geo/reports/{id}/opportunities", s.geoOpportunityGet)
 	mux.HandleFunc("GET /api/geo/reports/{id}/tasks.csv", s.geoOpportunityGet)
+	mux.HandleFunc("GET /api/geo/reports/{id}/targets", s.geoTargets)
 	mux.HandleFunc("POST /api/geo/reports/{id}/queries/{ordinal}/target", s.geoTargetDecision)
 	mux.HandleFunc("GET /api/geo/reports/{id}/queries/{ordinal}/target-history", s.geoTargetHistory)
 	mux.HandleFunc("GET /api/geo/reports/{id}/impact", s.geoImpactGet)
@@ -79,76 +80,19 @@ func loadEffectiveGEORows(ctx context.Context, tx pgx.Tx, id string) ([]geoRow, 
 	return items, nil
 }
 
-func loadOpportunityPages(ctx context.Context, tx pgx.Tx, report geoReport) ([]geo.Page, []geo.PageFacts, error) {
-	rows, err := tx.Query(ctx, `SELECT a.target_id,a.safe_url,COALESCE(a.title,''),COALESCE(a.description,''),COALESCE(a.h1,''),COALESCE(a.h1_count,0),
- COALESCE(a.external_links_count,0),COALESCE(a.word_count,0),COALESCE(a.meta_robots,''),COALESCE(a.x_robots_tag,''),COALESCE(a.canonical_url,''),COALESCE(a.is_self_canonical,FALSE),a.geo_signals,a.status_code,a.scan_status,a.error_code,n.internal_inlinks_count,COALESCE(n.links_truncated,FALSE)
- FROM audit_results a LEFT JOIN audit_site_nodes n ON n.run_id=a.run_id AND n.target_id=a.target_id
- WHERE a.run_id=$1 ORDER BY a.target_id LIMIT 1001`, report.SourceRunID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	pages, facts := []geo.Page{}, []geo.PageFacts{}
-	count := 0
-	for rows.Next() {
-		count++
-		var p geo.Page
-		var f geo.PageFacts
-		if err = rows.Scan(&p.TargetID, &p.URL, &p.Title, &p.Description, &p.H1, &p.H1Count, &p.ExternalLinks, &p.WordCount, &p.MetaRobots, &p.XRobotsTag, &p.Canonical, &p.SelfCanonical, &p.Signals, &f.Status, &f.ScanStatus, &f.ErrorCode, &f.Inlinks, &f.Truncated); err != nil {
-			return nil, nil, err
-		}
-		if !geo.InDomain(p.URL, report.Domain) {
-			continue
-		}
-		f.TargetID, f.URL, f.Title = p.TargetID, p.URL, p.Title
-		facts = append(facts, f)
-		if f.ScanStatus == "completed" && f.Status != nil && *f.Status == 200 {
-			pages = append(pages, p)
-		}
-	}
-	if err = rows.Err(); err != nil {
-		return nil, nil, err
-	}
-	if count > geo.MaxPages {
-		return nil, nil, geoInputError{"План потребує обмеженого аудиту до 1000 результатів."}
-	}
-	return pages, facts, nil
-}
-
 func loadOpportunityInput(ctx context.Context, tx pgx.Tx, report geoReport, rows []geoRow) (geo.PlanInput, error) {
 	input := geo.PlanInput{Results: geoResults(rows), Edges: map[geo.LinkPair]bool{}}
-	var err error
-	input.Pages, input.Facts, err = loadOpportunityPages(ctx, tx, report)
+	corpus, err := ensureGEOCorpus(ctx, tx, report.SourceRunID, report.Domain)
 	if err != nil {
 		return input, err
 	}
+	input.WalkFacts = func(visit func(geo.PageFacts) error) error { return walkOpportunityFacts(ctx, tx, report, visit) }
 	err = tx.QueryRow(ctx, `SELECT graph_ready,NOT limit_reached AND sitemap_state NOT IN ('pending','partial') AND NOT EXISTS(SELECT 1 FROM audit_site_nodes WHERE run_id=$1 AND links_truncated) FROM audit_site_crawls WHERE run_id=$1`, report.SourceRunID).Scan(&input.GraphReady, &input.GraphFull)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return input, err
 	}
-	if input.GraphReady {
-		edges, err := tx.Query(ctx, `SELECT e.from_target_id,n.target_id FROM audit_site_edges e JOIN audit_site_nodes n ON n.run_id=e.run_id AND n.url_fingerprint=e.to_fingerprint WHERE e.run_id=$1 AND e.is_internal LIMIT 256001`, report.SourceRunID)
-		if err != nil {
-			return input, err
-		}
-		count := 0
-		for edges.Next() {
-			var pair geo.LinkPair
-			if err = edges.Scan(&pair.From, &pair.To); err != nil {
-				edges.Close()
-				return input, err
-			}
-			input.Edges[pair] = true
-			count++
-		}
-		err = edges.Err()
-		edges.Close()
-		if err != nil {
-			return input, err
-		}
-		if count > 256000 {
-			return input, geoInputError{"Перевищено ліміт графа."}
-		}
+	input.IndexedLinks = func(linkCtx context.Context) ([]geo.LinkSuggestion, bool, error) {
+		return corpus.internalLinks(linkCtx, input)
 	}
 	competitors, err := tx.Query(ctx, `SELECT j.report_id::text FROM geo_competitor_jobs j JOIN geo_reports g ON g.id=j.report_id WHERE j.status='ready' AND g.model=$2 AND j.set_id=(SELECT id FROM geo_competitor_sets WHERE report_id=$1 AND NOT canceled ORDER BY created_at DESC,id DESC LIMIT 1) ORDER BY j.ordinal LIMIT 5`, report.ID, report.Model)
 	if err != nil {
@@ -200,9 +144,9 @@ func (s *webServer) geoOpportunityGet(w http.ResponseWriter, r *http.Request) {
 		writeWebError(w, 409, "busy", "Інший локальний аналіз ще виконується.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), geoOperationTimeout)
 	defer cancel()
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		webDBError(w, err)
 		return
@@ -228,23 +172,35 @@ func (s *webServer) geoOpportunityGet(w http.ResponseWriter, r *http.Request) {
 		webDBError(w, err)
 		return
 	}
+	if err = tx.Commit(ctx); err != nil {
+		webDBError(w, err)
+		return
+	}
 	if strings.HasSuffix(r.URL.Path, "tasks.csv") {
 		writeOpportunityCSV(w, report, plan)
 		return
 	}
-	writeWebJSON(w, 200, map[string]any{"report": report, "plan": plan, "rows": rows, "targets": input.Facts, "generated_at": time.Now().UTC(), "matching_model": report.Model, "topic_model": geo.TopicModel})
+	topicModel := geo.TopicModel
+	if report.Semantic {
+		topicModel = geo.SemanticTopicModel
+	}
+	writeWebJSON(w, 200, map[string]any{"report": report, "plan": plan, "rows": rows, "generated_at": time.Now().UTC(), "matching_model": report.Model, "topic_model": topicModel})
 }
 
 func writeOpportunityCSV(w http.ResponseWriter, report geoReport, plan geo.OpportunityPlan) {
 	var buf bytes.Buffer
 	out := csv.NewWriter(&buf)
-	_ = out.Write([]string{"ID завдання", "Пріоритет", "Тип", "Цільовий URL", "Кластери", "Запити", "Дія", "Впевненість", "Підстава", "Докази", "GEO-звіт", "Модель плану", "Модель зіставлення"})
+	_ = out.Write([]string{"ID завдання", "Пріоритет", "Тип", "Цільовий URL", "Кластери", "Запити", "Дія", "Впевненість", "Підстава", "Докази", "GEO-звіт", "Модель плану", "Модель зіставлення", "Перевірено сторінок", "Відображення обмежене", "Застереження"})
+	limited := "Ні"
+	if plan.Limited {
+		limited = "Так"
+	}
 	for _, t := range plan.Tasks {
 		evidence := []string{}
 		for _, e := range t.Evidence {
 			evidence = append(evidence, e.Source+" · "+e.URL+" · "+e.Detail)
 		}
-		cells := []string{t.ID, opportunityPriorityLabel(t.Priority), opportunityKindLabel(t.Kind), t.TargetURL, strings.Join(t.Clusters, "; "), strings.Join(t.Queries, "; "), t.Action, confidenceLabel(t.Confidence.Level), t.Confidence.Reason, strings.Join(evidence, "\n"), report.ID, plan.Model, report.Model}
+		cells := []string{t.ID, opportunityPriorityLabel(t.Priority), opportunityKindLabel(t.Kind), t.TargetURL, strings.Join(t.Clusters, "; "), strings.Join(t.Queries, "; "), t.Action, confidenceLabel(t.Confidence.Level), t.Confidence.Reason, strings.Join(evidence, "\n"), report.ID, plan.Model, report.Model, strconv.Itoa(plan.CheckedPages), limited, strings.Join(plan.Warnings, "; ")}
 		for i := range cells {
 			cells[i] = safeCSVCell(cells[i])
 		}
@@ -318,7 +274,7 @@ func (s *webServer) geoTargetDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Reason = strings.TrimSpace(input.Reason)
-	if err != nil || ordinal < 1 || ordinal > 1000 || !runIDPattern.MatchString(input.ID) || input.ExpectedRevision < 0 || (input.TargetID != nil && *input.TargetID < 1) || !utf8.ValidString(input.Reason) || utf8.RuneCountInString(input.Reason) < 1 || utf8.RuneCountInString(input.Reason) > 500 || strings.ContainsFunc(input.Reason, unicode.IsControl) {
+	if err != nil || ordinal < 1 || ordinal > 1000 || !runIDPattern.MatchString(input.ID) || input.ExpectedRevision < 0 || (input.TargetID != nil && *input.TargetID == 0) || !utf8.ValidString(input.Reason) || utf8.RuneCountInString(input.Reason) < 1 || utf8.RuneCountInString(input.Reason) > 500 || strings.ContainsFunc(input.Reason, unicode.IsControl) {
 		writeWebError(w, 400, "invalid_target", "Потрібні коректні ID, ревізія та пояснення до 500 символів.")
 		return
 	}
@@ -362,7 +318,7 @@ func (s *webServer) geoTargetDecision(w http.ResponseWriter, r *http.Request) {
 		webDBError(w, err)
 		return
 	}
-	if report.Model != geo.Model {
+	if report.Model != geo.Model && report.Model != geo.SemanticModel {
 		writeWebError(w, 409, "model_changed", "Створіть новий GEO-звіт поточною моделлю перед ручним вибором цілі.")
 		return
 	}
@@ -386,21 +342,15 @@ func (s *webServer) geoTargetDecision(w http.ResponseWriter, r *http.Request) {
 	}
 	var selected *geo.Result
 	if input.TargetID != nil {
-		pages, _, err := loadOpportunityPages(r.Context(), tx, report)
+		corpus, err := ensureGEOCorpus(r.Context(), tx, report.SourceRunID, report.Domain)
 		if err != nil {
 			webDBError(w, err)
 			return
 		}
-		result, err := geo.AnalyzeChosenTarget(r.Context(), original.Query, pages, *input.TargetID)
+		result, err := corpus.chosen(r.Context(), original.Query, *input.TargetID, report.Brand, report.Semantic)
 		if err != nil {
 			writeWebError(w, 400, "invalid_target", err.Error())
 			return
-		}
-		for _, p := range pages {
-			if p.TargetID == *input.TargetID {
-				result.Entities = geo.EvaluateEntities(report.Brand, p.Signals)
-				break
-			}
 		}
 		selected = &result
 	}

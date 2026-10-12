@@ -57,17 +57,18 @@ type siteMetricEdge struct {
 }
 
 func readSiteMetricBatch(ctx context.Context, pool *pgxpool.Pool, cfg Config, after int64, ordinal int) ([]siteMetricEdge, error) {
+	const batchSize = 8192
 	var edges []siteMetricEdge
 	err := withDBReadRetry(ctx, cfg, "read_site_graph_batch", func(qctx context.Context) error {
 		rows, err := pool.Query(qctx, `SELECT e.from_target_id,e.ordinal,e.to_fingerprint,e.is_internal,e.nofollow,e.kind
 			FROM audit_site_edges e
 			WHERE e.run_id=$1 AND (e.from_target_id,e.ordinal)>($2,$3)
-			ORDER BY e.from_target_id,e.ordinal LIMIT 2048`, cfg.RunID, after, ordinal)
+			ORDER BY e.from_target_id,e.ordinal LIMIT $4`, cfg.RunID, after, ordinal, batchSize)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
-		batch := make([]siteMetricEdge, 0, 2048)
+		batch := make([]siteMetricEdge, 0, batchSize)
 		for rows.Next() {
 			var e siteMetricEdge
 			var fp []byte
@@ -118,15 +119,14 @@ func finalizeSiteGraph(ctx context.Context, pool *pgxpool.Pool, cfg Config) erro
 		return rows.Err()
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("read site graph nodes: %w", err)
 	}
 	if len(metrics) > maxSitePages {
 		return fmt.Errorf("site graph exceeds node budget")
 	}
 	if err = setSiteGraphReady(ctx, pool, cfg, false); err != nil {
-		return err
+		return fmt.Errorf("mark site graph incomplete: %w", err)
 	}
-	adj := make(map[int64][]graphArc)
 	lastIncomingSource := make(map[int64]int64)
 	var after, current int64
 	ordinal, total := 0, 0
@@ -177,18 +177,11 @@ func finalizeSiteGraph(ctx context.Context, pool *pgxpool.Pool, cfg Config) erro
 						lastIncomingSource[*e.to] = e.from
 					}
 				}
-				if e.to != nil && !e.nofollow {
-					cost := 1
-					if e.kind == "redirect" {
-						cost = 0
-					}
-					adj[e.from] = append(adj[e.from], graphArc{to: *e.to, cost: cost})
-				}
 			}
 			after, ordinal = e.from, e.ordinal
 		}
 	}
-	depths, err := siteClickDepths(ctx, adj)
+	depths, err := siteDatabaseClickDepths(ctx, pool, cfg)
 	if err != nil {
 		return err
 	}
@@ -232,10 +225,82 @@ func finalizeSiteGraph(ctx context.Context, pool *pgxpool.Pool, cfg Config) erro
 			return tx.Commit(qctx)
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("save site graph metrics from target %d: %w", batch[0], err)
 		}
 	}
 	return setSiteGraphReady(ctx, pool, cfg, true)
+}
+
+// В RAM залишаються відстані та frontier, а не до 5 млн ребер графа.
+// Кеш лише чотирьох пакетів також не створює SQL-запит на кожен крок довгого ланцюга.
+func siteDatabaseClickDepths(ctx context.Context, pool *pgxpool.Pool, cfg Config) (map[int64]int, error) {
+	const sourceBatchSize = 32
+	depths := map[int64]int{1: 0}
+	queue := []int64{1}
+	queued := map[int64]bool{1: true}
+	cache := map[int64]map[int64][]graphArc{}
+	order := []int64{}
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		id := queue[0]
+		queue = queue[1:]
+		queued[id] = false
+		block := (id-1)/sourceBatchSize*sourceBatchSize + 1
+		arcs, loaded := cache[block]
+		if !loaded {
+			err := withDBReadRetry(ctx, cfg, "site_depth_frontier", func(qctx context.Context) error {
+				rows, err := pool.Query(qctx, `SELECT e.from_target_id,n.target_id,CASE WHEN e.kind='redirect' THEN 0 ELSE 1 END
+				FROM audit_site_edges e JOIN audit_site_nodes n ON n.run_id=e.run_id AND n.url_fingerprint=e.to_fingerprint
+				WHERE e.run_id=$1 AND e.from_target_id>=$2 AND e.from_target_id<$2+$3 AND e.is_internal AND NOT e.nofollow
+				ORDER BY e.from_target_id,e.ordinal LIMIT $4`, cfg.RunID, block, sourceBatchSize, sourceBatchSize*256+1)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				arcs = map[int64][]graphArc{}
+				count := 0
+				for rows.Next() {
+					var from int64
+					var a graphArc
+					if err := rows.Scan(&from, &a.to, &a.cost); err != nil {
+						return err
+					}
+					count++
+					if count > sourceBatchSize*256 {
+						return fmt.Errorf("site depth batch exceeds edge budget")
+					}
+					arcs[from] = append(arcs[from], a)
+				}
+				return rows.Err()
+			})
+			if err != nil {
+				return nil, fmt.Errorf("read site depth block %d: %w", block, err)
+			}
+			if len(order) == 4 {
+				delete(cache, order[0])
+				order = order[1:]
+			}
+			cache[block] = arcs
+			order = append(order, block)
+		}
+		for _, a := range arcs[id] {
+			depth := depths[id] + a.cost
+			if old, ok := depths[a.to]; ok && old <= depth {
+				continue
+			}
+			depths[a.to] = depth
+			if len(depths) > maxSitePages {
+				return nil, fmt.Errorf("site depth exceeds node budget")
+			}
+			if !queued[a.to] {
+				queue = append(queue, a.to)
+				queued[a.to] = true
+			}
+		}
+	}
+	return depths, nil
 }
 
 func setSiteGraphReady(ctx context.Context, pool *pgxpool.Pool, cfg Config, ready bool) error {

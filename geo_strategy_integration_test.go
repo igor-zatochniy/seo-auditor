@@ -276,7 +276,7 @@ func TestGEOCompetitorsReuseFreshAuditsAndBoundNewScans(t *testing.T) {
 	}
 	var pages, depth int
 	var sitemap bool
-	if err = app.pool.QueryRow(ctx, "SELECT max_pages,max_depth,use_sitemaps FROM audit_site_crawls WHERE run_id=$1", runID).Scan(&pages, &depth, &sitemap); err != nil || pages != 7 || depth != 2 || sitemap {
+	if err = app.pool.QueryRow(ctx, "SELECT max_pages,max_depth,use_sitemaps FROM audit_site_crawls WHERE run_id=$1", runID).Scan(&pages, &depth, &sitemap); err != nil || pages != 7 || depth != 2 || !sitemap {
 		t.Fatal(pages, depth, sitemap, err)
 	}
 	close(release)

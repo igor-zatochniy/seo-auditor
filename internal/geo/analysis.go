@@ -27,6 +27,7 @@ type Input struct {
 	Queries     string `json:"queries"`
 	Domain      string `json:"domain"`
 	Brand       string `json:"brand"`
+	Semantic    bool   `json:"semantic,omitempty"`
 }
 
 func NormalizeDomain(raw string) (string, error) {
@@ -215,6 +216,8 @@ type Result struct {
 	Matching      *Matching           `json:"matching,omitempty"`
 	Eligibility   *AIEligibility      `json:"eligibility,omitempty"`
 	Entities      *EntityAssessment   `json:"entities,omitempty"`
+	Lexical       *LexicalSelection   `json:"lexical,omitempty"`
+	Semantic      *SemanticAssessment `json:"semantic,omitempty"`
 }
 
 type posting struct {

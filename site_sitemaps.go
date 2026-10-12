@@ -238,6 +238,9 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 	if !site.UseSitemaps || site.SitemapState != "pending" {
 		return nil
 	}
+	if site.CompetitorSelection != nil {
+		return initializeCompetitorSitemaps(ctx, pool, cfg, site, client, robotsClient, cache)
+	}
 	parentCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

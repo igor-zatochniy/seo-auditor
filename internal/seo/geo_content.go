@@ -6,10 +6,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/duplicates"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 )
 
 type geoRegion struct {
+	signature                    duplicates.Collector
 	content, headings, paragraph boundedTextCollector
 	paragraphSeen, inParagraph   bool
 	hasList, hasTable, hasAuthor bool
@@ -37,6 +39,9 @@ func (g *geoCollector) startContent(name []byte, attrs tagAttributes) {
 		return
 	}
 	tag := string(name)
+	if geoClosesParagraph(tag) || tag == "br" {
+		g.signatureBoundary()
+	}
 	// HTML дозволяє пропускати </p>; новий блок завершує попередній абзац.
 	if geoClosesParagraph(tag) {
 		g.endContent([]byte("p"))
@@ -114,6 +119,9 @@ func (g *geoCollector) endContent(name []byte) {
 	if g.signals.ContentIncomplete {
 		return
 	}
+	if geoClosesParagraph(string(name)) {
+		g.signatureBoundary()
+	}
 	for i := len(g.stack) - 1; i >= 0; i-- {
 		if g.stack[i].name != string(name) {
 			continue
@@ -135,6 +143,14 @@ func (g *geoCollector) endContent(name []byte) {
 		g.state = g.stack[i].previous
 		g.stack = g.stack[:i]
 		return
+	}
+}
+
+func (g *geoCollector) signatureBoundary() {
+	for i := range g.regions {
+		if g.regionActive(i) {
+			g.regions[i].signature.Boundary()
+		}
 	}
 }
 

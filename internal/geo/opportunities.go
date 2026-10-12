@@ -82,22 +82,25 @@ type LinkSuggestion struct {
 }
 
 type PlanInput struct {
-	Results     []Result
-	Pages       []Page
-	Facts       []PageFacts
-	Edges       map[LinkPair]bool
-	GraphReady  bool
-	GraphFull   bool
-	Competitors []CompetitorProof
+	Results      []Result
+	Pages        []Page
+	Facts        []PageFacts
+	Edges        map[LinkPair]bool
+	GraphReady   bool
+	GraphFull    bool
+	Competitors  []CompetitorProof
+	WalkFacts    func(func(PageFacts) error) error
+	IndexedLinks func(context.Context) ([]LinkSuggestion, bool, error)
 }
 
 type OpportunityPlan struct {
-	Model    string           `json:"model"`
-	Topics   []Topic          `json:"topics"`
-	Tasks    []Opportunity    `json:"tasks"`
-	Links    []LinkSuggestion `json:"links"`
-	Warnings []string         `json:"warnings"`
-	Limited  bool             `json:"limited"`
+	Model        string           `json:"model"`
+	Topics       []Topic          `json:"topics"`
+	Tasks        []Opportunity    `json:"tasks"`
+	Links        []LinkSuggestion `json:"links"`
+	Warnings     []string         `json:"warnings"`
+	Limited      bool             `json:"limited"`
+	CheckedPages int              `json:"checked_pages"`
 }
 
 func BuildOpportunityPlan(ctx context.Context, input PlanInput) (OpportunityPlan, error) {
@@ -159,12 +162,13 @@ func BuildOpportunityPlan(ctx context.Context, input PlanInput) (OpportunityPlan
 		keys = append(keys, key)
 		p.Tasks = append(p.Tasks, task)
 	}
-	for _, f := range input.Facts {
+	addFact := func(f PageFacts) error {
 		if err := ctx.Err(); err != nil {
-			return p, err
+			return err
 		}
+		p.CheckedPages++
 		if f.ScanStatus == "completed" && f.Status != nil && *f.Status >= 200 && *f.Status < 300 {
-			continue
+			return nil
 		}
 		id := f.TargetID
 		status := "HTTP не отримано"
@@ -172,6 +176,18 @@ func BuildOpportunityPlan(ctx context.Context, input PlanInput) (OpportunityPlan
 			status = fmt.Sprintf("HTTP %d", *f.Status)
 		}
 		add(fmt.Sprintf("access:%d", id), Opportunity{Priority: "high", Kind: "technical", TargetID: &id, TargetURL: f.URL, Clusters: []string{}, Queries: []string{}, Action: "Перевірити доступність і призначення сторінки перед змінами контенту.", Confidence: Confidence{"high", "Безпосередній результат збереженого HTTP-аудиту."}, Evidence: []TaskEvidence{{Source: "seo", URL: f.URL, Detail: status + " · " + f.ScanStatus + " · " + f.ErrorCode}}})
+		return nil
+	}
+	if input.WalkFacts != nil {
+		if err := input.WalkFacts(addFact); err != nil {
+			return p, err
+		}
+	} else {
+		for _, f := range input.Facts {
+			if err := addFact(f); err != nil {
+				return p, err
+			}
+		}
 	}
 	for i, r := range input.Results {
 		if err := ctx.Err(); err != nil {
@@ -251,7 +267,16 @@ func BuildOpportunityPlan(ctx context.Context, input PlanInput) (OpportunityPlan
 	if !input.GraphReady {
 		p.Warnings = append(p.Warnings, "Немає завершеного Site Crawl-графа: рекомендації перелінковки не обчислено.")
 	} else {
-		p.Links, err = recommendInternalLinks(ctx, input)
+		if input.IndexedLinks != nil {
+			var limited bool
+			p.Links, limited, err = input.IndexedLinks(ctx)
+			if limited {
+				p.Limited = true
+				p.Warnings = append(p.Warnings, "Показано до 200 рекомендацій перелінковки; корпус не усічено.")
+			}
+		} else {
+			p.Links, err = recommendInternalLinks(ctx, input)
+		}
 		if err != nil {
 			return p, err
 		}
@@ -399,4 +424,23 @@ func AnalyzeChosenTarget(ctx context.Context, query string, pages []Page, target
 func linkURLUsable(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.User == nil && u.RawQuery == "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
+// Перевірка SQL-кандидата за тими самими правилами, що й резидентний граф.
+func SuggestInternalLink(r Result, c RankedCandidate, target, source PageFacts, graphFull bool) *LinkSuggestion {
+	page := c.Page
+	if r.TargetID == nil || target.Inlinks == nil || !linkURLUsable(r.TargetURL) || !linkURLUsable(page.URL) || page.TargetID == *r.TargetID ||
+		c.Coverage < 50 || c.Matching.WeightedCoverage < 50 || c.Matching.Limited || page.Signals == nil || !page.Signals.Complete || page.Signals.ContentIncomplete {
+		return nil
+	}
+	eligibility := EvaluateEligibility(page.Signals)
+	if eligibility.GoogleAI.Status == Blocked || eligibility.ChatGPTSearch.Status == Blocked {
+		return nil
+	}
+	conf := Confidence{"medium", "Лексичний збіг і відсутність ребра в збереженому графі; потрібна редакторська перевірка контексту."}
+	if !graphFull || target.Truncated || source.Truncated || page.Signals.Version != 3 || page.Signals.SampleTruncated || len(c.Matching.Approximate) > 0 {
+		conf = Confidence{"low", "Обмежений граф або наближений збіг; спершу перевірте наявність посилання й контекст."}
+	}
+	return &LinkSuggestion{From: page.TargetID, To: *r.TargetID, SourceURL: page.URL, TargetURL: r.TargetURL, Anchor: r.Query, Inlinks: *target.Inlinks, Relevance: c.Matching.Relevance, Confidence: conf,
+		Reason: fmt.Sprintf("Спостережено %d вхідних посилань; тематичний збіг %d/100; збереженого ребра між цими Target ID немає. Поріг ≤2 є евристикою, не вимогою пошуковика.", *target.Inlinks, c.Matching.Relevance)}
 }

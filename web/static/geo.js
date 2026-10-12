@@ -37,7 +37,7 @@
   }
   async function submit(event) {
     event.preventDefault(); notice("");
-    const input = {source_run_id:$("source-run").value.trim(),domain:$("domain").value.trim(),brand:$("brand").value.trim(),queries:$("queries").value};
+    const input = {source_run_id:$("source-run").value.trim(),domain:$("domain").value.trim(),brand:$("brand").value.trim(),queries:$("queries").value,semantic:$("semantic-matching").checked};
     const signature = JSON.stringify(input);
     if(signature !== lastPayload) { requestID = crypto.randomUUID(); lastPayload = signature; }
     $("analyze").disabled = true; $("analyze").textContent = "Аналіз триває…";
@@ -88,6 +88,12 @@
   function details(item) {
     current=item; const r=item.result; $("detail-query").textContent=r.query;
     const area=$("detail-analysis");area.replaceChildren();
+		if(r.semantic) {
+			area.append(el("h3","Багатомовне словникове зіставлення"),el("p",r.semantic.reason),el("small",r.semantic.model));
+			addList(area,"Розпізнані поняття",r.semantic.concepts.filter(c=>c.known).map(c=>`${c.observed} → ${c.label}`));
+			area.append(el("p",`Початкова лексична ціль: ${r.lexical?.target_url||"Не знайдено"} · релевантність ${r.lexical?.matching?.relevance??"—"}`));
+			addList(area,"Словникові кандидати",r.semantic.candidates.map(c=>`${c.url} · ${c.relevance} / 100`));
+		}
 		window.seoDiagnostics.eligibility(area,r.eligibility);
     area.append(el("h3","Сутності бренду"));
     const entityLabels={found:"Виявлено",missing:"Не виявлено",mismatch:"Назви відрізняються",unknown:"Недостатньо даних",not_applicable:"Не застосовується"};
@@ -99,7 +105,7 @@
 		if(r.matching){
 			facts.append(el("dt","Релевантність зіставлення"),el("dd",r.matching.relevance+" / 100"),el("dt","Зважений IDF-збіг"),el("dd",r.matching.weighted_coverage+"%"),el("dt","Сторінок у корпусі"),el("dd",r.matching.corpus_pages));
 			addList(area,"Збіги фраз",r.matching.phrases||[]);
-			addList(area,"Наближені збіги",(r.matching.approximate||[]).map(m=>`${m.query} → ${m.term} · ${m.kind==="morphology"?"словоформа":"можлива друкарська помилка"}`));
+			addList(area,"Наближені збіги",(r.matching.approximate||[]).map(m=>`${m.query} → ${m.term} · ${m.kind==="semantic"?"словникове поняття":m.kind==="morphology"?"словоформа":"можлива друкарська помилка"}`));
 		}
 		area.append(window.seoDiagnostics.details({search:r.search,http:r.http,performance:r.performance,blocks:r.blocks,eligibility:r.eligibility},r.block_matches||[],false));
 		if(r.categories?.length) {
@@ -122,6 +128,7 @@
     if(r.checks.length) area.append(el("h3","Перевірені сигнали"));
     for(const check of r.checks) { const section=el("div",null,"geo-check"),heading=el("strong");heading.append(badge(check.passed?"Виявлено":"Не виявлено",check.passed?"success":"warning"),el("span",check.name));section.append(heading,el("p",check.evidence||"—"));area.append(section); }
     $("citation-engine").value=item.citations[0]?.engine||"google_ai";loadCitation();$("geo-details").showModal();
+		window.seoAnswer?.selectQuery(item);
 		loadObservationHistory(true);
   }
   function loadCitation() {
@@ -175,8 +182,12 @@
     if(reportID) {
       const data=await api("/api/geo/reports/"+reportID);rows=data.rows;
       const report=data.report;$("report-reference").textContent="GEO / "+report.id;
+		window.seoAnswer.init({api,el,reportID,report,onSaved:async()=>{const refreshed=await api(`/api/geo/reports/${reportID}`);rows.splice(0,rows.length,...refreshed.rows);if(current){current=rows.find(r=>r.ordinal===current.ordinal);loadCitation();loadObservationHistory(true);}renderTable();}});
       $("report-title").textContent=report.brand||report.domain;$("report-meta").textContent=report.domain+" · "+date(report.created_at)+" · Сторінок: "+report.page_count;
       const source=el("a","Вихідний SEO-аудит");source.href="/audits/"+report.source_run_id;$("report-meta").append(document.createTextNode(" · "),source);
+      const corpus=report.corpus;
+      if(corpus) $("geo-corpus-status").textContent=`PostgreSQL-індекс: ${corpus.complete?"повний для джерела":"неповний"} · Успішних сторінок джерела: ${corpus.source_pages} · Домен і піддомени: ${corpus.pages} · Інші домени: ${corpus.excluded_other_domains} · Обмежені лексичні вибірки: ${corpus.limited_pages}. ${corpus.crawl_warning||"Повноту SEO-обходу перевірено в межах збереженого графа."}`;
+      else $("geo-corpus-status").textContent="Історичний звіт без manifest PostgreSQL-індексу; повноту аналізу новим backend не підтверджено.";
       const matched=rows.filter(r=>r.result.target_id!=null).length;
       for(const [label,value] of [["Усього запитів",report.query_count],["Зіставлено",matched],["Без сторінки",report.query_count-matched],["Близькі кандидати",rows.filter(r=>r.result.ambiguous).length]]){const item=el("div",null,"summary-item");item.append(el("span",label,"summary-label"),el("strong",value,"summary-value"));$("geo-summary").append(item);}
       $("csv-export").href=`/api/geo/reports/${reportID}/export/csv`;

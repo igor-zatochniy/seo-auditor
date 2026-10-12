@@ -2,6 +2,7 @@
 window.seoStrategy = {
   async init({api, el, reportID, rows, notice}) {
     const $ = id => document.getElementById(id);
+		const semanticOption=el("label",null,"checkbox-label"),semanticInput=el("input");semanticInput.type="checkbox";semanticInput.id="geo-profile-semantic";semanticOption.append(semanticInput,el("span","Багатомовні поняття та синоніми · EN / UA / RU / PL / ES / RO"));$("geo-profile-form").insertBefore(semanticOption,$("geo-profile-form").querySelector(".input-footer"));
     const safe = fn => async (...args) => { try { await fn(...args); } catch (error) { notice(error.message); } };
     const date = value => value ? new Date(value).toLocaleString("uk-UA") : "—";
     const states = {covered:"Покрито",partial:"Частково",no_target:"Без цілі",pending:"У черзі",scanning:"Сканування / аналіз",ready:"Готово",failed:"Помилка",interrupted:"SEO перервано",canceled:"Скасовано"};
@@ -84,7 +85,9 @@ window.seoStrategy = {
       if (!id) { setData = null; $("competitor-status").textContent = "Порівнянь ще немає"; empty("competitor-table","Додайте конкурентів",1); $("competitor-cancel").disabled = true; pager("competitor-page-label","competitor-prev","competitor-next",0,0); return; }
       const data = await api(`/api/geo/competitors/${id}?after=${competitorPage*50}`); if (generation !== competitorGeneration || id !== $("competitor-set-select").value) return; setData = data;
       const status = $("competitor-status"); status.replaceChildren();
-      data.competitors.forEach((c,index) => { const line = el("p",`${c.brand || c.domain}: ${states[c.status]} · ${c.reused ? "повторно використано свіжий аудит" : "окремий обмежений аудит"}${c.error ? " · "+c.error : ""}`); if(c.run_id) line.append(" · ",localLink("/audits/"+c.run_id,"SEO-запуск")); if(c.status === "failed" && !data.canceled) { const retry = el("button","Повторити"); retry.addEventListener("click",safe(async()=>{ await api(`/api/geo/competitors/${id}/retry`,{ordinal:index+1}); await loadCompetitors(); })); line.append(" ",retry); } status.append(line); });
+      data.competitors.forEach((c,index) => { const line = el("p",`${c.brand || c.domain}: ${states[c.status]} · ${c.reused ? "повторно використано свіжий аудит" : "окремий обмежений аудит"}${c.error ? " · "+c.error : ""}`); if(c.run_id) line.append(" · ",localLink("/audits/"+c.run_id,"SEO-запуск")); if(c.status === "failed" && !data.canceled) { const retry = el("button","Повторити"); retry.addEventListener("click",safe(async()=>{ await api(`/api/geo/competitors/${id}/retry`,{ordinal:index+1}); await loadCompetitors(); })); line.append(" ",retry); } status.append(line);
+        const d = c.discovery; if(d) { const summary = el("p",`Sitemap: ${d.candidate_urls} URL-кандидатів · відібрано ${d.selected_urls} сторінок разом зі стартовою · ${d.matching_queries} / ${d.query_count} запитів мають URL-кандидатів · ${d.sitemap_files} файлів${d.state === "partial" ? " · discovery неповне" : ""}${d.selection_limited ? " · застосовано ліміт сканування" : ""}${d.warning ? " · "+d.warning : ""}`); summary.className = "muted"; status.append(summary); }
+      });
       $("competitor-cancel").disabled = data.canceled || !data.competitors.some(c=>c.status === "pending" || c.status === "scanning");
       const head = $("competitor-table").querySelector("thead"), tr = el("tr"); head.replaceChildren(); for(const label of ["Запит","Наш сайт",...data.competitors.map(c=>c.brand || c.domain)]) tr.append(el("th",label)); head.append(tr);
       const body = $("competitor-table").querySelector("tbody"); body.replaceChildren();
@@ -151,11 +154,11 @@ window.seoStrategy = {
     $("geo-profile-open").addEventListener("click",safe(async()=>{
       const schedules = await api("/api/schedules"); $("geo-profile-schedule").replaceChildren(); for(const s of schedules) { const option = el("option",s.name+(s.enabled ? "" : " · розклад призупинено")); option.value = s.id; $("geo-profile-schedule").append(option); }
       if(!schedules.length) throw new Error("Спочатку створіть SEO-розклад у Моніторингу");
-      if(reportID) { const data = await api(`/api/geo/reports/${reportID}`); $("geo-profile-domain").value = data.report.domain; $("geo-profile-brand").value = data.report.brand; $("geo-profile-queries").value = rows.map(r=>r.result.query).join("\n"); } else { $("geo-profile-domain").value = $("domain").value; $("geo-profile-brand").value = $("brand").value; $("geo-profile-queries").value = $("queries").value; }
+      if(reportID) { const data = await api(`/api/geo/reports/${reportID}`); $("geo-profile-domain").value = data.report.domain; $("geo-profile-brand").value = data.report.brand; $("geo-profile-queries").value = rows.map(r=>r.result.query).join("\n");semanticInput.checked=data.report.semantic; } else { $("geo-profile-domain").value = $("domain").value; $("geo-profile-brand").value = $("brand").value; $("geo-profile-queries").value = $("queries").value;semanticInput.checked=$("semantic-matching").checked; }
       $("geo-profile-form-status").textContent = ""; $("geo-profile-create").showModal();
     }));
     $("geo-profile-form").addEventListener("submit",async event => {
-      event.preventDefault(); const payload = {schedule_id:$("geo-profile-schedule").value,name:$("geo-profile-name").value,domain:$("geo-profile-domain").value,brand:$("geo-profile-brand").value,queries:$("geo-profile-queries").value}, signature = JSON.stringify(payload); if(signature !== profilePayload) { profilePayload = signature; profileRequest = crypto.randomUUID(); }
+      event.preventDefault(); const payload = {schedule_id:$("geo-profile-schedule").value,name:$("geo-profile-name").value,domain:$("geo-profile-domain").value,brand:$("geo-profile-brand").value,queries:$("geo-profile-queries").value,semantic:semanticInput.checked}, signature = JSON.stringify(payload); if(signature !== profilePayload) { profilePayload = signature; profileRequest = crypto.randomUUID(); }
       $("geo-profile-submit").disabled = true; $("geo-profile-form-status").textContent = "Збереження…";
       try { const p = await api("/api/geo/profiles",{...payload,id:profileRequest}); $("geo-profile-create").close(); timelinePage = 0; await profileList(p.id); } catch(error) { $("geo-profile-form-status").textContent = error.message; } finally { $("geo-profile-submit").disabled = false; }
     });
