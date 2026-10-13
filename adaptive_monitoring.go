@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"github.com/igor-zatochniy/seo-auditor/internal/seo"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -84,7 +85,7 @@ func loadConditionalBaseline(ctx context.Context, pool *pgxpool.Pool, cfg Config
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > 128<<10 || json.Unmarshal(raw, &b.Data) != nil || b.Data.SERPWidthModel != seo.SERPWidthModel || !b.Data.HTMLSizeComplete {
+	if len(raw) > 128<<10 || json.Unmarshal(raw, &b.Data) != nil || b.Data.SERPWidthModel != seo.SERPWidthModel || !b.Data.HTMLSizeComplete || b.Data.URLSignals == nil || b.Data.URLSignals.Version != crawler.URLSignalsVersion {
 		return nil, nil
 	}
 	b.ETag, err = openValidator(cfg.TargetFingerprintKey, b.ETag)

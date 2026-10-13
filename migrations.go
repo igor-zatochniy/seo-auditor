@@ -16,7 +16,7 @@ import (
 const (
 	migrationDir            = "initdb"
 	migrationVersionTable   = "schema_migrations"
-	requiredSchemaVersion   = int64(34)
+	requiredSchemaVersion   = int64(37)
 	postgresMigrationDriver = "pgx"
 	migrationAdvisoryLockID = int64(8_247_310_003)
 	migrationUnlockTimeout  = 5 * time.Second

@@ -37,14 +37,16 @@ type Resource struct {
 }
 type FetchResource func(context.Context, string) (Resource, error)
 type Output struct {
-	HTML     string
-	Browser  string
-	Requests int
-	Blocked  int
-	Bytes    int64
-	Warnings []string
-	Metrics  *performance.Result
-	FinalURL string
+	Resources          []ResourceIssue
+	ResourcesTruncated bool
+	HTML               string
+	Browser            string
+	Requests           int
+	Blocked            int
+	Bytes              int64
+	Warnings           []string
+	Metrics            *performance.Result
+	FinalURL           string
 }
 
 // HTML передається з тієї самої HTTP-відповіді, яку вже перевірив основний crawler.
@@ -117,14 +119,20 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 					} else {
 						resource = response
 					}
-				} else if result.Requests > MaxRequests || request.Request.Method != http.MethodGet || !allowedResourceType(request.ResourceType) {
-					requestErr = errors.New("ресурс заборонено політикою рендерингу")
+				} else if result.Requests > MaxRequests {
+					requestErr = &ResourceFailure{Code: "request_limit"}
+				} else if request.Request.Method != http.MethodGet || !allowedResourceType(request.ResourceType) {
+					requestErr = &ResourceFailure{Code: "unsupported_request"}
 				} else if result.Bytes >= MaxTransferBytes {
-					requestErr = errors.New("ліміт завантаження ресурсів")
+					requestErr = &ResourceFailure{Code: "transfer_limit"}
 				} else {
 					resource, requestErr = get(tab, request.Request.URL)
 				}
 				if requestErr != nil || result.Bytes+int64(len(resource.Body)) > MaxTransferBytes {
+					if requestErr == nil {
+						requestErr = &ResourceFailure{Code: "transfer_limit"}
+					}
+					resourceIssue(&result, request.Request.URL, string(request.ResourceType), requestErr)
 					result.Blocked++
 					_ = chromedp.Run(tab, fetch.FailRequest(request.RequestID, network.ErrorReasonBlockedByClient))
 				} else {
@@ -137,6 +145,7 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 					}
 					fulfill := fetch.FulfillRequest(request.RequestID, int64(resource.Status)).WithResponseHeaders(headers).WithBody(base64.StdEncoding.EncodeToString(resource.Body))
 					if err := chromedp.Run(tab, fulfill); err != nil && tab.Err() == nil {
+						resourceIssue(&result, request.Request.URL, string(request.ResourceType), &ResourceFailure{Code: "fulfill_failed"})
 						result.Blocked++
 					}
 				}
@@ -151,6 +160,7 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 		out.Requests = result.Requests
 		out.Blocked = result.Blocked
 		out.Bytes = result.Bytes
+		out.Resources, out.ResourcesTruncated = result.Resources, result.ResourcesTruncated
 		if n := networkErrors.Load(); n > 0 {
 			out.Warnings = append(out.Warnings, fmt.Sprintf("Ресурсів із помилкою завантаження: %d.", n))
 		}

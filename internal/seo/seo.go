@@ -34,6 +34,7 @@ const (
 
 // Data contains the full set of metrics collected by the parser.
 type Data struct {
+	URLSignals                 *crawler.URLSignals
 	HTTPResponseStatus         *int
 	ReusedFromRunID            string
 	HTTPETag                   string `json:"-"`

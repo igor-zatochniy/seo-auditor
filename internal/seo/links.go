@@ -13,6 +13,7 @@ type DiscoveredLink struct {
 	URL      string
 	Anchor   string
 	Nofollow bool
+	Source   string
 }
 
 type linkCollector struct {

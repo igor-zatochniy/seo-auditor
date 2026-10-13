@@ -19,10 +19,11 @@ const maxSitePages = 20000
 const sitemapFrontierBase = 1000
 
 type siteCrawlOptions struct {
-	RootURL     string `json:"root_url"`
-	MaxPages    int    `json:"max_pages"`
-	MaxDepth    int    `json:"max_depth"`
-	UseSitemaps bool   `json:"use_sitemaps"`
+	RootURL          string `json:"root_url"`
+	MaxPages         int    `json:"max_pages"`
+	MaxDepth         int    `json:"max_depth"`
+	UseSitemaps      bool   `json:"use_sitemaps"`
+	DiscoverRendered bool   `json:"discover_rendered_links"`
 }
 
 type siteCrawl struct {
@@ -30,6 +31,7 @@ type siteCrawl struct {
 	MaxPages            int
 	MaxDepth            int
 	UseSitemaps         bool
+	DiscoverRendered    bool
 	SitemapState        string
 	CompetitorSelection *competitorDiscovery
 }
@@ -102,6 +104,9 @@ func createSiteAuditRun(ctx context.Context, pool *pgxpool.Pool, cfg *Config, op
 }
 
 func insertSiteAuditRun(ctx context.Context, tx pgx.Tx, cfg Config, options siteCrawlOptions) error {
+	if options.DiscoverRendered && !cfg.RenderJavaScript {
+		return fmt.Errorf("пошук DOM-посилань потребує увімкненого JavaScript")
+	}
 	_, origin, err := normalizeSiteURL(options.RootURL, cfg.AllowPrivateTargets)
 	if err != nil {
 		return err
@@ -114,8 +119,8 @@ func insertSiteAuditRun(ctx context.Context, tx pgx.Tx, cfg Config, options site
 	if !options.UseSitemaps {
 		state = "disabled"
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO audit_site_crawls(run_id,origin,root_safe_url,key_check,max_pages,max_depth,use_sitemaps,sitemap_state)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, cfg.RunID, origin, redactURL(options.RootURL), fingerprintURL(cfg.TargetFingerprintKey, "site-crawl:"+cfg.RunID), options.MaxPages, options.MaxDepth, options.UseSitemaps, state); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_site_crawls(run_id,origin,root_safe_url,key_check,max_pages,max_depth,use_sitemaps,sitemap_state,discover_rendered_links)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, cfg.RunID, origin, redactURL(options.RootURL), fingerprintURL(cfg.TargetFingerprintKey, "site-crawl:"+cfg.RunID), options.MaxPages, options.MaxDepth, options.UseSitemaps, state, options.DiscoverRendered); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_run_targets(run_id,target_id,request_url) VALUES($1,1,$2)`, cfg.RunID, options.RootURL); err != nil {
@@ -132,13 +137,16 @@ func loadSiteCrawl(ctx context.Context, pool *pgxpool.Pool, cfg Config) (*siteCr
 	defer cancel()
 	var site siteCrawl
 	var keyCheck []byte
-	err := pool.QueryRow(ctx, `SELECT origin,max_pages,max_depth,use_sitemaps,sitemap_state,key_check,competitor_selection FROM audit_site_crawls WHERE run_id=$1`, cfg.RunID).
-		Scan(&site.Origin, &site.MaxPages, &site.MaxDepth, &site.UseSitemaps, &site.SitemapState, &keyCheck, &site.CompetitorSelection)
+	err := pool.QueryRow(ctx, `SELECT origin,max_pages,max_depth,use_sitemaps,sitemap_state,key_check,competitor_selection,discover_rendered_links FROM audit_site_crawls WHERE run_id=$1`, cfg.RunID).
+		Scan(&site.Origin, &site.MaxPages, &site.MaxDepth, &site.UseSitemaps, &site.SitemapState, &keyCheck, &site.CompetitorSelection, &site.DiscoverRendered)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if site.DiscoverRendered && !cfg.RenderJavaScript {
+		return nil, fmt.Errorf("DOM-обхід не сумісний із HTML-only запуском")
 	}
 	if !bytes.Equal(keyCheck, fingerprintURL(cfg.TargetFingerprintKey, "site-crawl:"+cfg.RunID)) {
 		return nil, fmt.Errorf("site crawl requires the original fingerprint key to resume")

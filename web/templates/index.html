@@ -7,12 +7,15 @@
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/international.css">
   <link rel="stylesheet" href="/static/duplicates.css">
+	<link rel="stylesheet" href="/static/crawl-extensions.css">
   <link rel="stylesheet" href="/static/bots.css">
   <script src="/static/rendering.js" defer></script>
   <script src="/static/diagnostics.js" defer></script>
   <script src="/static/structured-data.js" defer></script>
   <script src="/static/international.js" defer></script>
   <script src="/static/duplicates.js" defer></script>
+	<script src="/static/crux.js" defer></script>
+	<script src="/static/routes.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/dialogs.js" defer></script>
 </head>
@@ -32,6 +35,7 @@
         <div id="site-input" hidden>
           <label for="root-url">Стартовий URL</label><input id="root-url" type="url" placeholder="https://example.com/" maxlength="2048" disabled>
           <div class="crawl-options"><label for="max-pages">Ліміт сторінок<input id="max-pages" type="number" min="1" max="20000" value="100" required disabled></label><label for="max-depth">Глибина обходу<input id="max-depth" type="number" min="0" max="10" value="5" required disabled></label><label class="checkbox-label"><input id="use-sitemaps" type="checkbox" checked disabled> Пошук через sitemap</label></div>
+		  <label class="checkbox-label"><input id="discover-rendered" type="checkbox" disabled> Обхід DOM-посилань</label>
         </div>
         <div class="input-footer"><div class="input-counts"><span>URL <strong id="url-count">0</strong></span><span>Повтори <strong id="duplicate-count">0</strong></span><span>Некоректні <strong id="invalid-count">0</strong></span></div><div class="actions"><button type="button" id="clear">Очистити</button><button class="primary" id="submit" type="submit">Запустити аудит <span aria-hidden="true">→</span></button></div></div>
       </form>
@@ -42,7 +46,8 @@
       <div class="summary" id="summary"></div>
       <div class="progress-line"><progress id="run-progress" max="100" value="0" aria-label="Прогрес аудиту"></progress><strong id="percentage">0%</strong></div>
       <div class="target-states" id="target-states"></div>
-      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button><button role="tab" id="tab-international" aria-selected="false" aria-controls="international">Міжнародне SEO</button><button role="tab" id="tab-duplicates" aria-selected="false" aria-controls="duplicates">Дублі контенту</button></div>
+      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button><button role="tab" id="tab-international" aria-selected="false" aria-controls="international">Міжнародне SEO</button><button role="tab" id="tab-duplicates" aria-selected="false" aria-controls="duplicates">Дублі контенту</button><button role="tab" id="tab-routes" aria-selected="false" aria-controls="routes">URL-маршрути</button></div>
+	  <section id="routes" role="tabpanel" aria-labelledby="tab-routes" hidden><div class="band-heading"><h2>Редиректи та canonical</h2><button id="routes-refresh" title="Оновити маршрути" aria-label="Оновити маршрути">↻</button></div><p id="routes-status" class="metric-note" role="status"></p><div class="table-wrap"><table><thead><tr><th>Сторінка</th><th>Редирект</th><th>Canonical</th><th>Джерела та вхідні посилання</th></tr></thead><tbody id="routes-rows"></tbody></table></div><div class="pagination"><button id="routes-previous" title="Попередні маршрути" aria-label="Попередні маршрути">←</button><button id="routes-next" title="Наступні маршрути" aria-label="Наступні маршрути">→</button></div></section>
       <section id="overview" role="tabpanel" aria-labelledby="tab-overview"><div class="band-heading"><h2>Технічні сигнали</h2><span class="muted" id="parsed-count"></span></div><div id="analytics" class="charts"></div><p class="metric-note">HTML-сигнали враховують лише успішно розібрані сторінки HTTP 200. Non-self canonical, відсутність JSON-LD та блокування robots.txt не є універсальними SEO-помилками. Noindex / none враховує будь-який scope директиви.</p></section>
       <section id="pages" role="tabpanel" aria-labelledby="tab-pages" hidden>
         <div class="table-toolbar"><input id="search" type="search" placeholder="Пошук URL" aria-label="Пошук URL" maxlength="512"><select id="filter" aria-label="Фільтр результатів"></select><select id="page-size" aria-label="Рядків на сторінці"><option value="50">50 рядків</option><option value="100">100 рядків</option><option value="200">200 рядків</option></select><button id="columns-button">Колонки</button></div>

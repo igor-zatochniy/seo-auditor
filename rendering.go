@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -66,6 +65,7 @@ func renderPageComparison(ctx context.Context, cfg Config, target string, body [
 	result.Bytes = out.Bytes
 	result.Browser = out.Browser
 	result.Warnings = out.Warnings
+	result.Resources, result.ResourcesTruncated = out.Resources, out.ResourcesTruncated
 	if err != nil {
 		result.Error = sanitizeError(err)
 		return result
@@ -73,12 +73,13 @@ func renderPageComparison(ctx context.Context, cfg Config, target string, body [
 	// Серіалізація DOM завжди UTF-8, HTTP-заголовки robots залишаються початковими.
 	h := headers.Clone()
 	h.Set("Content-Type", "text/html; charset=utf-8")
-	data, err := seo.ParsePageForComparison(&http.Response{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader(out.HTML))}, target, cfg.MaxHTMLBodyBytes, cfg.MaxHTMLTokenBytes, false)
+	data, err := seo.ParsePageForComparison(&http.Response{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader(out.HTML))}, target, cfg.MaxHTMLBodyBytes, cfg.MaxHTMLTokenBytes, cfg.DiscoverRenderedLinks)
 	if err != nil {
 		result.Error = sanitizeError(err)
 		return result
 	}
 	result.Rendered = seo.Snapshot(data)
+	result.DiscoveredLinks, result.LinksTruncated = data.DiscoveredLinks, data.LinksTruncated
 	result.Delta = seo.Compare(result.Raw, result.Rendered)
 	result.Status = "completed"
 	if out.Blocked > 0 || len(out.Warnings) > 0 || !result.Raw.Complete || !result.Rendered.Complete {
@@ -113,11 +114,11 @@ func measurePagePerformance(ctx context.Context, cfg Config, target string, page
 func fetchBrowserResource(ctx context.Context, address string, cfg Config, pageClient, robotsClient *http.Client, cache *robotsPolicyCache, limit int64, mainDocument bool) (render.Resource, error) {
 	normalized, err := normalizeTargetURL(address, cfg.AllowPrivateTargets)
 	if err != nil {
-		return render.Resource{}, err
+		return render.Resource{}, &render.ResourceFailure{Code: "invalid_target"}
 	}
 	allowed, err := cache.isAllowedByRobots(ctx, robotsClient, normalized, cfg.RobotsTotalTimeout)
 	if err != nil || !allowed {
-		return render.Resource{}, errors.New("robots.txt не дозволяє ресурс")
+		return render.Resource{}, &render.ResourceFailure{Code: "robots_denied"}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, normalized, nil)
 	if err != nil {
@@ -126,7 +127,7 @@ func fetchBrowserResource(ctx context.Context, address string, cfg Config, pageC
 	req.Header.Set("User-Agent", UserAgentStr)
 	resp, err := pageClient.Do(req)
 	if err != nil {
-		return render.Resource{}, err
+		return render.Resource{}, &render.ResourceFailure{Code: "request_failed"}
 	}
 	if mainDocument && (resp.StatusCode != http.StatusOK || validateHTMLContentType(resp.Header.Get("Content-Type")) != nil) {
 		resp.Body.Close()
@@ -147,12 +148,12 @@ func fetchBrowserResource(ctx context.Context, address string, cfg Config, pageC
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
-		return render.Resource{}, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return render.Resource{}, &render.ResourceFailure{Code: "http_status", HTTP: resp.StatusCode}
 	}
 	body, err := seo.ReadLimited(resp.Body, limit)
 	resp.Body.Close()
 	if err != nil {
-		return render.Resource{}, err
+		return render.Resource{}, &render.ResourceFailure{Code: "body_read_failed"}
 	}
 	return render.Resource{Status: resp.StatusCode, Header: resp.Header, Body: body}, nil
 }

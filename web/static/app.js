@@ -55,6 +55,7 @@
     event.preventDefault(); notice(""); $("submit").disabled=true;
     const site=document.querySelector('input[name="mode"]:checked').value==="site";
     const body=site?{mode:"site",site:{root_url:$("root-url").value,max_pages:Number($("max-pages").value),max_depth:Number($("max-depth").value),use_sitemaps:$("use-sitemaps").checked}}:{urls:$("urls").value};
+	if(site)body.site.discover_rendered_links=$("render-javascript").checked&&$("discover-rendered").checked;
 	body.render_javascript=$("render-javascript").checked;
     try { const run = await api("/api/audits",body); $("urls").value=""; location.assign("/audits/"+run.id); }
     catch(error) { notice(error.message); $("submit").disabled=false; }
@@ -125,6 +126,7 @@
     let group="",list;
     for(const field of fields) { if(field.key==="rendering"||field.key==="rendering_status"||field.key==="geo_signals"||field.key==="structured_data")continue; if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : document.createTextNode(text(record[field.key]))); list.append(el("dt",field.label),value); }
 	content.append(window.seoStructuredData.details(record.structured_data));
+	content.append(window.seoCrux.details(runID,record));
 	const recrawl=el("button","Перевірити сторінку повторно");recrawl.type="button";recrawl.onclick=async()=>{recrawl.disabled=true;try{const body={};if(record.safe_url?.includes("?")){const original=window.prompt("Оригінальний URL сторінки","");if(!original)return;body.url=original;}const run=await api(`/api/audits/${runID}/results/${record.target_id}/recrawl`,body);location.assign("/audits/"+run.id);}catch(error){notice(error.message);}finally{recrawl.disabled=false;}};content.append(recrawl);
 	content.append(window.seoDiagnostics.details(record.geo_signals));
 	const rendering=window.seoRendering.details(record);content.prepend(rendering);
@@ -155,7 +157,7 @@
     for(const [name,value] of [["Сторінки",s.nodes],["Посилання",s.edges],["Orphan candidates",s.ready?s.orphans:"—"],["Понад 3 кліки",s.ready?s.deep:"—"],["Поза набором",s.unresolved],["Sitemap",s.sitemap_state]]) {
       const item=el("span",name+" ");item.append(el("strong",value));$("graph-summary").append(item);
     }
-    $("graph-warning").textContent=[s.warning,s.limited?"Досягнуто ліміт обходу.":"",s.truncated?`Ліміт посилань: ${s.truncated} сторінок.`:"",s.unresolved?"Частина внутрішніх адрес не має результату.":""].filter(Boolean).join(" ");
+    $("graph-warning").textContent=[s.warning,s.limited?"Досягнуто ліміт обходу.":"",s.truncated?`Неповний набір посилань: ${s.truncated} сторінок.`:"",s.unresolved?"Частина внутрішніх адрес не має результату.":"",s.discover_rendered_links?"HTML + DOM":"HTML"].filter(Boolean).join(" ");
     const body=$("graph-table").querySelector("tbody");body.replaceChildren();
     for(const edge of data.edges) {
       const row=el("tr");
@@ -166,7 +168,7 @@
       }
       row.append(el("td",text(edge.anchor)));
       const result=el("td");result.append(edge.http==null?el("span",edge.status||"Не перевірено","muted"):el("span",String(edge.http),"badge "+(edge.http>=400?"error":edge.http>=300?"warning":"success")));row.append(result);
-      row.append(el("td",edge.kind==="redirect"?"Редирект":edge.internal?"Внутрішнє":"Зовнішнє"),el("td",edge.nofollow?"Так":"Ні"));body.append(row);
+      const kind=el("td",edge.kind==="redirect"?"Редирект":edge.internal?"Внутрішнє":"Зовнішнє");kind.append(el("small",{html:"HTML",rendered:"DOM",both:"HTML + DOM"}[edge.discovery_source]||"HTML","muted"));row.append(kind,el("td",edge.nofollow?"Так":"Ні"));body.append(row);
     }
     if(!data.edges.length){const row=el("tr"),cell=el("td","Посилань за цим фільтром немає","empty");cell.colSpan=6;row.append(cell);body.append(row);}
     const last=data.edges[data.edges.length-1];graphNext=data.more&&last?{after:last.from,ordinal:last.ordinal}:null;
@@ -180,6 +182,8 @@
     const schema=await api("/api/schema"); fields=schema.fields;
 	$("render-javascript").disabled=!schema.rendering_available;
 	$("render-availability").textContent=schema.rendering_available?"":"Chromium не налаштовано";
+	const discoveryControl=()=>{const site=document.querySelector('input[name="mode"]:checked').value==="site";$("discover-rendered").disabled=!site||!$("render-javascript").checked;};
+	$("render-javascript").onchange=discoveryControl;
     try{const saved=JSON.parse(localStorage.getItem("seo-columns"));if(Array.isArray(saved)&&saved.length) columns=saved.filter(key=>fields.some(f=>f.key===key));}catch{}
     if(!columns.length) columns=defaults.slice();
     $("limit-label").textContent="До "+schema.max_urls.toLocaleString("uk-UA")+" URL";
@@ -192,13 +196,14 @@
       $("limit-label").textContent="До "+(site?Number($("max-pages").max):schema.max_urls).toLocaleString("uk-UA")+" URL";
       $("list-input").hidden=site;$("site-input").hidden=!site;$("urls").disabled=site;$("urls").required=!site;$("root-url").required=site;
       for(const id of ["root-url","max-pages","max-depth","use-sitemaps"])$(id).disabled=!site;
+	  discoveryControl();
       $("clear").hidden=site;document.querySelector(".input-counts").hidden=site;
     });
     $("history-refresh").onclick=safely(()=>{historyCursor="";return loadHistory();}); $("history-next").onclick=safely(()=>{historyCursor=historyNext;return loadHistory();});
     document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>$(button.dataset.close).close());
     if(!runID) { await loadHistory(); return; }
     for(const format of ["html","csv"]) $(format+"-export").href=`/api/audits/${runID}/export/${format}`;
-    for(const view of ["overview","pages","graph","international","duplicates"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages","graph","international","duplicates"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); } if(view==="international"||view==="duplicates") document.dispatchEvent(new Event("seo:"+view+"-open")); };
+    for(const view of ["overview","pages","graph","international","duplicates","routes"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages","graph","international","duplicates","routes"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); } if(["international","duplicates","routes"].includes(view)) document.dispatchEvent(new Event("seo:"+view+"-open")); };
     $("graph-filter").onchange=safely(resetGraph);$("graph-target").onchange=safely(resetGraph);
     $("graph-reset").onclick=safely(()=>{$("graph-target").value="";$("graph-filter").value="all";return resetGraph();});
     $("graph-next").onclick=safely(()=>{if(graphNext)graphCursors.push(graphNext);return graph();});

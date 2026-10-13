@@ -19,7 +19,7 @@
   function mode(){const site=document.querySelector('input[name="schedule-mode"]:checked').value==="site";
     $("schedule-list").hidden=site;$("schedule-site").hidden=!site;$("schedule-urls").disabled=site;$("schedule-urls").required=!site;
     for(const id of ["schedule-root","schedule-pages","schedule-depth","schedule-sitemaps"])$(id).disabled=!site;
-    $("schedule-root").required=site;}
+    $("schedule-root").required=site;$("schedule-discover-rendered").disabled=!site||!$("schedule-render").checked;}
 	function adaptiveMode(){const adaptive=$("schedule-adaptive").checked;$("adaptive-options").hidden=!adaptive;for(const id of ["adaptive-max-hours","adaptive-failures"])$(id).disabled=!adaptive;$("schedule-site-mode").disabled=adaptive;if(adaptive){document.querySelector('[name="schedule-mode"][value="list"]').checked=true;$("schedule-render").checked=false;}$("schedule-render").disabled=adaptive||!renderAvailable;mode();}
   function openForm(item){$("schedule-form").reset();message("form-error","");editID=item?.id||"";signature="";requestID="";
     for(const input of $("schedule-source").querySelectorAll("input,textarea"))input.disabled=false;
@@ -35,6 +35,7 @@
       if(editID)await api(`/api/schedules/${editID}/update`,{...base,enabled:$("schedule-enabled").checked});
       else{const site=document.querySelector('input[name="schedule-mode"]:checked').value==="site";
         const input={...base,render_javascript:$("schedule-render").checked,mode:site?"site":"list",urls:site?"":$("schedule-urls").value,site:site?{root_url:$("schedule-root").value,max_pages:Number($("schedule-pages").value),max_depth:Number($("schedule-depth").value),use_sitemaps:$("schedule-sitemaps").checked}:null};
+		if(site)input.site.discover_rendered_links=$("schedule-render").checked&&$("schedule-discover-rendered").checked;
 		input.adaptive=$("schedule-adaptive").checked;if(input.adaptive){input.max_interval_hours=Number($("adaptive-max-hours").value);input.failure_threshold=Number($("adaptive-failures").value);}
         const key=JSON.stringify(input);if(signature!==key){requestID=crypto.randomUUID();signature=key;}await api("/api/schedules",{...input,id:requestID});}
       $("schedule-dialog").close();await refresh();
@@ -65,6 +66,7 @@
     const schema=await api("/api/schema");renderAvailable=schema.rendering_available;
     $("new-schedule").onclick=()=>openForm();$("schedule-form").onsubmit=save;$("refresh").onclick=safe(refresh);
 	$("schedule-adaptive").onchange=adaptiveMode;
+	$("schedule-render").onchange=mode;
     document.querySelectorAll('[name="schedule-mode"]').forEach(input=>input.onchange=mode);document.querySelectorAll("[data-close]").forEach(b=>b.onclick=()=>$(b.dataset.close).close());
     $("change-filter").onchange=safe(async()=>{cursorStack=[""];await changes();});$("changes-next").onclick=safe(async()=>{cursorStack.push(next);await changes();});$("changes-prev").onclick=safe(async()=>{cursorStack.pop();await changes();});
     $("all-changes").onclick=safe(async()=>{selectedRun="";cursorStack=[""];$("selected-run").hidden=true;await changes();});

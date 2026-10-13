@@ -65,6 +65,8 @@ var (
 )
 
 type Config struct {
+	CrUXAPIKey                string
+	DiscoverRenderedLinks     bool
 	ConditionalRequests       bool
 	RenderJavaScript          bool
 	RenderBrowserURL          string
@@ -341,6 +343,7 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("RENDER_BROWSER_URL is required for JavaScript rendering")
 	}
 	return Config{
+		CrUXAPIKey:                strings.TrimSpace(os.Getenv("CRUX_API_KEY")),
 		RenderJavaScript:          renderEnabled,
 		RenderBrowserURL:          renderURL,
 		RenderTimeout:             renderTimeout,

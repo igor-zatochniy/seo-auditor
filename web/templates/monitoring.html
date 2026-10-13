@@ -40,6 +40,7 @@
         <div id="schedule-list"><label for="schedule-urls">URL сторінок</label><textarea id="schedule-urls" rows="5" spellcheck="false" placeholder="https://example.com/&#10;https://example.com/about" required></textarea></div>
         <div id="schedule-site" hidden><label for="schedule-root">Стартовий URL</label><input id="schedule-root" type="url" maxlength="2048" placeholder="https://example.com/" disabled><div class="monitor-grid"><label>Ліміт сторінок<input id="schedule-pages" type="number" min="1" max="1000" value="100" disabled></label><label>Глибина<input id="schedule-depth" type="number" min="0" max="10" value="5" disabled></label></div><label class="checkbox-label"><input id="schedule-sitemaps" type="checkbox" checked disabled> Використовувати sitemap</label></div>
         <label class="checkbox-label"><input id="schedule-render" type="checkbox" disabled> JavaScript і лабораторні LCP/CLS</label>
+		<label class="checkbox-label"><input id="schedule-discover-rendered" type="checkbox" disabled> Обхід DOM-посилань</label>
       </div>
       <div class="actions form-actions"><button type="button" data-close="schedule-dialog">Скасувати</button><button id="save-schedule" class="primary" type="submit">Зберегти розклад</button></div>
     </form>

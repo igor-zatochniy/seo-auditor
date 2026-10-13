@@ -126,7 +126,7 @@ func persistSiteDiscovery(ctx context.Context, tx pgx.Tx, cfg Config, site *site
 	if err := tx.QueryRow(ctx, `SELECT frontier_depth FROM audit_site_nodes WHERE run_id=$1 AND target_id=$2`, cfg.RunID, res.Target.TargetID).Scan(&depth); err != nil {
 		return err
 	}
-	links := res.Data.DiscoveredLinks
+	links, linksTruncated := siteDiscoveryLinks(res.Data, site.DiscoverRendered, cfg.AllowPrivateTargets)
 	kind := "link"
 	if res.Error != nil || !res.Data.HTMLSizeComplete {
 		links = nil
@@ -151,7 +151,11 @@ func persistSiteDiscovery(ctx context.Context, tx pgx.Tx, cfg Config, site *site
 		}
 		internal := origin == site.Origin
 		anchor, _, _ := limitStorageString(redactText(link.Anchor), 256)
-		edges = append(edges, []any{cfg.RunID, res.Target.TargetID, i + 1, fingerprintURL(cfg.TargetFingerprintKey, normalized), redactURL(normalized), anchor, internal, link.Nofollow, kind})
+		source := link.Source
+		if source == "" {
+			source = "html"
+		}
+		edges = append(edges, []any{cfg.RunID, res.Target.TargetID, i + 1, fingerprintURL(cfg.TargetFingerprintKey, normalized), redactURL(normalized), anchor, internal, link.Nofollow, kind, source})
 		if internal && !link.Nofollow {
 			// Redirect hops also consume the discovery budget, bounding redirect loops.
 			candidates = append(candidates, siteCandidate{url: normalized, depth: depth + 1})
@@ -164,10 +168,10 @@ func persistSiteDiscovery(ctx context.Context, tx pgx.Tx, cfg Config, site *site
 		return err
 	}
 	if len(edges) > 0 {
-		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"audit_site_edges"}, []string{"run_id", "from_target_id", "ordinal", "to_fingerprint", "safe_url", "anchor_text", "is_internal", "nofollow", "kind"}, pgx.CopyFromRows(edges)); err != nil {
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"audit_site_edges"}, []string{"run_id", "from_target_id", "ordinal", "to_fingerprint", "safe_url", "anchor_text", "is_internal", "nofollow", "kind", "discovery_source"}, pgx.CopyFromRows(edges)); err != nil {
 			return err
 		}
 	}
-	_, err := tx.Exec(ctx, `UPDATE audit_site_nodes SET links_truncated=$3 WHERE run_id=$1 AND target_id=$2`, cfg.RunID, res.Target.TargetID, res.Data.LinksTruncated)
+	_, err := tx.Exec(ctx, `UPDATE audit_site_nodes SET links_truncated=$3 WHERE run_id=$1 AND target_id=$2`, cfg.RunID, res.Target.TargetID, linksTruncated)
 	return err
 }

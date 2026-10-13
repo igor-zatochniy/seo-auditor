@@ -11,6 +11,10 @@ window.seoRendering = (() => {
   if(r.error)section.append(el("p",r.error,"error"));
   section.append(el("p",`${r.browser||"Chromium"} · ${r.duration_ms} ms · запити ${r.requests} · заблоковано ${r.blocked}`,"muted"));
   for(const warning of r.warnings||[])section.append(el("p",warning,"metric-note"));
+	const reasons={invalid_target:"Заборонена адреса",robots_denied:"Заборонено robots.txt",request_failed:"Мережевий збій",http_status:"HTTP-помилка",body_read_failed:"Помилка читання або ліміт розміру",request_limit:"Ліміт запитів",transfer_limit:"Ліміт ресурсів",unsupported_request:"Запит не дозволений renderer",fulfill_failed:"Помилка передачі Chromium",resource_error:"Помилка ресурсу"};
+	if(r.resources?.length){section.append(el("h4","Ресурси з помилками"));const list=el("ul");for(const issue of r.resources)list.append(el("li",`${issue.type}: ${issue.url} — ${reasons[issue.code]||"Помилка ресурсу"}${issue.http?" (HTTP "+issue.http+")":""}${issue.url_truncated?" · URL скорочено":""}`));section.append(list);}
+	if(r.resources_truncated)section.append(el("p","Список ресурсів з помилками обмежено.","metric-note"));
+	if(r.links_truncated)section.append(el("p","Набір DOM-посилань неповний.","metric-note"));
   if(r.status==="partial")section.append(el("p","Неповне завантаження або обмежена вибірка: відсутність змін не підтверджує незалежність від JavaScript.","metric-note"));
   const wrap=el("div",null,"table-wrap"),table=el("table"),head=el("tr");
   for(const name of ["Метрика","HTML відповіді","DOM після JavaScript","Зміна"])head.append(el("th",name));table.append(head);

@@ -79,6 +79,10 @@ func (s *webServer) submit(w http.ResponseWriter, r *http.Request) {
 			writeWebError(w, 400, "invalid_site", "Вкажіть лише параметри Site Crawl")
 			return
 		}
+		if body.Site.DiscoverRendered && !body.RenderJavaScript {
+			writeWebError(w, 400, "invalid_site", "Пошук DOM-посилань потребує JavaScript")
+			return
+		}
 		if err := validateSiteOptions(body.Site, s.cfg.AllowPrivateTargets); err != nil {
 			writeWebError(w, 400, "invalid_site", err.Error())
 			return

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"github.com/igor-zatochniy/seo-auditor/internal/performance"
+	"github.com/igor-zatochniy/seo-auditor/internal/render"
 	"github.com/igor-zatochniy/seo-auditor/internal/structureddata"
 	"hash"
 	"net/http"
@@ -17,18 +18,22 @@ const comparisonItemLimit = 1000
 
 // RenderComparison не містить виконуваного HTML або оригінальних мережевих відповідей.
 type RenderComparison struct {
-	Status      string              `json:"status"`
-	Error       string              `json:"error,omitempty"`
-	DurationMS  int64               `json:"duration_ms"`
-	Requests    int                 `json:"requests"`
-	Blocked     int                 `json:"blocked"`
-	Bytes       int64               `json:"bytes"`
-	Browser     string              `json:"browser,omitempty"`
-	Warnings    []string            `json:"warnings,omitempty"`
-	Raw         *RenderSnapshot     `json:"raw,omitempty"`
-	Rendered    *RenderSnapshot     `json:"rendered,omitempty"`
-	Delta       *RenderDelta        `json:"delta,omitempty"`
-	Performance *performance.Result `json:"performance,omitempty"`
+	DiscoveredLinks    []DiscoveredLink       `json:"-"`
+	LinksTruncated     bool                   `json:"links_truncated,omitempty"`
+	Resources          []render.ResourceIssue `json:"resources,omitempty"`
+	ResourcesTruncated bool                   `json:"resources_truncated,omitempty"`
+	Status             string                 `json:"status"`
+	Error              string                 `json:"error,omitempty"`
+	DurationMS         int64                  `json:"duration_ms"`
+	Requests           int                    `json:"requests"`
+	Blocked            int                    `json:"blocked"`
+	Bytes              int64                  `json:"bytes"`
+	Browser            string                 `json:"browser,omitempty"`
+	Warnings           []string               `json:"warnings,omitempty"`
+	Raw                *RenderSnapshot        `json:"raw,omitempty"`
+	Rendered           *RenderSnapshot        `json:"rendered,omitempty"`
+	Delta              *RenderDelta           `json:"delta,omitempty"`
+	Performance        *performance.Result    `json:"performance,omitempty"`
 }
 
 type RenderSnapshot struct {
@@ -198,6 +203,14 @@ func Compare(raw, rendered *RenderSnapshot) *RenderDelta {
 
 func (r *RenderComparison) Sanitize(text, safeURL func(string) string) {
 	r.Error = text(r.Error)
+	for i := range r.Resources {
+		value := []rune(safeURL(r.Resources[i].URL))
+		if len(value) > 512 {
+			value = value[:512]
+			r.Resources[i].URLTruncated = true
+		}
+		r.Resources[i].URL = string(value)
+	}
 	if r.Performance != nil {
 		r.Performance.Error = text(r.Performance.Error)
 	}

@@ -1057,9 +1057,13 @@ func TestAbandonStaleAuditRunsContinuesInterruptedTargetRecovery(t *testing.T) {
 		cleanup(cleanupCtx)
 	}()
 
+	// Setup не перевіряє recovery deadline і може виконуватися після великих fixtures.
+	recoveryWriteTimeout := cfg.DBWriteTimeout
+	cfg.DBWriteTimeout = 3 * time.Second
 	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create interrupted stale audit run: %v", err)
 	}
+	cfg.DBWriteTimeout = recoveryWriteTimeout
 	if _, err := pool.Exec(
 		ctx,
 		`INSERT INTO audit_run_targets (

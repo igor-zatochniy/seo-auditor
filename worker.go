@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/igor-zatochniy/seo-auditor/internal/seo"
 
@@ -145,6 +146,7 @@ func worker(
 				}
 				return ""
 			}()
+			changedHeader = changedHeader || canonicalHeaderChanged(resp.Header.Values("Link"), baseline, cfg)
 			if baseline != nil && !changedHeader {
 				data := baseline.Data
 				data.URL = target.RequestURL
@@ -199,6 +201,7 @@ func worker(
 			baseData.GEO.HTTP = httpObservation(resp.StatusCode)
 		}
 
+		baseData.URLSignals = crawler.CanonicalHeaders(resp.Header.Values("Link"))
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			redirectURL := resp.Header.Get("Location")
 			safeRedirectURL := redactURL(redirectURL)
@@ -283,6 +286,7 @@ func worker(
 			maxHTMLTokenBytes,
 		)
 		data.HTTPResponseStatus = httpStatus(resp.StatusCode)
+		data.URLSignals = baseData.URLSignals
 		data.HTTPETag = safeHTTPValidator(resp.Header.Get("ETag"), 1024)
 		data.HTTPLastModified = safeHTTPValidator(resp.Header.Get("Last-Modified"), 128)
 		resp.Body.Close()

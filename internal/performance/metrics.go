@@ -1,4 +1,4 @@
-// Package performance описує лише локальні лабораторні виміри, не польові CWV.
+// Package performance розділяє локальні лабораторні виміри та окремі польові CrUX-спостереження.
 package performance
 
 import "math"

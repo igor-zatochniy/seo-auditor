@@ -294,6 +294,7 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 	}
 	if site != nil {
 		cfg.Workers = min(cfg.Workers, 4)
+		cfg.DiscoverRenderedLinks = site.DiscoverRendered
 	}
 	targetSnapshot, err := captureAuditRunTargets(workCtx, dbPool, cfg)
 	if err != nil {

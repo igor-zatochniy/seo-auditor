@@ -17,6 +17,7 @@ import (
 	"time"
 
 	appconfig "github.com/igor-zatochniy/seo-auditor/internal/config"
+	"github.com/igor-zatochniy/seo-auditor/internal/performance"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,6 +26,8 @@ import (
 var webAssets embed.FS
 
 type webServer struct {
+	cruxNext      atomic.Int64
+	cruxQuery     func(context.Context, string, string, string, string) (*performance.CrUXReport, error)
 	duplicateBusy atomic.Bool
 	pool          *pgxpool.Pool
 	cfg           Config
@@ -119,6 +122,10 @@ func (s *webServer) handler() http.Handler {
 	mux.HandleFunc("GET /api/audits/{id}/results/{target}/rendering", s.renderingDetail)
 	mux.HandleFunc("POST /api/audits/{id}/results/{target}/recrawl", s.recrawlTarget)
 	mux.HandleFunc("GET /api/audits/{id}/graph", s.graph)
+	mux.HandleFunc("GET /api/audits/{id}/routes", s.urlRoutes)
+	mux.HandleFunc("GET /api/audits/{id}/results/{target}/crux", s.crux)
+	mux.HandleFunc("POST /api/audits/{id}/results/{target}/crux", s.crux)
+	mux.HandleFunc("GET /api/audits/{id}/routes/{target}/inlinks", s.routeInlinks)
 	mux.HandleFunc("GET /api/audits/{id}/international", s.internationalReport)
 	mux.HandleFunc("GET /api/audits/{id}/duplicates", s.duplicateReport)
 	mux.HandleFunc("POST /api/audits/{id}/cancel", s.cancel)

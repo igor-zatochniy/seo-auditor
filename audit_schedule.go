@@ -78,6 +78,9 @@ func prepareSchedule(input *scheduleInput, cfg Config, maxURLs int) (scheduleSou
 		source.Adaptive, source.MaxIntervalHours, source.FailureThreshold = true, input.MaxIntervalHours, input.FailureThreshold
 	}
 	if input.Mode == "site" && input.Site != nil && strings.TrimSpace(input.URLs) == "" {
+		if input.Site.DiscoverRendered && !input.RenderJavaScript {
+			return source, "", 0, fmt.Errorf("пошук DOM-посилань потребує JavaScript")
+		}
 		if err := validateSiteOptions(input.Site, cfg.AllowPrivateTargets); err != nil {
 			return source, "", 0, err
 		}
