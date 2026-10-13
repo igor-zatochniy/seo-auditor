@@ -31,6 +31,7 @@ type reportField struct {
 var reportFields = []reportField{
 	{"target_id", "Target ID", "Огляд"}, {"safe_url", "URL", "Огляд"},
 	{"status_code", "HTTP", "Огляд"}, {"scan_status", "Статус", "Огляд"},
+	{"http_response_status", "HTTP поточної перевірки", "Огляд"}, {"reused_from_run_id", "Знімок повторно використано з аудиту", "Огляд"},
 	{"is_redirect", "Редирект", "Огляд"}, {"redirect_url", "Адреса редиректу", "Огляд"},
 	{"title", "Title", "Метадані"}, {"title_char_count", "Title: символів", "Метадані"},
 	{"title_width_px", "Title: ширина, px", "Метадані"}, {"title_status", "Title: SERP width", "Метадані"},
@@ -47,6 +48,7 @@ var reportFields = []reportField{
 	{"internal_links_count", "Внутрішні посилання", "Посилання"}, {"external_links_count", "Зовнішні посилання", "Посилання"},
 	{"links_count", "Усі посилання", "Посилання"}, {"total_images", "Зображення", "Зображення"},
 	{"images_missing_alt", "Без атрибута alt", "Зображення"}, {"has_json_ld", "JSON-LD", "Технічні сигнали"},
+	{"structured_data", "Діагностика JSON-LD", "Структуровані дані"},
 	{"has_viewport", "Viewport", "Технічні сигнали"}, {"word_count", "Слова", "Контент"},
 	{"html_raw_bytes", "HTML після розпакування, bytes", "Розмір HTML"},
 	{"html_size_complete", "HTML прочитано повністю", "Розмір HTML"},

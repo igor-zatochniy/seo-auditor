@@ -19,12 +19,18 @@ const schedulePollInterval = 15 * time.Second
 var errScheduleConflict = errors.New("розклад із цим ID вже існує або досягнуто ліміт 100 розкладів")
 
 type scheduleSource struct {
+	Adaptive         bool              `json:"adaptive,omitempty"`
+	MaxIntervalHours int               `json:"max_interval_hours,omitempty"`
+	FailureThreshold int               `json:"failure_threshold,omitempty"`
 	URLs             []string          `json:"urls,omitempty"`
 	Site             *siteCrawlOptions `json:"site,omitempty"`
 	RenderJavaScript bool              `json:"render_javascript"`
 }
 
 type scheduleInput struct {
+	Adaptive         bool              `json:"adaptive"`
+	MaxIntervalHours int               `json:"max_interval_hours"`
+	FailureThreshold int               `json:"failure_threshold"`
 	ID               string            `json:"id"`
 	Name             string            `json:"name"`
 	URLs             string            `json:"urls"`
@@ -56,6 +62,21 @@ func prepareSchedule(input *scheduleInput, cfg Config, maxURLs int) (scheduleSou
 		return source, "", 0, err
 	}
 	source.RenderJavaScript = input.RenderJavaScript
+	if input.Adaptive {
+		if input.Mode == "site" || input.RenderJavaScript {
+			return source, "", 0, fmt.Errorf("адаптивний режим підтримує список URL без JavaScript; повний обхід залишається окремим розкладом")
+		}
+		if input.MaxIntervalHours == 0 {
+			input.MaxIntervalHours = min(720, input.IntervalHours*8)
+		}
+		if input.FailureThreshold == 0 {
+			input.FailureThreshold = 2
+		}
+		if input.MaxIntervalHours < input.IntervalHours || input.MaxIntervalHours > 720 || input.FailureThreshold < 1 || input.FailureThreshold > 10 {
+			return source, "", 0, fmt.Errorf("максимальний інтервал: від мінімального до 720 год; підтвердження помилки: 1–10 перевірок")
+		}
+		source.Adaptive, source.MaxIntervalHours, source.FailureThreshold = true, input.MaxIntervalHours, input.FailureThreshold
+	}
 	if input.Mode == "site" && input.Site != nil && strings.TrimSpace(input.URLs) == "" {
 		if err := validateSiteOptions(input.Site, cfg.AllowPrivateTargets); err != nil {
 			return source, "", 0, err
@@ -124,6 +145,9 @@ func (s *webServer) storeSchedule(ctx context.Context, input scheduleInput, sour
 	if err != nil {
 		return err
 	}
+	if err = seedAdaptiveTargets(ctx, tx, input, source); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -170,10 +194,32 @@ func (m *AuditManager) startScheduled(ctx context.Context, scheduleID string) (s
 	}
 	cfg := m.cfg
 	cfg.RunID, cfg.OwnerGeneration, cfg.RenderJavaScript = newWebRunID(), 1, source.RenderJavaScript
+	cfg.ConditionalRequests = source.Adaptive
 	if err = validateRendering(cfg); err != nil {
 		return "", pauseInvalidSchedule(ctx, tx, id, err)
 	}
-	if source.Site != nil {
+	var adaptiveTargets []adaptiveTarget
+	if source.Adaptive {
+		if source.Site != nil || source.RenderJavaScript {
+			return "", pauseInvalidSchedule(ctx, tx, id, fmt.Errorf("некоректне поєднання адаптивного режиму"))
+		}
+		var urls []string
+		adaptiveTargets, urls, err = selectAdaptiveTargets(ctx, tx, id, source, scheduleID != "")
+		if err != nil {
+			return "", err
+		}
+		if len(urls) == 0 {
+			return "", pgx.ErrNoRows
+		}
+		urls, err = parseWebURLs(strings.Join(urls, "\n"), adaptiveBatchSize, cfg.AllowPrivateTargets)
+		if err != nil {
+			return "", pauseInvalidSchedule(ctx, tx, id, err)
+		}
+		if len(urls) != len(adaptiveTargets) {
+			return "", pauseInvalidSchedule(ctx, tx, id, fmt.Errorf("поточна нормалізація об'єднала різні цілі; створіть новий розклад"))
+		}
+		err = insertExplicitAuditRun(ctx, tx, cfg, urls)
+	} else if source.Site != nil {
 		if err = validateSiteOptions(source.Site, cfg.AllowPrivateTargets); err != nil {
 			return "", pauseInvalidSchedule(ctx, tx, id, err)
 		}
@@ -190,15 +236,22 @@ func (m *AuditManager) startScheduled(ctx context.Context, scheduleID string) (s
 	if err != nil {
 		return "", err
 	}
+	if source.Adaptive {
+		if err = captureAdaptiveBaseline(ctx, tx, cfg.RunID, id, adaptiveTargets); err != nil {
+			return "", err
+		}
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO audit_schedule_runs(run_id,schedule_id,key_check,scheduled_at) VALUES($1,$2,$3,$4)`,
 		cfg.RunID, id, fingerprintURL(cfg.TargetFingerprintKey, "schedule:"+id), now)
 	if err != nil {
 		return "", err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO geo_profile_runs(profile_id,run_id,report_id,scheduled_at)
+	if !source.Adaptive {
+		if _, err = tx.Exec(ctx, `INSERT INTO geo_profile_runs(profile_id,run_id,report_id,scheduled_at)
 		SELECT id,$2,gen_random_uuid(),$3 FROM geo_profiles WHERE schedule_id=$1 AND enabled
 		ON CONFLICT(profile_id,run_id) DO NOTHING`, id, cfg.RunID, now); err != nil {
-		return "", err
+			return "", err
+		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE audit_schedules SET next_run_at=$2 WHERE id=$1`, id, nextScheduleTime(due, now, hours))
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/igor-zatochniy/seo-auditor/internal/duplicates"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/igor-zatochniy/seo-auditor/internal/international"
+	"github.com/igor-zatochniy/seo-auditor/internal/structureddata"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/language"
@@ -33,6 +34,11 @@ const (
 
 // Data contains the full set of metrics collected by the parser.
 type Data struct {
+	HTTPResponseStatus         *int
+	ReusedFromRunID            string
+	HTTPETag                   string `json:"-"`
+	HTTPLastModified           string `json:"-"`
+	StructuredData             *structureddata.Report
 	ContentSignature           *duplicates.Signature
 	International              *international.Evidence
 	Rendering                  *RenderComparison
@@ -666,6 +672,7 @@ func (p *pageParser) handleEndTag(name []byte) {
 
 func (p *pageParser) finalize() {
 	p.data.GEO = p.geo.result()
+	p.data.StructuredData = p.geo.diagnostics.Result(p.data.URL)
 	p.data.ContentSignature = p.geo.contentSignature(p.data.GEO.ContentSource, p.contentLanguage)
 	p.finishLink()
 	p.resolveLinks()

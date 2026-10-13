@@ -69,6 +69,9 @@ func (s *webServer) storeGEOProfile(ctx context.Context, input geoProfileInput) 
 	if err = tx.QueryRow(ctx, "SELECT source FROM audit_schedules WHERE id=$1 FOR SHARE", input.ScheduleID).Scan(&source); err != nil {
 		return err
 	}
+	if source.Adaptive {
+		return geoInputError{"Для GEO-моніторингу потрібен повний SEO-розклад, а не часткові адаптивні перевірки."}
+	}
 	matched := source.Site != nil && geo.InDomain(source.Site.RootURL, input.Domain)
 	for _, raw := range source.URLs {
 		matched = matched || geo.InDomain(raw, input.Domain)

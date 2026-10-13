@@ -65,6 +65,7 @@ var (
 )
 
 type Config struct {
+	ConditionalRequests       bool
 	RenderJavaScript          bool
 	RenderBrowserURL          string
 	RenderTimeout             time.Duration

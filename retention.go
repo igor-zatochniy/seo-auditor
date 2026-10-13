@@ -37,6 +37,8 @@ const retentionCandidateSQL = `SELECT r.id::TEXT FROM audit_runs r
  AND r.id NOT IN (SELECT id FROM audit_runs WHERE status IN ('completed','completed_with_errors','canceled') ORDER BY finished_at DESC NULLS LAST,id DESC LIMIT 2)
  AND NOT EXISTS (SELECT 1 FROM audit_run_targets t WHERE t.run_id=r.id AND t.status IN ('pending','running','abandoned'))
  AND NOT EXISTS (SELECT 1 FROM audit_schedule_runs s WHERE s.comparison_status='pending' AND (s.run_id=r.id OR s.baseline_run_id=r.id))
+ AND NOT EXISTS (SELECT 1 FROM audit_adaptive_targets t WHERE t.baseline_run_id=r.id)
+ AND NOT EXISTS (SELECT 1 FROM audit_adaptive_run_targets t JOIN audit_schedule_runs s ON s.run_id=t.run_id WHERE s.comparison_status='pending' AND t.baseline_run_id=r.id)
  AND NOT EXISTS (SELECT 1 FROM audit_schedule_runs s WHERE s.run_id=r.id AND r.id IN
    (SELECT h.run_id FROM audit_schedule_runs h WHERE h.schedule_id=s.schedule_id AND h.key_check=s.key_check
     AND h.comparison_status IN ('baseline','compared') ORDER BY h.scheduled_at DESC,h.run_id DESC LIMIT 2))

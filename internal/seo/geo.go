@@ -8,9 +8,11 @@ import (
 
 	"github.com/igor-zatochniy/seo-auditor/internal/duplicates"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
+	"github.com/igor-zatochniy/seo-auditor/internal/structureddata"
 )
 
 type geoCollector struct {
+	diagnostics           *structureddata.Collector
 	regions               [3]geoRegion
 	state                 geoContentState
 	stack                 []geoFrame
@@ -25,7 +27,7 @@ type geoCollector struct {
 }
 
 func newGEOCollector() geoCollector {
-	g := geoCollector{types: make(map[string]bool)}
+	g := geoCollector{types: make(map[string]bool), diagnostics: structureddata.NewCollector()}
 	for i := range g.regions {
 		g.regions[i] = geoRegion{content: newBoundedTextCollector(2000), headings: newBoundedTextCollector(800), paragraph: newBoundedTextCollector(600)}
 		g.regions[i].signature = duplicates.NewCollector()
@@ -89,6 +91,7 @@ func (g *geoCollector) scriptText(text []byte) {
 	}
 	// Ліміти діють на один блок та сумарно на всі JSON-LD блоки сторінки.
 	if len(text) > (64<<10)-len(g.jsonText) || len(text) > (256<<10)-g.jsonBytes {
+		g.diagnostics.Incomplete()
 		g.signals.SchemaIncomplete = true
 		g.jsonLD = false
 		g.jsonText = nil
@@ -110,6 +113,7 @@ func (g *geoCollector) end(name []byte) {
 }
 
 func (g *geoCollector) parseSchema() {
+	g.diagnostics.AddBlock(g.jsonText)
 	var value any
 	if json.Unmarshal(g.jsonText, &value) != nil {
 		g.signals.SchemaIncomplete = true

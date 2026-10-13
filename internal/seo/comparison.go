@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"github.com/igor-zatochniy/seo-auditor/internal/performance"
+	"github.com/igor-zatochniy/seo-auditor/internal/structureddata"
 	"hash"
 	"net/http"
 	"net/url"
@@ -31,21 +32,22 @@ type RenderComparison struct {
 }
 
 type RenderSnapshot struct {
-	Title         string   `json:"title"`
-	Description   string   `json:"description"`
-	Canonical     string   `json:"canonical"`
-	Robots        string   `json:"robots"`
-	XRobotsTag    string   `json:"x_robots_tag"`
-	H1            string   `json:"h1"`
-	H1Count       int      `json:"h1_count"`
-	Words         int      `json:"words"`
-	TextSample    string   `json:"text_sample"`
-	InternalLinks int      `json:"internal_links"`
-	ExternalLinks int      `json:"external_links"`
-	JSONLDCount   int      `json:"json_ld_count"`
-	Hreflang      []string `json:"hreflang"`
-	Complete      bool     `json:"complete"`
-	evidence      *comparisonEvidence
+	StructuredData *structureddata.Report `json:"structured_data,omitempty"`
+	Title          string                 `json:"title"`
+	Description    string                 `json:"description"`
+	Canonical      string                 `json:"canonical"`
+	Robots         string                 `json:"robots"`
+	XRobotsTag     string                 `json:"x_robots_tag"`
+	H1             string                 `json:"h1"`
+	H1Count        int                    `json:"h1_count"`
+	Words          int                    `json:"words"`
+	TextSample     string                 `json:"text_sample"`
+	InternalLinks  int                    `json:"internal_links"`
+	ExternalLinks  int                    `json:"external_links"`
+	JSONLDCount    int                    `json:"json_ld_count"`
+	Hreflang       []string               `json:"hreflang"`
+	Complete       bool                   `json:"complete"`
+	evidence       *comparisonEvidence
 }
 
 type RenderDelta struct {
@@ -147,7 +149,7 @@ func (p *pageParser) comparisonURL(raw []byte) *url.URL {
 
 func Snapshot(data Data) *RenderSnapshot {
 	e := data.comparison
-	s := &RenderSnapshot{Title: data.Title, Description: data.Description, Canonical: data.CanonicalURL, Robots: data.MetaRobots, XRobotsTag: data.XRobotsTag, H1: data.H1, H1Count: data.H1Count, Words: data.WordCount, InternalLinks: data.InternalLinksCount, ExternalLinks: data.ExternalLinksCount, Hreflang: []string{}, evidence: e}
+	s := &RenderSnapshot{StructuredData: data.StructuredData, Title: data.Title, Description: data.Description, Canonical: data.CanonicalURL, Robots: data.MetaRobots, XRobotsTag: data.XRobotsTag, H1: data.H1, H1Count: data.H1Count, Words: data.WordCount, InternalLinks: data.InternalLinksCount, ExternalLinks: data.ExternalLinksCount, Hreflang: []string{}, evidence: e}
 	if e != nil {
 		s.TextSample, _, _ = e.sample.Result()
 		s.JSONLDCount = e.jsonCount

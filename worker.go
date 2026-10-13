@@ -90,6 +90,16 @@ func worker(
 			RobotsAllowed: true,
 			RobotsOutcome: robotsOutcomeAllowed,
 		}
+		var baseline *conditionalBaseline
+		if cfg.ConditionalRequests {
+			lookupCtx, cancel := context.WithTimeout(operationCtx, effectiveDBFetchTimeout(cfg))
+			baseline, err = loadConditionalBaseline(lookupCtx, dbPool, cfg, target)
+			cancel()
+			if err != nil {
+				workerLogger.Warn("Умовний HTTP-кеш недоступний; виконується повна перевірка", "target_id", target.TargetID, "error", sanitizeError(err))
+				baseline = nil
+			}
+		}
 
 		reqCtx, reqCancel := context.WithTimeout(operationCtx, cfg.HTTPTotalTimeout)
 		reqCtx, httpObservation := observeHTTP(reqCtx)
@@ -105,6 +115,14 @@ func worker(
 		}
 		req.Header.Set("User-Agent", UserAgentStr)
 		req.Header.Set("Accept", "text/html,application/xhtml+xml")
+		if baseline != nil {
+			if baseline.ETag != "" {
+				req.Header.Set("If-None-Match", baseline.ETag)
+			}
+			if baseline.LastModified != "" {
+				req.Header.Set("If-Modified-Since", baseline.LastModified)
+			}
+		}
 
 		resp, err := pageClient.Do(req)
 		if err != nil {
@@ -119,6 +137,67 @@ func worker(
 		baseData.XRobotsTag, baseData.XRobotsTagTruncated, baseData.XRobotsTagOriginalLength =
 			robotsHeaderDirectives(resp.Header)
 		baseData.GEO.HTTP = httpObservation(resp.StatusCode)
+		baseData.HTTPResponseStatus = httpStatus(resp.StatusCode)
+		if resp.StatusCode == http.StatusNotModified {
+			changedHeader := len(resp.Header.Values("X-Robots-Tag")) > 0 && baseData.XRobotsTag != func() string {
+				if baseline != nil {
+					return baseline.Data.XRobotsTag
+				}
+				return ""
+			}()
+			if baseline != nil && !changedHeader {
+				data := baseline.Data
+				data.URL = target.RequestURL
+				data.Duration = time.Since(start)
+				data.HTTPResponseStatus = httpStatus(304)
+				data.ReusedFromRunID = baseline.RunID
+				data.RobotsAllowed = true
+				data.RobotsOutcome = robotsOutcomeAllowed
+				data.HTTPETag = baseline.ETag
+				data.HTTPLastModified = baseline.LastModified
+				if value := safeHTTPValidator(resp.Header.Get("ETag"), 1024); value != "" {
+					data.HTTPETag = value
+				}
+				if value := safeHTTPValidator(resp.Header.Get("Last-Modified"), 128); value != "" {
+					data.HTTPLastModified = value
+				}
+				if data.GEO != nil {
+					data.GEO.HTTP = baseData.GEO.HTTP
+					data.GEO.Search.GooglebotRules = searchRules.GooglebotRules
+					data.GEO.Search.OAISearchBotRules = searchRules.OAISearchBotRules
+					data.GEO.Search.GPTBotRules = searchRules.GPTBotRules
+				}
+				resp.Body.Close()
+				reqCancel()
+				results <- Result{Target: target, Data: data}
+				continue
+			}
+			resp.Body.Close()
+			req.Header.Del("If-None-Match")
+			req.Header.Del("If-Modified-Since")
+			resp, err = pageClient.Do(req)
+			if err != nil {
+				reqCancel()
+				baseData.Duration = time.Since(start)
+				result := failedScanResult(baseData, errorCodeRequestFailed, fmt.Errorf("unconditional revalidation failed: %s", sanitizeError(err)))
+				result.Target = target
+				results <- result
+				continue
+			}
+			if resp.StatusCode == http.StatusNotModified {
+				resp.Body.Close()
+				reqCancel()
+				baseData.StatusCode = httpStatus(304)
+				baseData.Duration = time.Since(start)
+				result := failedScanResult(baseData, errorCodeResponseParseFailed, fmt.Errorf("server returned 304 without valid conditional baseline"))
+				result.Target = target
+				results <- result
+				continue
+			}
+			baseData.XRobotsTag, baseData.XRobotsTagTruncated, baseData.XRobotsTagOriginalLength = robotsHeaderDirectives(resp.Header)
+			baseData.HTTPResponseStatus = httpStatus(resp.StatusCode)
+			baseData.GEO.HTTP = httpObservation(resp.StatusCode)
+		}
 
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			redirectURL := resp.Header.Get("Location")
@@ -203,6 +282,9 @@ func worker(
 			cfg.MaxHTMLBodyBytes,
 			maxHTMLTokenBytes,
 		)
+		data.HTTPResponseStatus = httpStatus(resp.StatusCode)
+		data.HTTPETag = safeHTTPValidator(resp.Header.Get("ETag"), 1024)
+		data.HTTPLastModified = safeHTTPValidator(resp.Header.Get("Last-Modified"), 128)
 		resp.Body.Close()
 		reqCancel()
 

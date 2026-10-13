@@ -19,3 +19,11 @@ regexes = [
   '''test-placeholder-not-a-secret''',
   '''local-development-only''',
 ]
+
+[[allowlists]]
+description = "Exact non-secret query-redaction assertion"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)redaction_test\.go$''']
+regexes = ['''^API_KEY=private$''']

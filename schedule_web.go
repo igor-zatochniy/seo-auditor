@@ -13,6 +13,9 @@ import (
 )
 
 type webSchedule struct {
+	Adaptive         bool      `json:"adaptive"`
+	MaxIntervalHours int       `json:"max_interval_hours"`
+	FailureThreshold int       `json:"failure_threshold"`
 	ID               string    `json:"id"`
 	Name             string    `json:"name"`
 	Enabled          bool      `json:"enabled"`
@@ -40,6 +43,8 @@ func (s *webServer) registerSchedules(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/schedules/{id}/update", s.updateSchedule)
 	mux.HandleFunc("POST /api/schedules/{id}/run", s.runSchedule)
 	mux.HandleFunc("GET /api/schedules/{id}/runs", s.scheduleHistory)
+	mux.HandleFunc("GET /api/schedules/{id}/targets", s.adaptiveTargets)
+	mux.HandleFunc("POST /api/schedules/{id}/targets/{target}/priority", s.adaptivePriority)
 	mux.HandleFunc("GET /api/changes", s.listChanges)
 	mux.HandleFunc("POST /api/changes/read", s.readChanges)
 }
@@ -68,7 +73,8 @@ func (s *webServer) createSchedule(w http.ResponseWriter, r *http.Request) {
 func (s *webServer) listSchedules(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `SELECT s.id::TEXT,s.name,s.enabled,s.interval_hours,s.next_run_at,s.source_label,s.target_count,
 	 CASE WHEN s.source ? 'site' THEN 'site' ELSE 'list' END,COALESCE((s.source->>'render_javascript')::BOOLEAN,FALSE),
-	 COALESCE(last.run_id::TEXT,''),COALESCE(last.status,''),COALESCE(last.comparison_status,''),COALESCE(last.change_count,0),s.last_error
+	 COALESCE(last.run_id::TEXT,''),COALESCE(last.status,''),COALESCE(last.comparison_status,''),COALESCE(last.change_count,0),s.last_error,
+	 COALESCE((s.source->>'adaptive')::BOOLEAN,FALSE),COALESCE((s.source->>'max_interval_hours')::INT,0),COALESCE((s.source->>'failure_threshold')::INT,0)
 	 FROM audit_schedules s LEFT JOIN LATERAL (
 	 SELECT sr.run_id,r.status,sr.comparison_status,sr.change_count FROM audit_schedule_runs sr JOIN audit_runs r ON r.id=sr.run_id
 	 WHERE sr.schedule_id=s.id ORDER BY sr.scheduled_at DESC,sr.run_id DESC LIMIT 1) last ON TRUE ORDER BY s.created_at DESC,s.id LIMIT 100`)
@@ -80,7 +86,7 @@ func (s *webServer) listSchedules(w http.ResponseWriter, r *http.Request) {
 	items := []webSchedule{}
 	for rows.Next() {
 		var item webSchedule
-		if err = rows.Scan(&item.ID, &item.Name, &item.Enabled, &item.IntervalHours, &item.NextRunAt, &item.SourceLabel, &item.TargetCount, &item.Mode, &item.RenderJavaScript, &item.LastRunID, &item.LastStatus, &item.ComparisonStatus, &item.ChangeCount, &item.LastError); err != nil {
+		if err = rows.Scan(&item.ID, &item.Name, &item.Enabled, &item.IntervalHours, &item.NextRunAt, &item.SourceLabel, &item.TargetCount, &item.Mode, &item.RenderJavaScript, &item.LastRunID, &item.LastStatus, &item.ComparisonStatus, &item.ChangeCount, &item.LastError, &item.Adaptive, &item.MaxIntervalHours, &item.FailureThreshold); err != nil {
 			webDBError(w, err)
 			return
 		}
@@ -115,6 +121,15 @@ func (s *webServer) updateSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateScheduleTiming(input.IntervalHours, input.NextRunAt, time.Now()); err != nil {
 		writeWebError(w, 400, "invalid_schedule", err.Error())
+		return
+	}
+	var source scheduleSource
+	if err := s.pool.QueryRow(r.Context(), `SELECT source FROM audit_schedules WHERE id=$1`, id).Scan(&source); err != nil {
+		webDBError(w, err)
+		return
+	}
+	if source.Adaptive && input.IntervalHours > source.MaxIntervalHours {
+		writeWebError(w, 400, "invalid_interval", "Мінімальний інтервал перевищує максимальний адаптивний інтервал")
 		return
 	}
 	result, err := s.pool.Exec(r.Context(), `UPDATE audit_schedules SET name=$2,enabled=$3,interval_hours=$4,next_run_at=$5,last_error='' WHERE id=$1`, id, redactText(input.Name), input.Enabled, input.IntervalHours, input.NextRunAt)

@@ -6,11 +6,12 @@
   <title>Моніторинг · SEO Auditor</title>
   <link rel="stylesheet" href="/static/app.css">
   <link rel="stylesheet" href="/static/monitoring.css">
+  <link rel="stylesheet" href="/static/bots.css">
   <script src="/static/monitoring.js" defer></script>
   <script src="/static/dialogs.js" defer></script>
 </head>
 <body>
-  <header class="app-header"><a class="brand" href="/">SEO Auditor<span class="local-label">ЛОКАЛЬНО</span></a><nav aria-label="Навігація"><a href="/">SEO-аудит</a><a href="/geo">Готовність до GEO</a><a href="/audits">Історія</a><a href="/monitoring" class="active" aria-current="page">Моніторинг</a></nav><span class="connection">PostgreSQL</span></header>
+  <header class="app-header"><a class="brand" href="/">SEO Auditor<span class="local-label">ЛОКАЛЬНО</span></a><nav aria-label="Навігація"><a href="/">SEO-аудит</a><a href="/geo">Готовність до GEO</a><a href="/audits">Історія</a><a href="/monitoring" class="active" aria-current="page">Моніторинг</a><a href="/bots">Журнали ботів</a></nav><span class="connection">PostgreSQL</span></header>
   <main>
     <div id="notice" role="alert" hidden></div>
     <section aria-labelledby="monitor-title">
@@ -33,7 +34,9 @@
       <div class="monitor-grid"><label>Інтервал, годин<input id="interval-hours" type="number" min="1" max="720" value="24" required></label><label><span id="time-label">Перший запуск</span><input id="next-run" type="datetime-local" required></label></div>
       <label class="checkbox-label" id="enabled-label" hidden><input id="schedule-enabled" type="checkbox" checked> Розклад активний</label>
       <div id="schedule-source">
-        <fieldset class="crawl-mode"><legend>Цілі</legend><label><input type="radio" name="schedule-mode" value="list" checked> Список URL</label><label><input type="radio" name="schedule-mode" value="site"> Обхід сайту</label></fieldset>
+        <label class="checkbox-label"><input id="schedule-adaptive" type="checkbox"> Адаптивний повторний аудит</label>
+        <div id="adaptive-options" class="monitor-grid" hidden><label>Максимальний інтервал, годин<input id="adaptive-max-hours" type="number" min="1" max="720" value="168" disabled></label><label>Послідовних помилок для сповіщення<input id="adaptive-failures" type="number" min="1" max="10" value="2" disabled></label></div>
+        <fieldset class="crawl-mode"><legend>Цілі</legend><label><input type="radio" name="schedule-mode" value="list" checked> Список URL</label><label><input id="schedule-site-mode" type="radio" name="schedule-mode" value="site"> Обхід сайту</label></fieldset>
         <div id="schedule-list"><label for="schedule-urls">URL сторінок</label><textarea id="schedule-urls" rows="5" spellcheck="false" placeholder="https://example.com/&#10;https://example.com/about" required></textarea></div>
         <div id="schedule-site" hidden><label for="schedule-root">Стартовий URL</label><input id="schedule-root" type="url" maxlength="2048" placeholder="https://example.com/" disabled><div class="monitor-grid"><label>Ліміт сторінок<input id="schedule-pages" type="number" min="1" max="1000" value="100" disabled></label><label>Глибина<input id="schedule-depth" type="number" min="0" max="10" value="5" disabled></label></div><label class="checkbox-label"><input id="schedule-sitemaps" type="checkbox" checked disabled> Використовувати sitemap</label></div>
         <label class="checkbox-label"><input id="schedule-render" type="checkbox" disabled> JavaScript і лабораторні LCP/CLS</label>

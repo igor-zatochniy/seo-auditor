@@ -27,7 +27,21 @@ func (s *webServer) compareScheduledRun(ctx context.Context) (bool, error) {
 	}
 	comparison := "interrupted"
 	var baseline *string
-	if status == auditRunStatusCompleted || status == auditRunStatusCompletedWithErrors {
+	var adaptive bool
+	if err = tx.QueryRow(ctx, `SELECT COALESCE((source->>'adaptive')::BOOLEAN,FALSE) FROM audit_schedules WHERE id=$1`, scheduleID).Scan(&adaptive); err != nil {
+		return false, err
+	}
+	if adaptive {
+		comparison, err = s.compareAdaptiveRun(ctx, tx, runID, scheduleID, status)
+		if err != nil {
+			return false, err
+		}
+		if comparison == "interrupted" {
+			if _, err = tx.Exec(ctx, `INSERT INTO audit_change_events(run_id,target_id,safe_url,kind,severity,after_value) VALUES($1,0,'','audit_interrupted','critical',$2) ON CONFLICT DO NOTHING`, runID, status); err != nil {
+				return false, err
+			}
+		}
+	} else if status == auditRunStatusCompleted || status == auditRunStatusCompletedWithErrors {
 		comparison = "baseline"
 		var previous string
 		err = tx.QueryRow(ctx, `SELECT p.run_id::TEXT FROM audit_schedule_runs p

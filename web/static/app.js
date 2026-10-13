@@ -7,6 +7,7 @@
   const runID = location.pathname.match(/^\/audits\/([a-f0-9-]{36})$/i)?.[1];
   defaults.push("html_raw_bytes", "googlebot_2mb_status");
   filters.googlebot_size_risk = "Googlebot: HTML ≥2 MiB";
+	filters.jsonld_issues = "JSON-LD: застереження";
 	defaults.push("rendering_status");
 	filters.rendering_issues="JavaScript: неповна перевірка";
 	filters.javascript_changes="Зміни після JavaScript";
@@ -122,7 +123,9 @@
 	const serial=++detailRequest;
     $("detail-url").textContent=text(record.safe_url); const content=$("detail-content"); content.replaceChildren();
     let group="",list;
-    for(const field of fields) { if(field.key==="rendering"||field.key==="rendering_status"||field.key==="geo_signals")continue; if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : document.createTextNode(text(record[field.key]))); list.append(el("dt",field.label),value); }
+    for(const field of fields) { if(field.key==="rendering"||field.key==="rendering_status"||field.key==="geo_signals"||field.key==="structured_data")continue; if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : document.createTextNode(text(record[field.key]))); list.append(el("dt",field.label),value); }
+	content.append(window.seoStructuredData.details(record.structured_data));
+	const recrawl=el("button","Перевірити сторінку повторно");recrawl.type="button";recrawl.onclick=async()=>{recrawl.disabled=true;try{const body={};if(record.safe_url?.includes("?")){const original=window.prompt("Оригінальний URL сторінки","");if(!original)return;body.url=original;}const run=await api(`/api/audits/${runID}/results/${record.target_id}/recrawl`,body);location.assign("/audits/"+run.id);}catch(error){notice(error.message);}finally{recrawl.disabled=false;}};content.append(recrawl);
 	content.append(window.seoDiagnostics.details(record.geo_signals));
 	const rendering=window.seoRendering.details(record);content.prepend(rendering);
     $("details-dialog").showModal();
