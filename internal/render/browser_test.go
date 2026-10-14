@@ -51,6 +51,25 @@ func TestBrowserUsesCapturedHTMLAndBroker(t *testing.T) {
 	}
 }
 
+func TestBrowserAgenticAccessibilityTree(t *testing.T) {
+	endpoint := browserEndpoint(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	body := `<main><form><label for="email">Email</label><input id="email"><input type="text"><button aria-label="Submit">Go</button><button></button></form><form toolname="Search" tooldescription="Search the catalog"></form></main>`
+	out, err := Page(ctx, endpoint, "https://example.com/agentic", "SEO-Test", Resource{200, http.Header{"Content-Type": []string{"text/html"}}, []byte(body)}, 1<<20, func(context.Context, string) (Resource, error) {
+		return Resource{}, errors.New("unexpected resource request")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Agentic == nil || out.Agentic.Status != "completed" {
+		t.Fatalf("missing completed accessibility report: %+v", out.Agentic)
+	}
+	if out.Agentic.MainLandmarks != 1 || out.Agentic.UnnamedInteractive < 2 || out.Agentic.UnnamedFormControls < 1 || out.Agentic.DeclarativeWebMCPForms != 1 {
+		t.Fatalf("unexpected agentic diagnostics: %+v", out.Agentic)
+	}
+}
+
 func TestBrowserTimeoutAndDOMLimit(t *testing.T) {
 	endpoint := browserEndpoint(t)
 	for _, tc := range []struct {

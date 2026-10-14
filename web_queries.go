@@ -22,6 +22,7 @@ const noindexPredicate = "(COALESCE(r.meta_robots, '') || ',' || COALESCE(r.x_ro
 var resultFilters = map[string]string{
 	"jsonld_issues":        "jsonb_array_length(COALESCE(r.structured_data->'issues','[]'::JSONB)) > 0",
 	"rendering_issues":     "r.rendering->>'status' IN ('failed','partial')",
+	"main_content_js_risk": "r.rendering->'main_content_dependency'->>'status' IN ('high','warning')",
 	"javascript_changes":   "r.rendering->'delta' @> '{\"title\":true}' OR r.rendering->'delta' @> '{\"canonical\":true}' OR r.rendering->'delta' @> '{\"text\":true}' OR r.rendering->'delta' @> '{\"links\":true}' OR r.rendering->'delta' @> '{\"description\":true}' OR r.rendering->'delta' @> '{\"robots\":true}' OR r.rendering->'delta' @> '{\"h1\":true}' OR r.rendering->'delta' @> '{\"json_ld\":true}' OR r.rendering->'delta' @> '{\"hreflang\":true}'",
 	"deep_pages":           "sc.graph_ready AND n.crawl_depth > 3",
 	"orphan_candidates":    "sc.graph_ready AND n.orphan_candidate",

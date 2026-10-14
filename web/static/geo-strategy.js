@@ -4,12 +4,32 @@ window.seoStrategy = {
     const $ = id => document.getElementById(id);
 		const semanticOption=el("label",null,"checkbox-label"),semanticInput=el("input");semanticInput.type="checkbox";semanticInput.id="geo-profile-semantic";semanticOption.append(semanticInput,el("span","Багатомовні поняття та синоніми · EN / UA / RU / PL / ES / RO"));$("geo-profile-form").insertBefore(semanticOption,$("geo-profile-form").querySelector(".input-footer"));
     const safe = fn => async (...args) => { try { await fn(...args); } catch (error) { notice(error.message); } };
+    const lines = value => value.split(/\r?\n/).map(item=>item.trim()).filter(Boolean);
     const date = value => value ? new Date(value).toLocaleString("uk-UA") : "—";
     const states = {covered:"Покрито",partial:"Частково",no_target:"Без цілі",pending:"У черзі",scanning:"Сканування / аналіз",ready:"Готово",failed:"Помилка",interrupted:"SEO перервано",canceled:"Скасовано"};
     const rules = {allowed:"Дозволено правилами",blocked:"Заборонено",limited:"Обмежено",unknown:"Не перевірено",found:"Виявлено",missing:"Не виявлено",mismatch:"Не узгоджено",not_applicable:"Не застосовується",yes:"Так",no:"Не виявлено"};
     const engines = {google_ai:"Google AI",chatgpt:"ChatGPT",gemini:"Gemini",perplexity:"Perplexity",other:"Інша система"};
     const changes = {target_url:"Цільовий URL",relevance:"Релевантність",google_ai_eligibility:"Правила Google AI",chatgpt_search_eligibility:"Правила ChatGPT Search",oai_searchbot_rules:"Правила OAI-SearchBot",brand_entity:"Бренд у контенті","entity:organization":"Назва організації","entity:same_as":"Посилання sameAs організації","entity:publisher":"Видавець","entity:author":"Сутність автора","entity:product_brand":"Бренд продукту",answer_blocks:"Блоки відповіді зі збігом запиту"};
     const localLink = (path, text) => { const a = el("a", text); a.href = path; return a; };
+    let aiPolicySpecs = [];
+    try { aiPolicySpecs = await api("/api/geo/ai-policy-specs"); } catch (_) { aiPolicySpecs = []; }
+    function renderAIPolicyFields(containerID, values = {}) {
+      const container = $(containerID); container.replaceChildren();
+      for (const spec of aiPolicySpecs) {
+        const label = el("label", null, "ai-policy-field"), copy = el("span"), key = spec.token.toLowerCase();
+        copy.append(el("strong", `${spec.provider} · ${spec.token}`), el("small", `${spec.purpose_label}${!spec.has_http_user_agent ? " · керувальний product token у robots.txt, не HTTP User-Agent" : ""}`));
+        const select = el("select"); select.dataset.policyToken = key; select.setAttribute("aria-label", `Бажана політика: ${spec.token}`);
+        for (const [value, text] of [["unknown","Не задано"],["allowed","Дозволити за robots.txt"],["blocked","Заборонити за robots.txt"]]) {
+          const option = el("option",text); option.value=value; select.append(option);
+        }
+        select.value = values[key] || "unknown";
+        const docs = el("a","Документація провайдера"); docs.href=spec.documentation_url; docs.target="_blank"; docs.rel="noopener noreferrer";
+        const controls=el("span");controls.append(select,docs);label.append(copy,controls);container.append(label);
+      }
+    }
+    function selectedAIPolicy(containerID) {
+      return Object.fromEntries([...$(containerID).querySelectorAll("[data-policy-token]")].map(select=>[select.dataset.policyToken,select.value]));
+    }
     const empty = (id, text, span) => { const td = el("td", text, "muted"); td.colSpan = span; const tr = el("tr"); tr.append(td); $(id).querySelector("tbody").replaceChildren(tr); };
     const list = (node, title, values) => { node.append(el("h3", title)); const ul = el("ul"); for (const value of values) ul.append(el("li", value)); node.append(values.length ? ul : el("p", "Немає даних", "muted")); };
     const pager = (label, prev, next, page, total) => { $(label).textContent = total ? `${page * 50 + 1}–${Math.min((page + 1) * 50, total)} із ${total}` : "Немає даних"; $(prev).disabled = page === 0; $(next).disabled = (page + 1) * 50 >= total; };
@@ -111,9 +131,10 @@ window.seoStrategy = {
       for(const p of profiles) { const o = el("option",`${p.name} · ${p.domain}${p.enabled ? "" : " · призупинено"}`); o.value = p.id; $("geo-profile-select").append(o); } if(profiles.some(p=>p.id===chosen)) $("geo-profile-select").value = chosen; await loadProfile();
     }
     async function loadProfile() {
-      const id = $("geo-profile-select").value, generation = ++profileGeneration, profile = profiles.find(p=>p.id===id); $("geo-profile-toggle").disabled = !profile;
+      const id = $("geo-profile-select").value, generation = ++profileGeneration, profile = profiles.find(p=>p.id===id); $("geo-profile-toggle").disabled = !profile; $("geo-profile-entity-open").disabled = !profile;
+      $("geo-profile-ai-policy-open").disabled = !profile;
       if(!profile) { $("geo-profile-meta").textContent = "Профілів ще немає"; empty("geo-profile-history","Створіть профіль для SEO-розкладу",5); empty("geo-timeline","Немає даних",1); empty("geo-change-table","Немає даних",4); $("geo-change-run").replaceChildren(); pager("geo-timeline-label","geo-timeline-prev","geo-timeline-next",0,0); return; }
-      $("geo-profile-toggle").textContent = profile.enabled ? "Призупинити" : "Увімкнути"; $("geo-profile-meta").textContent = `${profile.schedule_name} · ${profile.query_count} запитів · ${profile.brand || "Бренд не заданий"}`;
+      $("geo-profile-toggle").textContent = profile.enabled ? "Призупинити" : "Увімкнути"; const entity=profile.brand_entity||{}; const desired=profile.desired_ai_policy||{}; const selected=Object.values(desired).filter(value=>value!=="unknown").length; $("geo-profile-meta").textContent = `${profile.schedule_name} · ${profile.query_count} запитів · ${entity.canonical_name||profile.brand||"Бренд не заданий"} · псевдонімів: ${(entity.aliases||[]).length} · задано AI-політик: ${selected}`;
       const history = await api(`/api/geo/profiles/${id}/history`); if(generation !== profileGeneration) return; const body = $("geo-profile-history").querySelector("tbody"); body.replaceChildren(); const prior = $("geo-change-run").value; $("geo-change-run").replaceChildren();
       for(const h of history) { const tr = el("tr"), report = el("td"), action = el("td",h.error || "—"); if(h.report_id) report.append(localLink("/geo/"+h.report_id,"GEO-звіт")); else report.textContent = "—";
         if(h.status === "failed") { const b = el("button","Повторити аналіз"); b.addEventListener("click",safe(async()=>{ await api(`/api/geo/profiles/${id}/retry`,{run_id:h.run_id}); await loadProfile(); })); action.append(b); }
@@ -150,15 +171,40 @@ window.seoStrategy = {
     $("geo-observed-prev").addEventListener("click",safe(async()=>{ observedPage--; await loadObserved(); })); $("geo-observed-next").addEventListener("click",safe(async()=>{ observedPage++; await loadObserved(); }));
     $("geo-profile-select").addEventListener("change",safe(async()=>{ timelinePage = 0; observedPage = 0; await loadProfile(); })); $("geo-profile-refresh").addEventListener("click",safe(()=>profileList()));
     $("geo-profile-toggle").addEventListener("click",safe(async()=>{ const p = profiles.find(p=>p.id === $("geo-profile-select").value); await api(`/api/geo/profiles/${p.id}/update`,{enabled:!p.enabled}); await profileList(p.id); }));
+    $("geo-profile-entity-open").addEventListener("click",()=>{
+      const profile=profiles.find(p=>p.id===$("geo-profile-select").value);if(!profile)return;
+      const entity=profile.brand_entity||{};$("geo-entity-name").value=entity.canonical_name||profile.brand||"";$("geo-entity-type").value=entity.entity_type||"company";
+      $("geo-entity-aliases").value=(entity.aliases||[]).join("\n");$("geo-entity-domains").value=(entity.verified_domains||[profile.domain]).join("\n");$("geo-entity-sameas").value=(entity.same_as_urls||[]).join("\n");
+      $("geo-entity-ambiguity").value=(entity.ambiguity_rules||[]).map(rule=>`${rule.alias} | ${(rule.context_terms||[]).join(", ")}`).join("\n");$("geo-profile-entity-status").textContent="";$("geo-profile-entity").showModal();
+    });
+    $("geo-profile-ai-policy-open").addEventListener("click",()=>{
+      const profile=profiles.find(p=>p.id===$("geo-profile-select").value);if(!profile)return;
+      renderAIPolicyFields("geo-profile-ai-policy-fields",profile.desired_ai_policy||{});$("geo-profile-ai-policy-status").textContent="";$("geo-profile-ai-policy").showModal();
+    });
+    $("geo-profile-ai-policy-form").addEventListener("submit",async event=>{
+      event.preventDefault();const profile=profiles.find(p=>p.id===$("geo-profile-select").value);if(!profile)return;
+      $("geo-profile-ai-policy-save").disabled=true;$("geo-profile-ai-policy-status").textContent="Збереження…";
+      try{await api(`/api/geo/profiles/${profile.id}/update`,{desired_ai_policy:selectedAIPolicy("geo-profile-ai-policy-fields")});$("geo-profile-ai-policy").close();await profileList(profile.id);}catch(error){$("geo-profile-ai-policy-status").textContent=error.message;}finally{$("geo-profile-ai-policy-save").disabled=false;}
+    });
+    $("geo-profile-entity-form").addEventListener("submit",async event=>{
+      event.preventDefault();const profile=profiles.find(p=>p.id===$("geo-profile-select").value);if(!profile)return;
+      const ambiguityRules=[];
+      for(const line of lines($("geo-entity-ambiguity").value)){const [alias,...context]=line.split("|");if(!alias||context.length!==1||!context[0].trim()){$("geo-profile-entity-status").textContent="Формат правила: псевдонім | слово, ще слово";return;}ambiguityRules.push({alias:alias.trim(),context_terms:context[0].split(",").map(s=>s.trim()).filter(Boolean)});}
+      const brand_entity={canonical_name:$("geo-entity-name").value.trim(),entity_type:$("geo-entity-type").value,aliases:lines($("geo-entity-aliases").value),verified_domains:lines($("geo-entity-domains").value),same_as_urls:lines($("geo-entity-sameas").value),ambiguity_rules:ambiguityRules};
+      $("geo-profile-entity-save").disabled=true;$("geo-profile-entity-status").textContent="Збереження…";
+      try{await api(`/api/geo/profiles/${profile.id}/update`,{brand_entity});$("geo-profile-entity").close();await profileList(profile.id);}catch(error){$("geo-profile-entity-status").textContent=error.message;}finally{$("geo-profile-entity-save").disabled=false;}
+    });
     $("geo-change-run").addEventListener("change",safe(async()=>{ observedPage = 0; await loadChanges(); await loadObserved(); })); $("geo-timeline-prev").addEventListener("click",safe(async()=>{ timelinePage--; await loadTimeline(); await loadChanges(); })); $("geo-timeline-next").addEventListener("click",safe(async()=>{ timelinePage++; await loadTimeline(); await loadChanges(); }));
     $("geo-profile-open").addEventListener("click",safe(async()=>{
       const schedules = await api("/api/schedules"); $("geo-profile-schedule").replaceChildren(); for(const s of schedules) { const option = el("option",s.name+(s.enabled ? "" : " · розклад призупинено")); option.value = s.id; $("geo-profile-schedule").append(option); }
       if(!schedules.length) throw new Error("Спочатку створіть SEO-розклад у Моніторингу");
       if(reportID) { const data = await api(`/api/geo/reports/${reportID}`); $("geo-profile-domain").value = data.report.domain; $("geo-profile-brand").value = data.report.brand; $("geo-profile-queries").value = rows.map(r=>r.result.query).join("\n");semanticInput.checked=data.report.semantic; } else { $("geo-profile-domain").value = $("domain").value; $("geo-profile-brand").value = $("brand").value; $("geo-profile-queries").value = $("queries").value;semanticInput.checked=$("semantic-matching").checked; }
-      $("geo-profile-form-status").textContent = ""; $("geo-profile-create").showModal();
+      renderAIPolicyFields("geo-profile-create-ai-policy-fields");$("geo-profile-form-status").textContent = ""; $("geo-profile-create").showModal();
     }));
     $("geo-profile-form").addEventListener("submit",async event => {
-      event.preventDefault(); const payload = {schedule_id:$("geo-profile-schedule").value,name:$("geo-profile-name").value,domain:$("geo-profile-domain").value,brand:$("geo-profile-brand").value,queries:$("geo-profile-queries").value,semantic:semanticInput.checked}, signature = JSON.stringify(payload); if(signature !== profilePayload) { profilePayload = signature; profileRequest = crypto.randomUUID(); }
+      event.preventDefault(); const payload = {schedule_id:$("geo-profile-schedule").value,name:$("geo-profile-name").value,domain:$("geo-profile-domain").value,brand:$("geo-profile-brand").value,queries:$("geo-profile-queries").value,semantic:semanticInput.checked,desired_ai_policy:selectedAIPolicy("geo-profile-create-ai-policy-fields")};
+      payload.brand_entity={canonical_name:payload.brand,entity_type:"company",verified_domains:[payload.domain],aliases:[],same_as_urls:[],ambiguity_rules:[]};
+      const signature=JSON.stringify(payload); if(signature !== profilePayload) { profilePayload = signature; profileRequest = crypto.randomUUID(); }
       $("geo-profile-submit").disabled = true; $("geo-profile-form-status").textContent = "Збереження…";
       try { const p = await api("/api/geo/profiles",{...payload,id:profileRequest}); $("geo-profile-create").close(); timelinePage = 0; await profileList(p.id); } catch(error) { $("geo-profile-form-status").textContent = error.message; } finally { $("geo-profile-submit").disabled = false; }
     });

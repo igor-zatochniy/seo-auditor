@@ -104,6 +104,9 @@ func TestWebQueryValidation(t *testing.T) {
 	if err != nil || q.After != -20 || q.Limit != 200 {
 		t.Fatalf("%+v %v", q, err)
 	}
+	if _, err := parseResultQuery(url.Values{"filter": {"main_content_js_risk"}}); err != nil {
+		t.Fatalf("main content rendering filter rejected: %v", err)
+	}
 	if _, err := decodeHistoryCursor("bad"); err == nil {
 		t.Fatal("bad cursor accepted")
 	}

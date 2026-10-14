@@ -33,13 +33,14 @@ const (
 
 // SearchControls описує лише прочитані правила, а не індекс чи фактичне цитування.
 type SearchControls struct {
-	GooglebotRules    string `json:"googlebot_rules"`
-	OAISearchBotRules string `json:"oai_searchbot_rules"`
-	GPTBotRules       string `json:"gptbot_rules,omitempty"`
-	GoogleIndexing    string `json:"google_indexing"`
-	GoogleSnippet     string `json:"google_snippet"`
-	MaxSnippet        *int   `json:"max_snippet,omitempty"`
-	DataNoSnippet     bool   `json:"data_nosnippet"`
+	GooglebotRules    string      `json:"googlebot_rules"`
+	OAISearchBotRules string      `json:"oai_searchbot_rules"`
+	GPTBotRules       string      `json:"gptbot_rules,omitempty"`
+	AIPolicies        []AIControl `json:"ai_policies,omitempty"`
+	GoogleIndexing    string      `json:"google_indexing"`
+	GoogleSnippet     string      `json:"google_snippet"`
+	MaxSnippet        *int        `json:"max_snippet,omitempty"`
+	DataNoSnippet     bool        `json:"data_nosnippet"`
 }
 
 // HTTPObservation описує вимір нашого клієнта, а не доступ із мережі AI-провайдера.

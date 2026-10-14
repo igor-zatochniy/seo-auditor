@@ -75,6 +75,73 @@ func TestRobotsTXTIsImplicitlyAllowed(t *testing.T) {
 	}
 }
 
+func TestExplainURLContextReportsWinningDirectiveAndEqualSpecificityConflict(t *testing.T) {
+	policy, err := CompilePolicy("User-agent: *\nDisallow: /private\nAllow: /private\n", "ExampleBot/1.0")
+	if err != nil {
+		t.Fatalf("CompilePolicy() error = %v", err)
+	}
+	target, _ := url.Parse("https://example.com/private/page")
+	decision, err := policy.ExplainURLContext(context.Background(), target)
+	if err != nil {
+		t.Fatalf("ExplainURLContext() error = %v", err)
+	}
+	if !decision.Allowed || !decision.Conflict || decision.Directive != "Allow: /private" || decision.ConflictDirective != "Disallow: /private" {
+		t.Fatalf("unexpected explanation: %+v", decision)
+	}
+}
+
+func TestExplainURLContextReportsImplicitAndSpecialAllow(t *testing.T) {
+	policy, err := CompilePolicy("User-agent: *\nDisallow: /\n", "ExampleBot/1.0")
+	if err != nil {
+		t.Fatalf("CompilePolicy() error = %v", err)
+	}
+	for raw, want := range map[string]string{
+		"https://example.com/open":       "Disallow: /",
+		"https://example.com/robots.txt": "implicit allow: robots.txt is always accessible",
+	} {
+		target, _ := url.Parse(raw)
+		decision, err := policy.ExplainURLContext(context.Background(), target)
+		if err != nil || decision.Directive != want {
+			t.Errorf("ExplainURLContext(%q) = %+v, %v; want directive %q", raw, decision, err, want)
+		}
+	}
+}
+
+func TestCompilePoliciesContextBoundsOptionalTokensAndHonorsProductToken(t *testing.T) {
+	content := "User-agent: Google-Extended\nDisallow: /one\nDisallow: /two\nUser-agent: *\nDisallow: /private\n"
+	policies, policyErrors, err := CompilePoliciesContext(context.Background(), content, []string{"Google-Extended", "OAI-SearchBot"}, 1, 1<<20)
+	if err != nil {
+		t.Fatalf("CompilePoliciesContext() error = %v", err)
+	}
+	if policyErrors["Google-Extended"] == nil {
+		t.Fatal("oversized selected product-token group did not become a per-token unknown")
+	}
+	if policies["Google-Extended"] != nil {
+		t.Fatal("policy with too many rules was compiled")
+	}
+	if policies["OAI-SearchBot"] == nil || policies["OAI-SearchBot"].Allows("/private") {
+		t.Fatal("a bounded product-token error prevented an unrelated wildcard policy")
+	}
+}
+
+func TestCompilePoliciesContextSharesEquivalentPoliciesAndEnforcesCombinedWeight(t *testing.T) {
+	content := "User-agent: *\nDisallow: /private\n"
+	policies, _, err := CompilePoliciesContext(context.Background(), content, []string{"Googlebot", "OAI-SearchBot"}, 10, 1<<20)
+	if err != nil {
+		t.Fatalf("CompilePoliciesContext() error = %v", err)
+	}
+	if policies["Googlebot"] != policies["OAI-SearchBot"] {
+		t.Fatal("identical selected groups were not shared")
+	}
+	policies, failures, err := CompilePoliciesContext(context.Background(), content, []string{"Googlebot", "OAI-SearchBot"}, 10, 1)
+	if err != nil {
+		t.Fatalf("bounded optional compilation should not fail the main parser: %v", err)
+	}
+	if len(policies) != 0 || len(failures) != 2 {
+		t.Fatalf("combined budget was not enforced: policies=%d failures=%v", len(policies), failures)
+	}
+}
+
 func TestRuleSpecificityCountsPercentEncodedOctets(t *testing.T) {
 	content := `
 User-agent: *
@@ -96,6 +163,38 @@ Disallow: /
 `
 	if IsPathAllowed(content, "Go-SEOParser-Bot/1.0", "/page") {
 		t.Fatal("partial product token unexpectedly matched a specific robots.txt group")
+	}
+}
+
+func TestApplebotUsesGooglebotRulesBeforeWildcard(t *testing.T) {
+	content := "User-agent: Googlebot\nDisallow: /private\nUser-agent: *\nAllow: /\n"
+	for _, compile := range []func(string, string) (*Policy, error){CompilePolicy, func(content, agent string) (*Policy, error) {
+		policies, _, err := CompilePoliciesContext(context.Background(), content, []string{agent}, 100, 1<<20)
+		return policies[agent], err
+	}} {
+		policy, err := compile(content, "Applebot")
+		if err != nil || policy == nil || policy.Allows("/private/page") {
+			t.Fatalf("Applebot must inherit Googlebot's Disallow, policy=%v error=%v", policy, err)
+		}
+		if !policy.Allows("/public") {
+			t.Fatal("Googlebot fallback unexpectedly blocked a public path")
+		}
+	}
+	if !IsPathAllowed(content, "OtherBot", "/private/page") {
+		t.Fatal("Applebot fallback changed the wildcard group for other agents")
+	}
+}
+
+func TestApplebotSpecificRulesAndWildcardRemainDistinct(t *testing.T) {
+	content := "User-agent: Applebot\nAllow: /private\nUser-agent: Googlebot\nDisallow: /private\nUser-agent: *\nDisallow: /other\n"
+	if !IsPathAllowed(content, "Applebot/0.1", "/private/page") || IsPathAllowed(content, "Googlebot/2.1", "/private/page") {
+		t.Fatal("provider-specific Applebot rules did not take precedence")
+	}
+	if !IsPathAllowed("User-agent: *\nAllow: /private\n", "Applebot", "/private/page") {
+		t.Fatal("Applebot did not fall back to wildcard without provider rules")
+	}
+	if !IsPathAllowed("User-agent: Applebot-Extended\nDisallow: /private\nUser-agent: *\nAllow: /\n", "Applebot", "/private/page") {
+		t.Fatal("Applebot-Extended policy must not apply to Applebot crawler")
 	}
 }
 

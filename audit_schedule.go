@@ -249,9 +249,12 @@ func (m *AuditManager) startScheduled(ctx context.Context, scheduleID string) (s
 	if err != nil {
 		return "", err
 	}
+	if err = captureAuditRules(ctx, tx, cfg, cfg.RunID, id, true); err != nil {
+		return "", err
+	}
 	if !source.Adaptive {
-		if _, err = tx.Exec(ctx, `INSERT INTO geo_profile_runs(profile_id,run_id,report_id,scheduled_at)
-		SELECT id,$2,gen_random_uuid(),$3 FROM geo_profiles WHERE schedule_id=$1 AND enabled
+		if _, err = tx.Exec(ctx, `INSERT INTO geo_profile_runs(profile_id,run_id,report_id,scheduled_at,desired_ai_policy)
+		SELECT id,$2,gen_random_uuid(),$3,desired_ai_policy FROM geo_profiles WHERE schedule_id=$1 AND enabled
 		ON CONFLICT(profile_id,run_id) DO NOTHING`, id, cfg.RunID, now); err != nil {
 			return "", err
 		}
@@ -326,6 +329,20 @@ func (s *webServer) runScheduler(ctx context.Context) {
 			if err != nil {
 				if ctx.Err() == nil {
 					slog.Warn("Не вдалося обробити GEO-job", "error", sanitizeError(err))
+				}
+				break
+			}
+			if !done {
+				break
+			}
+		}
+		for range 10 {
+			workCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+			done, err := s.processAuditRules(workCtx)
+			stop()
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("Не вдалося перевірити власні правила", "error", sanitizeError(err))
 				}
 				break
 			}

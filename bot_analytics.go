@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/igor-zatochniy/seo-auditor/internal/botanalytics"
+	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/jackc/pgx/v5"
 )
@@ -30,6 +31,7 @@ func (s *webServer) registerBotAnalytics(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/bots/imports", s.importBotLogs)
 	mux.HandleFunc("GET /api/bots/imports", s.listBotImports)
 	mux.HandleFunc("GET /api/bots/imports/{id}", s.botImportReport)
+	mux.HandleFunc("POST /api/bots/fetch-diagnostics", s.aiFetchDiagnostics)
 }
 
 func (s *webServer) loadBotNetworks(ctx context.Context) (map[string]botanalytics.Ranges, error) {
@@ -190,6 +192,18 @@ func (s *webServer) importBotLogs(w http.ResponseWriter, r *http.Request) {
 			writeWebError(w, 409, "import_conflict", "Цей ID уже використано для іншого журналу")
 			return
 		}
+		if _, err = tx.Exec(r.Context(), `UPDATE audit_bot_imports SET key_check=$2 WHERE id=$1 AND key_check IS NULL`, existing, fingerprintURL(s.cfg.TargetFingerprintKey, "bot-import:"+existing)); err != nil {
+			webDBError(w, err)
+			return
+		}
+		if err = updateBotCoverageMetadata(r.Context(), tx, s.cfg, existing, records); err != nil {
+			webDBError(w, err)
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			webDBError(w, err)
+			return
+		}
 		writeWebJSON(w, 200, map[string]any{"id": existing, "stats": stats, "reused": true})
 		return
 	}
@@ -210,14 +224,22 @@ func (s *webServer) importBotLogs(w http.ResponseWriter, r *http.Request) {
 	for id, n := range networks {
 		evidence[id] = n.FetchedAt
 	}
-	if _, err = tx.Exec(r.Context(), `INSERT INTO audit_bot_imports(id,domain,digest,fingerprint_key_id,format,stats,range_evidence) VALUES($1,$2,$3,$4,$5,$6,$7)`, input.ID, domain, digest, keyID, input.Format, stats, evidence); err != nil {
+	if _, err = tx.Exec(r.Context(), `INSERT INTO audit_bot_imports(id,domain,digest,fingerprint_key_id,format,stats,range_evidence,key_check) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, input.ID, domain, digest, keyID, input.Format, stats, evidence, fingerprintURL(s.cfg.TargetFingerprintKey, "bot-import:"+input.ID)); err != nil {
 		webDBError(w, err)
 		return
 	}
-	_, err = tx.CopyFrom(r.Context(), pgx.Identifier{"audit_bot_events"}, []string{"import_id", "ordinal", "safe_url", "target_fingerprint", "bot", "verification", "http_status", "observed_at"}, pgx.CopyFromSlice(len(records), func(i int) ([]any, error) {
+	_, err = tx.CopyFrom(r.Context(), pgx.Identifier{"audit_bot_events"}, []string{"import_id", "ordinal", "safe_url", "target_fingerprint", "bot", "verification", "http_status", "observed_at", "url_shape", "coverage_fingerprint"}, pgx.CopyFromSlice(len(records), func(i int) ([]any, error) {
 		record := records[i]
 		safe, _, _ := limitStorageString(redactURL(record.URL), 2048)
-		return []any{input.ID, i + 1, safe, fingerprintURL(s.cfg.TargetFingerprintKey, record.URL), record.Bot, record.Verification, record.Status, record.At}, nil
+		normalized, _, e := normalizeSiteURL(record.URL, false)
+		var shape *crawler.URLShape
+		var coverageFP []byte
+		if e == nil {
+			value := crawler.DescribeURL(normalized)
+			shape = &value
+			coverageFP = fingerprintURL(s.cfg.TargetFingerprintKey, normalized)
+		}
+		return []any{input.ID, i + 1, safe, fingerprintURL(s.cfg.TargetFingerprintKey, record.URL), record.Bot, record.Verification, record.Status, record.At, shape, coverageFP}, nil
 	}))
 	if err != nil {
 		webDBError(w, err)

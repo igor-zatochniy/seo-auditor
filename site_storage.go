@@ -68,12 +68,25 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 	var depths []int32
 	var sitemapFlags []bool
 	limited := false
+	var inventory []inventoryRecord
 	for _, candidate := range candidates {
 		normalized, origin, err := normalizeSiteURL(candidate.url, cfg.AllowPrivateTargets)
 		if err != nil || origin != site.Origin {
 			continue
 		}
 		fp := fingerprintURL(cfg.TargetFingerprintKey, normalized)
+		source := int32(1)
+		if candidate.sitemap {
+			source = 2
+		}
+		reason := int32(0)
+		if candidate.depth%sitemapFrontierBase > site.MaxDepth {
+			reason |= 1
+		}
+		if total >= site.MaxPages {
+			reason |= 2
+		}
+		inventory = append(inventory, inventoryURL(cfg, normalized, source, reason))
 		if n, ok := nodes[string(fp)]; ok {
 			depth := min(n.depth, candidate.depth)
 			inSitemap := n.sitemap || candidate.sitemap
@@ -95,6 +108,9 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 		nodes[string(fp)] = node{id: maxID, depth: candidate.depth, sitemap: candidate.sitemap}
 		targets = append(targets, []any{cfg.RunID, maxID, normalized})
 		identities = append(identities, []any{cfg.RunID, maxID, fp, redactURL(normalized), candidate.depth, candidate.sitemap})
+	}
+	if err := storeInventory(ctx, tx, cfg.RunID, inventory); err != nil {
+		return err
 	}
 	if len(targets) > 0 {
 		if _, err = tx.CopyFrom(ctx, pgx.Identifier{"audit_run_targets"}, []string{"run_id", "target_id", "request_url"}, pgx.CopyFromRows(targets)); err != nil {
@@ -144,6 +160,7 @@ func persistSiteDiscovery(ctx context.Context, tx pgx.Tx, cfg Config, site *site
 	}
 	var edges [][]any
 	var candidates []siteCandidate
+	var nofollowInventory []inventoryRecord
 	for i, link := range links {
 		normalized, origin, err := normalizeSiteURL(link.URL, cfg.AllowPrivateTargets)
 		if err != nil {
@@ -159,9 +176,14 @@ func persistSiteDiscovery(ctx context.Context, tx pgx.Tx, cfg Config, site *site
 		if internal && !link.Nofollow {
 			// Redirect hops also consume the discovery budget, bounding redirect loops.
 			candidates = append(candidates, siteCandidate{url: normalized, depth: depth + 1})
+		} else if internal {
+			nofollowInventory = append(nofollowInventory, inventoryURL(cfg, normalized, 1, 4))
 		}
 	}
 	if err := addSiteTargets(ctx, tx, cfg, site, candidates); err != nil {
+		return err
+	}
+	if err := storeInventory(ctx, tx, cfg.RunID, nofollowInventory); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM audit_site_edges WHERE run_id=$1 AND from_target_id=$2`, cfg.RunID, res.Target.TargetID); err != nil {

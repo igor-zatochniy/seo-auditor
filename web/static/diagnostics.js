@@ -5,6 +5,8 @@ window.seoDiagnostics = (() => {
  const ratings={good:"Добре",needs_improvement:"Потребує покращення",poor:"Погано",unknown:"Не виміряно"};
  const states={completed:"Виміряно",partial:"Неповний вимір",failed:"Помилка вимірювання"};
  const eligibilityStates={allowed:"Заборони не виявлено",blocked:"Виявлено технічні обмеження",limited:"Фрагменти обмежено",unknown:"Недостатньо перевірених даних"};
+ const aiPurpose={"Googlebot":"Пошук Google та AI-функції пошуку","Google-Extended":"Використання в окремих Google AI-продуктах","OAI-SearchBot":"Пошук ChatGPT","GPTBot":"Навчання моделей OpenAI","Claude-SearchBot":"Пошук у Claude","ClaudeBot":"Покращення моделей Anthropic","PerplexityBot":"Пошукове індексування Perplexity","Applebot":"Spotlight, Siri та пошук Apple","Applebot-Extended":"Навчання моделей Apple"};
+ const confidence={robots_parsed:"robots.txt прочитано",robots_unavailable:"robots.txt недоступний · не підтверджує мережевий доступ",unknown:"Недостатньо даних"};
  function eligibility(parent,value){
   const grid=el("div",null,"eligibility-grid");
   for(const [key,title]of [["google_ai","Google AI · технічні передумови"],["chatgpt_search","ChatGPT Search · технічні передумови"]]){
@@ -20,6 +22,25 @@ window.seoDiagnostics = (() => {
   if(includeEligibility)eligibility(section,s?.eligibility);
   const r=s?.search;
   facts(section,[["Googlebot · robots.txt",rules[r?.googlebot_rules]||rules.unknown],["OAI-SearchBot · пошук ChatGPT",rules[r?.oai_searchbot_rules]||rules.unknown],["GPTBot · навчання",rules[r?.gptbot_rules]||rules.unknown],["Google · індексація за директивами",rules[r?.google_indexing]||rules.unknown],["Google · snippet за директивами",rules[r?.google_snippet]||rules.unknown],["HTTP нашого клієнта",s?.http?.status??"Не перевірено"]]);
+  section.append(el("h4","Повна матриця robots.txt для AI-ботів"));
+  if(!r?.ai_policies?.length)section.append(el("p","Матриця не збережена в цьому аудиті. Запустіть новий SEO-аудит."));
+  else {
+   const wrap=el("div",null,"table-wrap"),table=el("table"),head=el("thead"),header=el("tr");
+   for(const title of ["Провайдер / токен","Призначення","Правило для URL","Директива","Джерело / час"])header.append(el("th",title));head.append(header);table.append(head);
+   const body=el("tbody");
+   for(const item of r.ai_policies){const row=el("tr"),status=el("td",rules[item.status]||rules.unknown);status.className="ai-policy-state ai-policy-"+(item.status||"unknown");
+    const token=el("td",`${item.provider||""} · ${item.token||""}${["Google-Extended","Applebot-Extended"].includes(item.token)?" · керувальний токен, не HTTP User-Agent":""}`);
+    const evidenceParts=[confidence[item.confidence]||confidence.unknown];
+    if(item.robots_http_status)evidenceParts.push(`HTTP ${item.robots_http_status}`);
+    if(item.checked_at)evidenceParts.push(new Date(item.checked_at).toLocaleString("uk-UA"));
+    if(item.robots_url)evidenceParts.push(item.robots_url);
+    const provenance=el("td",evidenceParts.join(" · "));
+    if(item.explanation)provenance.append(el("small",item.explanation));
+    const directive=el("td",item.directive||"—");if(item.conflict_directive)directive.append(el("small",`Також збіглося: ${item.conflict_directive}`));
+    row.append(token,el("td",aiPurpose[item.token]||item.purpose||"Не визначено"),status,directive,provenance);body.append(row);
+   }
+   table.append(body);wrap.append(table);section.append(wrap);
+  }
   section.append(el("p","Google AI потребує індексації та дозволеного snippet, але фактична індексація не перевіряється. Правила Google щодо snippet не переносяться на ChatGPT. Правила й HTTP нашого клієнта не підтверджують доступ із IP AI-ботів, відсутність WAF або цитування. Заборона GPTBot не є забороною ChatGPT Search.","metric-note"));
   section.append(el("h3","Швидкість і стабільність"));
   const http=s?.http,p=s?.performance;

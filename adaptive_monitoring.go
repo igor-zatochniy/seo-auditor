@@ -12,6 +12,7 @@ import (
 
 	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"github.com/igor-zatochniy/seo-auditor/internal/seo"
+	"github.com/igor-zatochniy/seo-auditor/internal/structureddata"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -73,12 +74,15 @@ func loadConditionalBaseline(ctx context.Context, pool *pgxpool.Pool, cfg Config
 	}
 	var b conditionalBaseline
 	var raw []byte
-	err := pool.QueryRow(ctx, `SELECT b.run_id::TEXT,h.etag,h.last_modified,h.data
+	var productPriceRequired, canonicalSelfRequired bool
+	err := pool.QueryRow(ctx, `SELECT b.run_id::TEXT,h.etag,h.last_modified,h.data,
+ EXISTS(SELECT 1 FROM audit_rule_runs j WHERE j.run_id=$1 AND j.rules @> '[{"kind":"product_price"}]'::JSONB),
+ EXISTS(SELECT 1 FROM audit_rule_runs j WHERE j.run_id=$1 AND j.rules @> '[{"kind":"self_canonical"}]'::JSONB)
 	 FROM audit_adaptive_run_targets a JOIN audit_adaptive_targets t USING(schedule_id,source_index)
 	 JOIN audit_results b ON b.run_id=a.baseline_run_id AND b.target_id=a.baseline_target_id
 	 JOIN audit_http_snapshots h ON h.run_id=b.run_id AND h.target_id=b.target_id
 	 WHERE a.run_id=$1 AND a.target_id=$2 AND b.target_fingerprint=$3 AND b.fingerprint_key_id=$4
-	 AND b.scan_status='completed' AND b.status_code=200 AND t.stable_checks<16 AND t.stable_checks%5<>4`, cfg.RunID, target.TargetID, target.Fingerprint, keyID).Scan(&b.RunID, &b.ETag, &b.LastModified, &raw)
+	 AND b.scan_status='completed' AND b.status_code=200 AND t.stable_checks<16 AND t.stable_checks%5<>4`, cfg.RunID, target.TargetID, target.Fingerprint, keyID).Scan(&b.RunID, &b.ETag, &b.LastModified, &raw, &productPriceRequired, &canonicalSelfRequired)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -87,6 +91,16 @@ func loadConditionalBaseline(ctx context.Context, pool *pgxpool.Pool, cfg Config
 	}
 	if len(raw) > 128<<10 || json.Unmarshal(raw, &b.Data) != nil || b.Data.SERPWidthModel != seo.SERPWidthModel || !b.Data.HTMLSizeComplete || b.Data.URLSignals == nil || b.Data.URLSignals.Version != crawler.URLSignalsVersion {
 		return nil, nil
+	}
+	if productPriceRequired && (b.Data.StructuredData == nil || b.Data.StructuredData.Version != structureddata.Version || b.Data.StructuredData.Products == nil) {
+		return nil, nil
+	}
+	if canonicalSelfRequired {
+		for _, ref := range b.Data.URLSignals.HTTP {
+			if ref.Self == nil && ref.Valid && !ref.Truncated {
+				return nil, nil
+			}
+		}
 	}
 	b.ETag, err = openValidator(cfg.TargetFingerprintKey, b.ETag)
 	if err != nil {

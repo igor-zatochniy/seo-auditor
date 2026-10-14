@@ -11,11 +11,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/accessibility"
 	"github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
@@ -39,6 +43,7 @@ type FetchResource func(context.Context, string) (Resource, error)
 type Output struct {
 	Resources          []ResourceIssue
 	ResourcesTruncated bool
+	Agentic            *AgenticReport
 	HTML               string
 	Browser            string
 	Requests           int
@@ -214,10 +219,11 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 		return out, err
 	}
 	var snapshot struct {
-		HTML      string `json:"html"`
-		Oversized bool   `json:"oversized"`
-		Shadow    bool   `json:"shadow"`
-		URL       string `json:"url"`
+		HTML        string `json:"html"`
+		Oversized   bool   `json:"oversized"`
+		Shadow      bool   `json:"shadow"`
+		URL         string `json:"url"`
+		WebMCPForms int    `json:"webmcp_forms"`
 	}
 	// Ліміт перевіряється до передачі DOM через CDP; обхід вузлів також обмежений.
 	expression := fmt.Sprintf(`(() => {
@@ -231,7 +237,8 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
  }
  const html=document.documentElement.outerHTML;
  if(new TextEncoder().encode(html).length>%d)return {oversized:true};
- return {html,shadow,url:location.href};
+ const webmcpForms=document.querySelectorAll('form[toolname][tooldescription]').length;
+ return {html,shadow,url:location.href,webmcp_forms:webmcpForms};
 })()`, maxDOMBytes, maxDOMBytes)
 	err = chromedp.Run(tab, chromedp.ActionFunc(func(ctx context.Context) error {
 		frame, err := page.GetFrameTree().Do(ctx)
@@ -259,9 +266,48 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 	if snapshot.Shadow {
 		out.Warnings = append(out.Warnings, "Shadow DOM не входить до серіалізованого light DOM.")
 	}
+	err = chromedp.Run(tab, chromedp.ActionFunc(func(ctx context.Context) error {
+		report, inspectErr := inspectAgenticReadiness(ctx, snapshot.WebMCPForms)
+		out.Agentic = report
+		return inspectErr
+	}))
+	if err != nil {
+		out.Agentic = unknownAgenticReport(snapshot.WebMCPForms)
+	}
 	out.HTML = snapshot.HTML
 	_ = chromedp.Run(tab, page.StopLoading())
 	return out, nil
+}
+
+const maxAgenticAXNodes = 100000
+const maxAgenticFindings = 40
+
+func inspectAgenticReadiness(ctx context.Context, webmcpForms int) (*AgenticReport, error) {
+	if err := accessibility.Enable().Do(ctx); err != nil {
+		return nil, err
+	}
+	var tree agenticAXTree
+	if err := cdp.Execute(ctx, accessibility.CommandGetFullAXTree, accessibility.GetFullAXTree(), &tree); err != nil {
+		return nil, err
+	}
+	nodes := tree.Nodes
+	if len(nodes) > maxAgenticAXNodes {
+		return summarizeAXNodes(nodes[:maxAgenticAXNodes], true, webmcpForms, nil), nil
+	}
+	return summarizeAXNodes(nodes, false, webmcpForms, func(id cdp.BackendNodeID) string {
+		if id == 0 {
+			return "елемент"
+		}
+		node, describeErr := dom.DescribeNode().WithBackendNodeID(id).Do(ctx)
+		if describeErr != nil || node == nil {
+			return "елемент"
+		}
+		label := node.LocalName
+		if label == "" {
+			return "елемент"
+		}
+		return label + " (DOM " + strconv.FormatInt(int64(id), 10) + ")"
+	}), nil
 }
 
 func allowedResourceType(kind network.ResourceType) bool {

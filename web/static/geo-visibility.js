@@ -2,26 +2,27 @@
 window.seoVisibility = (() => {
   async function init({api,el,reportID,rows,notice}) {
     const $=id=>document.getElementById(id),base=`/api/geo/reports/${reportID}/visibility/imports`;
-    const sources={gsc_web:"GSC · Web (не AI-видимість)",gsc_ai:"GSC · generative AI",ai_observed:"Імпортовані AI-спостереження"};
+    const sources={gsc_web:"GSC · Web (не AI-видимість)",gsc_ai:"GSC · generative AI",ga4:"GA4 · джерела сеансів",ai_observed:"Імпортовані AI-спостереження"};
     const engines={google_ai:"Google AI",chatgpt:"ChatGPT",gemini:"Gemini",perplexity:"Perplexity",other:"Інша система"};
     const scopes={query:"Лише запит",url:"Лише URL",query_url:"Запит + URL"};
+    const matches={exact:"Точний",canonical_match:"Canonical",ambiguous:"Неоднозначний",unmatched:"Не зіставлено",not_applicable:"Не застосовується",unknown:"Не перевірено"};
     const levels={strong:"Сильні сигнали",medium:"Часткові сигнали",weak:"Слабкі сигнали",unknown:"Недостатньо даних"};
     const number=v=>v==null?"Немає даних":new Intl.NumberFormat("uk-UA").format(v);
     let cursors=[0],page=0,next=0,generation=0,requestID,lastPayload;
     const safe=fn=>async()=>{try{notice("");await fn();}catch(error){notice(error.message);}};
-    function clear(){const body=$("visibility-table").querySelector("tbody");body.replaceChildren();const tr=el("tr"),td=el("td","Спостережень ще немає","empty");td.colSpan=7;tr.append(td);body.append(tr);$("visibility-meta").textContent="";$("visibility-scope").textContent="";$("visibility-page-label").textContent="";$("visibility-prev").disabled=true;$("visibility-next").disabled=true;$("visibility-delete").disabled=true;}
+    function clear(){const body=$("visibility-table").querySelector("tbody");body.replaceChildren();const tr=el("tr"),td=el("td","Спостережень ще немає","empty");td.colSpan=11;tr.append(td);body.append(tr);$("visibility-meta").textContent="";$("visibility-scope").textContent="";$("visibility-page-label").textContent="";$("visibility-prev").disabled=true;$("visibility-next").disabled=true;$("visibility-delete").disabled=true;}
     async function load(){
       const id=$("visibility-import-select").value,serial=++generation;
       if(!id){clear();return;}
       const data=await api(`${base}/${id}?after=${cursors[page]}`);if(serial!==generation)return;
       const item=data.import,body=$("visibility-table").querySelector("tbody");body.replaceChildren();next=data.next;
       $("visibility-meta").textContent=`${sources[item.source]}${item.source==="ai_observed"?" · "+engines[item.engine]:""} · ${item.period_start} — ${item.period_end} · Країна: ${item.country||"усі"} · Пристрій: ${{all:"усі",desktop:"комп'ютер",mobile:"мобільний",tablet:"планшет"}[item.device]} · Рядків: ${item.row_count}`;
-      $("visibility-scope").textContent=item.source==="gsc_web"?"Це загальний пошук Web, а не окрема AI-видимість. Дані лише запиту не визначають URL; дані лише URL не визначають запит.":item.source==="gsc_ai"?"Спостережені покази generative AI на рівні URL. Запит і AI-кліки з цього експорту не виводяться.":"Зовнішні дані, завантажені користувачем, не підтверджені Auditor через API. Область виміру визначена джерелом, періодом і фільтрами імпорту.";
+      $("visibility-scope").textContent=item.source==="gsc_web"?"Це загальний пошук Web, а не окрема AI-видимість. CTR і позиція зберігаються лише якщо є в CSV.":item.source==="gsc_ai"?"Спостережені покази generative AI на рівні URL. Запит, CTR, позиція та AI-кліки з цього експорту не виводяться.":item.source==="ga4"?"GA4 Landing page зіставляється з URL аудиту. Сеанси з відомих AI-доменів позначаються окремо, але не доводять цитування.":"Зовнішні дані, завантажені користувачем, не підтверджені Auditor через API. Область виміру визначена джерелом, періодом і фільтрами імпорту.";
       for(const record of data.rows){
         const linked=rows.find(row=>row.ordinal===record.report_ordinal),r=linked?.result,tr=el("tr");
-        const query=el("td",record.query||"Запит не відомий");query.append(el("small",scopes[record.scope],"muted"));
+        const query=el("td",record.query||record.session_source||"Запит не відомий");query.append(el("small",scopes[record.scope]||"Рівень не визначений","muted"));
         const citation=linked?.citations?.filter(c=>c.citation==="yes")||[];
-        tr.append(query,el("td",record.url||"URL не відомий"),el("td",r?.matching?r.matching.relevance+" / 100":"Не зіставлено"),el("td",r?levels[r.level]:"Не зіставлено"),el("td",number(record.impressions)),el("td",number(record.clicks)),el("td",citation.length?citation.map(c=>engines[c.engine]).join(", "):linked?.citations?.length?"Не виявлено / не перевірено":"Не перевірено"));
+        tr.append(query,el("td",record.url||"URL не відомий"),el("td",matches[record.url_match]||"Не зіставлено"),el("td",r?.matching?r.matching.relevance+" / 100":"Не зіставлено"),el("td",r?levels[r.level]:"Не зіставлено"),el("td",number(record.impressions)),el("td",number(record.clicks)),el("td",record.ctr==null?"Немає даних":new Intl.NumberFormat("uk-UA",{style:"percent",maximumFractionDigits:2}).format(record.ctr)),el("td",number(record.position)),el("td",record.sessions==null?"Немає даних":`${number(record.sessions)}${record.ai_referral?" · AI-джерело":""}`),el("td",citation.length?citation.map(c=>engines[c.engine]).join(", "):linked?.citations?.length?"Не виявлено / не перевірено":"Не перевірено"));
         body.append(tr);
       }
       $("visibility-page-label").textContent=`Сторінка ${page+1} · Один набір даних, без сумування імпортів`;
@@ -33,7 +34,7 @@ window.seoVisibility = (() => {
       if(selected&&items.some(i=>i.id===selected))select.value=selected;
       cursors=[0];page=0;await load();
     }
-    function sourceChanged(){const source=$("visibility-source").value;$("visibility-engine").disabled=source!=="ai_observed";$("visibility-import-help").textContent=source==="gsc_web"?"Звичайний експорт GSC Web не підтверджує окрему AI-видимість.":source==="gsc_ai"?"Експорт generative AI: Page/URL та Impressions. Query і Clicks залиште порожніми; не додавайте їх зі звичайного Web-звіту.":"Оберіть реальну AI-систему й імпортуйте тільки виміряні дані. Відсутні покази чи кліки залиште порожніми.";}
+    function sourceChanged(){const source=$("visibility-source").value;$("visibility-engine").disabled=source!=="ai_observed";$("visibility-import-help").textContent=source==="gsc_web"?"Звичайний експорт GSC Web: Query або Page, Impressions, Clicks, CTR і Position. CTR може бути у форматі 0,12 або 12%.":source==="gsc_ai"?"Експорт generative AI: Page та Impressions. Query, Clicks, CTR і Position залиште порожніми; не додавайте їх зі звичайного Web-звіту.":source==="ga4"?"GA4: Landing page (можна шлях, наприклад /pricing?ref=x), Session source і Sessions. Всі джерела імпортуються; відомі AI-домени позначаються окремо.":"Оберіть AI-систему й імпортуйте лише явно спостережені покази/кліки; пропущені дані залишайте порожніми.";}
     $("visibility-source").onchange=sourceChanged;sourceChanged();
     $("visibility-import-open").onclick=()=>{$("visibility-import-status").textContent="";$("visibility-import-dialog").showModal();};
     $("visibility-import-select").onchange=safe(async()=>{cursors=[0];page=0;await load();});

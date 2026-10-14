@@ -26,7 +26,7 @@ func extensionAPI(t *testing.T, s *webServer, method, path string, body any) *ht
 	}
 	r := httptest.NewRequest(method, "http://localhost"+path, bytes.NewReader(raw))
 	r.Header.Set("Authorization", "Bearer "+s.web.AccessToken)
-	if method == "POST" {
+	if method != http.MethodGet && method != http.MethodHead {
 		r.Header.Set("Origin", "http://localhost")
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("X-SEO-Auditor-Request", "1")

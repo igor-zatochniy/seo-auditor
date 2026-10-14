@@ -460,6 +460,7 @@ func geoRuleLabel(value string) string {
 }
 
 func (s *webServer) registerGEO(mux *http.ServeMux) {
+	s.registerAIDiscoverability(mux)
 	page := template.Must(template.ParseFS(webAssets, "web/templates/geo.html"))
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -475,6 +476,8 @@ func (s *webServer) registerGEO(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/geo/reports", s.geoHistory)
 	mux.HandleFunc("POST /api/geo/reports", s.geoSubmit)
 	mux.HandleFunc("GET /api/geo/reports/{id}", s.geoGet)
+	mux.HandleFunc("GET /api/geo/reports/{id}/citation-intelligence", s.geoCitationIntelligence)
+	mux.HandleFunc("GET /api/geo/reports/{id}/impact-analytics", s.geoImpactAnalytics)
 	mux.HandleFunc("GET /api/geo/reports/{id}/export/{format}", func(w http.ResponseWriter, r *http.Request) {
 		if r.PathValue("format") != "csv" {
 			writeWebError(w, 400, "invalid_format", "Доступний формат CSV")

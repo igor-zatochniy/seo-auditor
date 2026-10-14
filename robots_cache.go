@@ -18,6 +18,8 @@ import (
 const (
 	robotsErrorCacheTTL        = time.Minute
 	robotsAllowAllPolicyWeight = int64(256)
+	maxAIBotPolicyRules        = 4096
+	maxAIBotPolicyWeight       = int64(2 * 1024 * 1024)
 	MaxRobotsBodyBytes         = int64(robotsparser.MaxPolicyBytes)
 )
 
@@ -27,6 +29,11 @@ type robotsPolicy struct {
 	googlebot    *robotsparser.Policy
 	oaiSearchBot *robotsparser.Policy
 	gptBot       *robotsparser.Policy
+	aiPolicies   map[string]*robotsparser.Policy
+	aiErrors     map[string]string
+	robotsURL    string
+	checkedAt    time.Time
+	httpStatus   int
 	sitemaps     []string
 }
 
@@ -47,16 +54,36 @@ func (p robotsPolicy) allowsContext(ctx context.Context, target *url.URL) (bool,
 
 func (p robotsPolicy) estimatedMemoryBytes() int64 {
 	if p.allowAll {
-		return robotsAllowAllPolicyWeight
+		return robotsAllowAllPolicyWeight + int64(len(p.robotsURL)+len(p.sitemaps)*32)
 	}
-	if p.compiled == nil {
-		return 0
+	seen := map[*robotsparser.Policy]struct{}{}
+	weight := int64(0)
+	for _, compiled := range []*robotsparser.Policy{p.compiled, p.googlebot, p.oaiSearchBot, p.gptBot} {
+		if compiled == nil {
+			continue
+		}
+		if _, ok := seen[compiled]; ok {
+			continue
+		}
+		seen[compiled] = struct{}{}
+		weight += compiled.EstimatedMemoryBytes()
 	}
-	weight := p.compiled.EstimatedMemoryBytes()
-	weight += p.googlebot.EstimatedMemoryBytes() + p.oaiSearchBot.EstimatedMemoryBytes()
-	weight += p.gptBot.EstimatedMemoryBytes()
+	for _, compiled := range p.aiPolicies {
+		if compiled == nil {
+			continue
+		}
+		if _, ok := seen[compiled]; ok {
+			continue
+		}
+		seen[compiled] = struct{}{}
+		weight += compiled.EstimatedMemoryBytes()
+	}
 	for _, location := range p.sitemaps {
 		weight += int64(len(location) + 32)
+	}
+	weight += int64(len(p.robotsURL) + len(p.aiPolicies)*48 + len(p.aiErrors)*48)
+	for token, reason := range p.aiErrors {
+		weight += int64(len(token) + len(reason))
 	}
 	return weight
 }
@@ -136,7 +163,7 @@ func (c *robotsPolicyCache) isAllowedByRobots(
 }
 
 func (c *robotsPolicyCache) inspectTarget(ctx context.Context, client *http.Client, targetURL string, totalTimeout time.Duration) (bool, geo.SearchControls, error) {
-	search := geo.SearchControls{GooglebotRules: geo.Unknown, OAISearchBotRules: geo.Unknown, GPTBotRules: geo.Unknown}
+	search := geo.SearchControls{GooglebotRules: geo.Unknown, OAISearchBotRules: geo.Unknown, GPTBotRules: geo.Unknown, AIPolicies: unknownAIControls("robots.txt ще не перевірено")}
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
 		return false, search, fmt.Errorf("parse target URL for robots.txt: %w", err)
@@ -153,6 +180,21 @@ func (c *robotsPolicyCache) inspectTarget(ctx context.Context, client *http.Clie
 		return fetchRobotsPolicy(robotsCtx, client, parsed)
 	})
 	if err != nil {
+		for i := range search.AIPolicies {
+			control := &search.AIPolicies[i]
+			control.Explanation = "Перевірка robots.txt не завершилася: " + redactText(sanitizeError(err))
+			if policy.robotsURL != "" {
+				control.RobotsURL = policy.robotsURL
+			}
+			if !policy.checkedAt.IsZero() {
+				checkedAt := policy.checkedAt
+				control.CheckedAt = &checkedAt
+			}
+			if policy.httpStatus != 0 {
+				status := policy.httpStatus
+				control.HTTPStatus = &status
+			}
+		}
 		return false, search, err
 	}
 	allowed, err := policy.allowsContext(robotsCtx, parsed)
@@ -160,27 +202,83 @@ func (c *robotsPolicyCache) inspectTarget(ctx context.Context, client *http.Clie
 		return false, search, err
 	}
 	// Додаткові перевірки не змінюють рішення для власного User-Agent.
-	inspectCtx, cancel := context.WithTimeout(robotsCtx, 50*time.Millisecond)
+	inspectCtx, cancel := context.WithTimeout(robotsCtx, 250*time.Millisecond)
 	defer cancel()
-	inspect := func(compiled *robotsparser.Policy) string {
+	search.AIPolicies = make([]geo.AIControl, 0, len(geo.SupportedAIPolicySpecs))
+	for _, spec := range geo.SupportedAIPolicySpecs {
+		control := geo.AIControl{
+			Token: spec.Token, Provider: spec.Provider, Purpose: spec.Purpose,
+			Status: geo.Unknown, RobotsURL: policy.robotsURL, Confidence: "unknown",
+		}
+		if !policy.checkedAt.IsZero() {
+			checkedAt := policy.checkedAt
+			control.CheckedAt = &checkedAt
+		}
+		if policy.httpStatus != 0 {
+			status := policy.httpStatus
+			control.HTTPStatus = &status
+		}
 		if policy.allowAll {
-			return geo.Allowed
+			control.Status = geo.Allowed
+			control.Confidence = "robots_unavailable"
+			control.Directive = "implicit allow: robots.txt returned an unavailable 4xx status"
+			control.Explanation = "За RFC 9309 robots.txt із HTTP 4xx вважається недоступним; це не є підтвердженням доступу через WAF або мережу провайдера."
+			search.AIPolicies = append(search.AIPolicies, control)
+			continue
 		}
+		token := strings.ToLower(spec.Token)
+		if reason := policy.aiErrors[token]; reason != "" {
+			control.Explanation = "Правило не вдалося перевірити в межах ліміту: " + redactText(reason)
+			search.AIPolicies = append(search.AIPolicies, control)
+			continue
+		}
+		compiled := policy.aiPolicies[token]
 		if compiled == nil {
-			return geo.Unknown
+			control.Explanation = "Немає достатніх даних для окремої перевірки цього токена."
+			search.AIPolicies = append(search.AIPolicies, control)
+			continue
 		}
-		ok, err := compiled.AllowsURLContext(inspectCtx, parsed)
-		if err != nil {
-			return geo.Unknown
+		decision, decisionErr := compiled.ExplainURLContext(inspectCtx, parsed)
+		if decisionErr != nil {
+			control.Explanation = "Перевірка зупинена лімітом часу або складності."
+			search.AIPolicies = append(search.AIPolicies, control)
+			continue
 		}
-		if ok {
-			return geo.Allowed
+		control.Status = geo.Allowed
+		if !decision.Allowed {
+			control.Status = geo.Blocked
 		}
-		return geo.Blocked
+		control.Directive = safeRobotsDirective(parsed, decision.Directive)
+		control.ConflictDirective = safeRobotsDirective(parsed, decision.ConflictDirective)
+		control.Conflict = decision.Conflict
+		control.Confidence = "robots_parsed"
+		control.Explanation = "Статус відображає лише вибрану robots.txt директиву для цього URL."
+		if decision.Conflict {
+			control.Explanation = "Для URL збіглися Allow і Disallow однакової специфічності; за правилами robots перемагає Allow."
+		}
+		search.AIPolicies = append(search.AIPolicies, control)
 	}
-	search.GooglebotRules, search.OAISearchBotRules = inspect(policy.googlebot), inspect(policy.oaiSearchBot)
-	search.GPTBotRules = inspect(policy.gptBot)
+	search.GooglebotRules = aiControlStatus(search.AIPolicies, "Googlebot")
+	search.OAISearchBotRules = aiControlStatus(search.AIPolicies, "OAI-SearchBot")
+	search.GPTBotRules = aiControlStatus(search.AIPolicies, "GPTBot")
 	return allowed, search, nil
+}
+
+func unknownAIControls(reason string) []geo.AIControl {
+	controls := make([]geo.AIControl, 0, len(geo.SupportedAIPolicySpecs))
+	for _, spec := range geo.SupportedAIPolicySpecs {
+		controls = append(controls, geo.AIControl{Token: spec.Token, Provider: spec.Provider, Purpose: spec.Purpose, Status: geo.Unknown, Confidence: "unknown", Explanation: reason})
+	}
+	return controls
+}
+
+func aiControlStatus(controls []geo.AIControl, token string) string {
+	for _, control := range controls {
+		if strings.EqualFold(control.Token, token) {
+			return control.Status
+		}
+	}
+	return geo.Unknown
 }
 
 func robotsPolicyCacheKey(parsed *url.URL) (string, error) {
@@ -228,6 +326,12 @@ func (c *robotsPolicyCache) policy(
 			policyWeight = policy.estimatedMemoryBytes()
 			if policyWeight > c.maxWeight {
 				policy.googlebot, policy.oaiSearchBot, policy.gptBot = nil, nil, nil
+				policy.aiPolicies, policy.aiErrors = nil, nil
+				policyWeight = policy.estimatedMemoryBytes()
+			}
+			if policyWeight > c.maxWeight {
+				policy.robotsURL, policy.checkedAt, policy.httpStatus = "", time.Time{}, 0
+				policy.sitemaps = nil
 				policyWeight = policy.estimatedMemoryBytes()
 			}
 			if policyWeight > c.maxWeight {
@@ -236,6 +340,12 @@ func (c *robotsPolicyCache) policy(
 					policyWeight,
 					c.maxWeight,
 				)
+				policy = robotsPolicy{}
+				policyWeight = 0
+			}
+		} else {
+			policyWeight = policy.estimatedMemoryBytes()
+			if policyWeight > c.maxWeight {
 				policy = robotsPolicy{}
 				policyWeight = 0
 			}
@@ -248,7 +358,7 @@ func (c *robotsPolicyCache) policy(
 			entry.err = nil
 			entry.expiresAt = now.Add(c.ttl)
 		} else {
-			entry.policy = robotsPolicy{}
+			entry.policy = policy
 			entry.err = fetchErr
 			entry.expiresAt = now.Add(c.errorTTL)
 		}
@@ -367,9 +477,10 @@ func fetchRobotsPolicy(
 	}
 	req.Header.Set("User-Agent", UserAgentStr)
 
+	attemptedAt := time.Now().UTC()
 	resp, err := client.Do(req)
 	if err != nil {
-		return robotsPolicy{}, fmt.Errorf("fetch robots.txt from %s: %w", robotsURL, err)
+		return robotsPolicy{robotsURL: robotsURL, checkedAt: attemptedAt}, fmt.Errorf("fetch robots.txt from %s: %w", robotsURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -383,11 +494,11 @@ func fetchRobotsPolicy(
 			"status",
 			resp.StatusCode,
 		)
-		return robotsPolicy{allowAll: true}, nil
+		return robotsPolicy{allowAll: true, robotsURL: robotsURL, checkedAt: attemptedAt, httpStatus: resp.StatusCode}, nil
 	case resp.StatusCode >= http.StatusInternalServerError:
-		return robotsPolicy{}, fmt.Errorf("robots.txt is unreachable: %s returned HTTP %d", robotsURL, resp.StatusCode)
+		return robotsPolicy{robotsURL: robotsURL, checkedAt: attemptedAt, httpStatus: resp.StatusCode}, fmt.Errorf("robots.txt is unreachable: %s returned HTTP %d", robotsURL, resp.StatusCode)
 	case resp.StatusCode >= http.StatusMultipleChoices:
-		return robotsPolicy{}, fmt.Errorf(
+		return robotsPolicy{robotsURL: robotsURL, checkedAt: attemptedAt, httpStatus: resp.StatusCode}, fmt.Errorf(
 			"robots.txt redirect chain did not resolve within %d redirects: final HTTP %d at %s",
 			MaxRobotsRedirects,
 			resp.StatusCode,
@@ -399,18 +510,78 @@ func fetchRobotsPolicy(
 
 	body, err := readLimited(resp.Body, MaxRobotsBodyBytes)
 	if err != nil {
-		return robotsPolicy{}, fmt.Errorf("read robots.txt from %s: %w", robotsURL, err)
+		return robotsPolicy{robotsURL: robotsURL, checkedAt: attemptedAt, httpStatus: resp.StatusCode}, fmt.Errorf("read robots.txt from %s: %w", robotsURL, err)
 	}
 	compiled, err := robotsparser.CompilePolicyContext(ctx, string(body), UserAgentStr)
 	if err != nil {
-		return robotsPolicy{}, fmt.Errorf("compile robots.txt from %s: %w", robotsURL, err)
+		return robotsPolicy{robotsURL: robotsURL, checkedAt: attemptedAt, httpStatus: resp.StatusCode}, fmt.Errorf("compile robots.txt from %s: %w", robotsURL, err)
 	}
-	policy := robotsPolicy{compiled: compiled, sitemaps: robotsSitemapLocations(string(body))}
+	policy := robotsPolicy{
+		compiled:   compiled,
+		sitemaps:   robotsSitemapLocations(string(body)),
+		robotsURL:  robotsURL,
+		checkedAt:  attemptedAt,
+		httpStatus: resp.StatusCode,
+	}
 	// Лише додаткова GEO-діагностика: без нових HTTP-запитів та без підміни бота.
-	inspectCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	inspectCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	policy.googlebot, _ = robotsparser.CompilePolicyContext(inspectCtx, string(body), "Googlebot")
-	policy.oaiSearchBot, _ = robotsparser.CompilePolicyContext(inspectCtx, string(body), "OAI-SearchBot")
-	policy.gptBot, _ = robotsparser.CompilePolicyContext(inspectCtx, string(body), "GPTBot")
+	tokens := make([]string, 0, len(geo.SupportedAIPolicySpecs))
+	for _, spec := range geo.SupportedAIPolicySpecs {
+		tokens = append(tokens, spec.Token)
+	}
+	policies, policyErrors, compileErr := robotsparser.CompilePoliciesContext(
+		inspectCtx,
+		string(body),
+		tokens,
+		maxAIBotPolicyRules,
+		maxAIBotPolicyWeight,
+	)
+	policy.aiPolicies = make(map[string]*robotsparser.Policy, len(policies))
+	policy.aiErrors = make(map[string]string, len(policyErrors))
+	for token, compiled := range policies {
+		policy.aiPolicies[strings.ToLower(token)] = compiled
+	}
+	for token, compileErr := range policyErrors {
+		policy.aiErrors[strings.ToLower(token)] = sanitizeError(compileErr)
+	}
+	if compileErr != nil {
+		for _, token := range tokens {
+			if policy.aiPolicies[strings.ToLower(token)] == nil && policy.aiErrors[strings.ToLower(token)] == "" {
+				policy.aiErrors[strings.ToLower(token)] = sanitizeError(compileErr)
+			}
+		}
+	}
+	policy.googlebot = policy.aiPolicies[strings.ToLower("Googlebot")]
+	policy.oaiSearchBot = policy.aiPolicies[strings.ToLower("OAI-SearchBot")]
+	policy.gptBot = policy.aiPolicies[strings.ToLower("GPTBot")]
 	return policy, nil
+}
+
+func safeRobotsDirective(target *url.URL, directive string) string {
+	if directive == "" || strings.HasPrefix(directive, "implicit allow") {
+		return directive
+	}
+	name, pattern, ok := strings.Cut(directive, ": ")
+	if !ok || target == nil {
+		return directive
+	}
+	base := *target
+	base.Path, base.RawPath, base.RawQuery, base.Fragment = "", "", "", ""
+	base.User = nil
+	base.Path = "/"
+	joined := strings.TrimSuffix(base.String(), "/") + pattern
+	redacted := redactURL(joined)
+	parsed, err := url.Parse(redacted)
+	if err != nil {
+		return name + ": [redacted]"
+	}
+	path := parsed.EscapedPath()
+	if parsed.RawQuery != "" {
+		path += "?" + parsed.RawQuery
+	}
+	if len(path) > 512 {
+		path = path[:512]
+	}
+	return name + ": " + path
 }

@@ -8,9 +8,11 @@ import (
 	"github.com/igor-zatochniy/seo-auditor/internal/render"
 	"github.com/igor-zatochniy/seo-auditor/internal/structureddata"
 	"hash"
+	"math/bits"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -18,42 +20,65 @@ const comparisonItemLimit = 1000
 
 // RenderComparison не містить виконуваного HTML або оригінальних мережевих відповідей.
 type RenderComparison struct {
-	DiscoveredLinks    []DiscoveredLink       `json:"-"`
-	LinksTruncated     bool                   `json:"links_truncated,omitempty"`
-	Resources          []render.ResourceIssue `json:"resources,omitempty"`
-	ResourcesTruncated bool                   `json:"resources_truncated,omitempty"`
-	Status             string                 `json:"status"`
-	Error              string                 `json:"error,omitempty"`
-	DurationMS         int64                  `json:"duration_ms"`
-	Requests           int                    `json:"requests"`
-	Blocked            int                    `json:"blocked"`
-	Bytes              int64                  `json:"bytes"`
-	Browser            string                 `json:"browser,omitempty"`
-	Warnings           []string               `json:"warnings,omitempty"`
-	Raw                *RenderSnapshot        `json:"raw,omitempty"`
-	Rendered           *RenderSnapshot        `json:"rendered,omitempty"`
-	Delta              *RenderDelta           `json:"delta,omitempty"`
-	Performance        *performance.Result    `json:"performance,omitempty"`
+	DiscoveredLinks       []DiscoveredLink       `json:"-"`
+	LinksTruncated        bool                   `json:"links_truncated,omitempty"`
+	Resources             []render.ResourceIssue `json:"resources,omitempty"`
+	ResourcesTruncated    bool                   `json:"resources_truncated,omitempty"`
+	Status                string                 `json:"status"`
+	Error                 string                 `json:"error,omitempty"`
+	DurationMS            int64                  `json:"duration_ms"`
+	Requests              int                    `json:"requests"`
+	Blocked               int                    `json:"blocked"`
+	Bytes                 int64                  `json:"bytes"`
+	Browser               string                 `json:"browser,omitempty"`
+	Warnings              []string               `json:"warnings,omitempty"`
+	Raw                   *RenderSnapshot        `json:"raw,omitempty"`
+	Rendered              *RenderSnapshot        `json:"rendered,omitempty"`
+	Delta                 *RenderDelta           `json:"delta,omitempty"`
+	MainContentDependency *MainContentDependency `json:"main_content_dependency,omitempty"`
+	Agentic               *render.AgenticReport  `json:"agentic,omitempty"`
+	Performance           *performance.Result    `json:"performance,omitempty"`
 }
 
 type RenderSnapshot struct {
-	StructuredData *structureddata.Report `json:"structured_data,omitempty"`
-	Title          string                 `json:"title"`
-	Description    string                 `json:"description"`
-	Canonical      string                 `json:"canonical"`
-	Robots         string                 `json:"robots"`
-	XRobotsTag     string                 `json:"x_robots_tag"`
-	H1             string                 `json:"h1"`
-	H1Count        int                    `json:"h1_count"`
-	Words          int                    `json:"words"`
-	TextSample     string                 `json:"text_sample"`
-	InternalLinks  int                    `json:"internal_links"`
-	ExternalLinks  int                    `json:"external_links"`
-	JSONLDCount    int                    `json:"json_ld_count"`
-	Hreflang       []string               `json:"hreflang"`
-	Complete       bool                   `json:"complete"`
-	evidence       *comparisonEvidence
+	StructuredData      *structureddata.Report `json:"structured_data,omitempty"`
+	Title               string                 `json:"title"`
+	Description         string                 `json:"description"`
+	Canonical           string                 `json:"canonical"`
+	Robots              string                 `json:"robots"`
+	XRobotsTag          string                 `json:"x_robots_tag"`
+	H1                  string                 `json:"h1"`
+	H1Count             int                    `json:"h1_count"`
+	Words               int                    `json:"words"`
+	TextSample          string                 `json:"text_sample"`
+	InternalLinks       int                    `json:"internal_links"`
+	ExternalLinks       int                    `json:"external_links"`
+	JSONLDCount         int                    `json:"json_ld_count"`
+	Hreflang            []string               `json:"hreflang"`
+	MainContentWords    int                    `json:"main_content_words"`
+	MainContentSource   string                 `json:"main_content_source"`
+	MainContentComplete bool                   `json:"main_content_complete"`
+	Complete            bool                   `json:"complete"`
+	evidence            *comparisonEvidence
+	mainContentSHA256   string
+	mainContentSimHash  string
 }
+
+type MainContentDependency struct {
+	Status            string `json:"status"`
+	Evidence          string `json:"evidence"`
+	RawWords          int    `json:"raw_words"`
+	RenderedWords     int    `json:"rendered_words"`
+	RawSource         string `json:"raw_source,omitempty"`
+	RenderedSource    string `json:"rendered_source,omitempty"`
+	SimilarityPercent *int   `json:"similarity_percent,omitempty"`
+}
+
+const (
+	mainContentHighRawWordLimit = 40
+	mainContentSubstantialWords = 150
+	mainContentSimilarityFloor  = 55
+)
 
 type RenderDelta struct {
 	Title                bool `json:"title"`
@@ -155,6 +180,13 @@ func (p *pageParser) comparisonURL(raw []byte) *url.URL {
 func Snapshot(data Data) *RenderSnapshot {
 	e := data.comparison
 	s := &RenderSnapshot{StructuredData: data.StructuredData, Title: data.Title, Description: data.Description, Canonical: data.CanonicalURL, Robots: data.MetaRobots, XRobotsTag: data.XRobotsTag, H1: data.H1, H1Count: data.H1Count, Words: data.WordCount, InternalLinks: data.InternalLinksCount, ExternalLinks: data.ExternalLinksCount, Hreflang: []string{}, evidence: e}
+	if signature := data.ContentSignature; signature != nil {
+		s.MainContentWords = signature.Words
+		s.MainContentSource = signature.Source
+		s.MainContentComplete = signature.Complete
+		s.mainContentSHA256 = signature.SHA256
+		s.mainContentSimHash = signature.SimHash
+	}
 	if e != nil {
 		s.TextSample, _, _ = e.sample.Result()
 		s.JSONLDCount = e.jsonCount
@@ -166,6 +198,62 @@ func Snapshot(data Data) *RenderSnapshot {
 		}
 	}
 	return s
+}
+
+// AssessMainContentDependency повертає обережний сигнал ризику, а не висновок
+// про індексацію чи AI-цитування. Неповний rendering залишається unknown.
+func AssessMainContentDependency(raw, rendered *RenderSnapshot, renderingComplete bool) *MainContentDependency {
+	d := &MainContentDependency{Status: "unknown", Evidence: "Повний HTML → DOM прохід не завершено"}
+	if raw != nil {
+		d.RawWords, d.RawSource = raw.MainContentWords, raw.MainContentSource
+	}
+	if rendered != nil {
+		d.RenderedWords, d.RenderedSource = rendered.MainContentWords, rendered.MainContentSource
+	}
+	if !renderingComplete || raw == nil || rendered == nil || !raw.Complete || !rendered.Complete || !raw.MainContentComplete || !rendered.MainContentComplete {
+		return d
+	}
+	if rendered.MainContentWords < mainContentHighRawWordLimit {
+		d.Evidence = "Після рендерингу недостатньо основного тексту для оцінки залежності"
+		return d
+	}
+	if raw.MainContentWords < mainContentHighRawWordLimit && rendered.MainContentWords >= mainContentSubstantialWords {
+		d.Status = "high"
+		d.Evidence = "В HTML майже немає основного тексту, а після JavaScript з’явився значний вміст"
+		return d
+	}
+
+	similarity := mainContentSimilarity(raw, rendered)
+	d.SimilarityPercent = similarity
+	if raw.MainContentWords*2 < rendered.MainContentWords && rendered.MainContentWords >= 80 || similarity != nil && *similarity < mainContentSimilarityFloor {
+		d.Status = "warning"
+		d.Evidence = "Основний вміст помітно зростає або семантично змінюється після JavaScript"
+		return d
+	}
+	if rendered.MainContentWords < mainContentSubstantialWords {
+		d.Evidence = "Тексту недостатньо для надійної класифікації за обраними порогами"
+		return d
+	}
+	d.Status = "not_detected"
+	d.Evidence = "Суттєвої залежності основного вмісту від JavaScript за доступними ознаками не виявлено"
+	return d
+}
+
+func mainContentSimilarity(a, b *RenderSnapshot) *int {
+	if a.mainContentSHA256 != "" && a.mainContentSHA256 == b.mainContentSHA256 {
+		v := 100
+		return &v
+	}
+	if a.MainContentWords < 80 || b.MainContentWords < 80 || a.mainContentSimHash == "" || b.mainContentSimHash == "" {
+		return nil
+	}
+	x, errX := strconv.ParseUint(a.mainContentSimHash, 16, 64)
+	y, errY := strconv.ParseUint(b.mainContentSimHash, 16, 64)
+	if errX != nil || errY != nil {
+		return nil
+	}
+	v := 100 * (64 - bits.OnesCount64(x^y)) / 64
+	return &v
 }
 
 func Compare(raw, rendered *RenderSnapshot) *RenderDelta {
@@ -213,6 +301,22 @@ func (r *RenderComparison) Sanitize(text, safeURL func(string) string) {
 	}
 	if r.Performance != nil {
 		r.Performance.Error = text(r.Performance.Error)
+	}
+	if r.Agentic != nil {
+		r.Agentic.Explanation = text(r.Agentic.Explanation)
+		r.Agentic.WebMCPNote = text(r.Agentic.WebMCPNote)
+		if len(r.Agentic.Findings) > 40 {
+			r.Agentic.Findings = r.Agentic.Findings[:40]
+			r.Agentic.FindingsTruncated = true
+		}
+		for i := range r.Agentic.Findings {
+			finding := &r.Agentic.Findings[i]
+			finding.Code = text(finding.Code)
+			finding.Severity = text(finding.Severity)
+			finding.Role = text(finding.Role)
+			finding.Element = text(finding.Element)
+			finding.Message = text(finding.Message)
+		}
 	}
 	for _, s := range []*RenderSnapshot{r.Raw, r.Rendered} {
 		if s == nil {

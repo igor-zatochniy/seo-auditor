@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
+	"github.com/igor-zatochniy/seo-auditor/internal/seo"
 )
 
 func secureURLReference(ref crawler.URLReference, cfg Config, canonical ...bool) crawler.URLReference {
@@ -82,6 +83,10 @@ func secureURLSignals(data SEOData, cfg Config) *crawler.URLSignals {
 		result.Redirect = &value
 	}
 	for i := range result.HTTP {
+		if len(result.HTTP[i].Fingerprints) == 0 && !result.HTTP[i].Truncated {
+			self := seo.IsSelfCanonical(result.HTTP[i].URL, data.URL)
+			result.HTTP[i].Self = &self
+		}
 		result.HTTP[i] = secureURLReference(result.HTTP[i], cfg, true)
 	}
 	return &result

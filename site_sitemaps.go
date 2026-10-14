@@ -270,7 +270,7 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 		}
 		seen[normalized] = true
 		annotations := map[string]*international.Evidence{}
-		urls, index, cutoff, err := fetchSitemap(ctx, client, robotsClient, cache, cfg, site, normalized, site.MaxPages, annotations)
+		urls, index, cutoff, err := fetchSitemap(ctx, client, robotsClient, cache, cfg, site, normalized, max(site.MaxPages, 5000), annotations)
 		if ctx.Err() != nil {
 			if parentCtx.Err() != nil {
 				return parentCtx.Err()
@@ -298,6 +298,32 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 		}
 		if err := saveSitemapHreflang(ctx, pool, cfg, site, annotations); err != nil {
 			return err
+		}
+		// Відомі адреси зберігаються окремо, навіть якщо frontier уже заповнений.
+		for first := 0; first < len(urls); first += 100 {
+			var known []inventoryRecord
+			for _, raw := range urls[first:min(first+100, len(urls))] {
+				u, origin, err := normalizeSiteURL(raw, cfg.AllowPrivateTargets)
+				if err == nil && origin == site.Origin {
+					known = append(known, inventoryURL(cfg, u, 2, 0))
+				}
+			}
+			if err := withDBMutationRetry(ctx, cfg, "capture_sitemap_inventory", func(qctx context.Context) error {
+				tx, err := pool.Begin(qctx)
+				if err != nil {
+					return err
+				}
+				defer rollbackSiteTransaction(tx, cfg)
+				if err = lockSiteOwner(qctx, tx, cfg); err != nil {
+					return err
+				}
+				if err = storeInventory(qctx, tx, cfg.RunID, known); err != nil {
+					return err
+				}
+				return tx.Commit(qctx)
+			}); err != nil {
+				return err
+			}
 		}
 		for _, u := range urls {
 			normalized, origin, err := normalizeSiteURL(u, cfg.AllowPrivateTargets)

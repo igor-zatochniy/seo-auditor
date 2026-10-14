@@ -36,7 +36,16 @@ type compiledRule struct {
 	allow       bool
 	specificity int
 	pattern     string
+	directive   string
 	endAnchored bool
+}
+
+// Decision explains the effective robots.txt instruction for one URL.
+type Decision struct {
+	Allowed           bool
+	Directive         string
+	ConflictDirective string
+	Conflict          bool
 }
 
 // Policy is an immutable robots.txt policy safe for concurrent path checks.
@@ -96,6 +105,7 @@ func CompilePolicyContext(ctx context.Context, content, userAgent string) (*Poli
 			allow:       sourceRule.allow,
 			specificity: sourceRule.specificity,
 			pattern:     pattern,
+			directive:   sourceRule.pattern,
 			endAnchored: endAnchored,
 		})
 		policy.estimatedMemoryBytes += estimatedCompiledRuleBytes +
@@ -103,6 +113,94 @@ func CompilePolicyContext(ctx context.Context, content, userAgent string) (*Poli
 	}
 
 	return policy, nil
+}
+
+// CompilePoliciesContext parses robots.txt once, then prepares policies for a
+// bounded set of product tokens. Identical selected groups share the same
+// immutable Policy. A per-token limit failure is reported only for that token
+// so optional diagnostics cannot make the primary crawler fail closed.
+func CompilePoliciesContext(ctx context.Context, content string, userAgents []string, maxRules int, maxWeight int64) (map[string]*Policy, map[string]error, error) {
+	if ctx == nil {
+		return nil, nil, fmt.Errorf("robots.txt compile context is required")
+	}
+	if len(content) > MaxPolicyBytes {
+		return nil, nil, fmt.Errorf("robots.txt exceeds policy limit of %d bytes", MaxPolicyBytes)
+	}
+	groups, err := parseGroups(ctx, content)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	policies := make(map[string]*Policy, len(userAgents))
+	policyErrors := make(map[string]error)
+	shared := make(map[string]*Policy)
+	var totalWeight int64
+	for _, userAgent := range userAgents {
+		if err := ctx.Err(); err != nil {
+			policyErrors[userAgent] = fmt.Errorf("compile optional robots.txt policy: %w", err)
+			continue
+		}
+		selected, ok := selectGroup(groups, userAgent)
+		if !ok || len(selected.rules) == 0 {
+			policies[userAgent] = &Policy{estimatedMemoryBytes: estimatedPolicyBaseBytes}
+			continue
+		}
+		identity := groupRulesIdentity(selected.rules)
+		if cached := shared[identity]; cached != nil {
+			policies[userAgent] = cached
+			continue
+		}
+		if maxRules > 0 && len(selected.rules) > maxRules {
+			policyErrors[userAgent] = fmt.Errorf("selected robots.txt group has %d rules; diagnostic limit is %d", len(selected.rules), maxRules)
+			continue
+		}
+
+		policy := &Policy{rules: make([]compiledRule, 0, len(selected.rules)), estimatedMemoryBytes: estimatedPolicyBaseBytes}
+		for index, sourceRule := range selected.rules {
+			if index%policyContextCheckInterval == 0 {
+				if err := ctx.Err(); err != nil {
+					policyErrors[userAgent] = fmt.Errorf("compile optional robots.txt policy: %w", err)
+					break
+				}
+			}
+			pattern, endAnchored, ok := preparePattern(sourceRule.pattern)
+			if !ok {
+				continue
+			}
+			policy.rules = append(policy.rules, compiledRule{
+				allow: sourceRule.allow, specificity: sourceRule.specificity,
+				pattern: pattern, directive: sourceRule.pattern, endAnchored: endAnchored,
+			})
+			policy.estimatedMemoryBytes += estimatedCompiledRuleBytes + int64(len(pattern))*estimatedPatternByteFactor
+		}
+		if _, failed := policyErrors[userAgent]; failed {
+			continue
+		}
+		if maxWeight > 0 && totalWeight+policy.estimatedMemoryBytes > maxWeight {
+			policyErrors[userAgent] = fmt.Errorf("compiled robots.txt diagnostic policies exceed the %d-byte shared budget", maxWeight)
+			continue
+		}
+		shared[identity] = policy
+		policies[userAgent] = policy
+		totalWeight += policy.estimatedMemoryBytes
+	}
+	return policies, policyErrors, nil
+}
+
+func groupRulesIdentity(rules []rule) string {
+	var key strings.Builder
+	for _, item := range rules {
+		if item.allow {
+			key.WriteByte('A')
+		} else {
+			key.WriteByte('D')
+		}
+		key.WriteString(fmt.Sprint(len(item.pattern)))
+		key.WriteByte(':')
+		key.WriteString(item.pattern)
+		key.WriteByte('\x00')
+	}
+	return key.String()
 }
 
 func (p *Policy) EstimatedMemoryBytes() int64 {
@@ -143,24 +241,44 @@ func (p *Policy) AllowsURLContext(ctx context.Context, parsed *url.URL) (bool, e
 	return p.allowsNormalizedContext(ctx, RequestPath(parsed))
 }
 
+// ExplainURLContext returns the winning directive. Equal-specificity Allow and
+// Disallow rules resolve to Allow, as required by the robots matching rules,
+// while Conflict makes that surprising configuration visible to callers.
+func (p *Policy) ExplainURLContext(ctx context.Context, parsed *url.URL) (Decision, error) {
+	if ctx == nil {
+		return Decision{}, fmt.Errorf("robots.txt match context is required")
+	}
+	if parsed == nil {
+		return Decision{Allowed: true, Directive: "implicit allow"}, nil
+	}
+	return p.explainNormalizedContext(ctx, RequestPath(parsed))
+}
+
 func (p *Policy) allowsNormalizedContext(ctx context.Context, requestPath string) (bool, error) {
+	decision, err := p.explainNormalizedContext(ctx, requestPath)
+	return decision.Allowed, err
+}
+
+func (p *Policy) explainNormalizedContext(ctx context.Context, requestPath string) (Decision, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("match robots.txt policy: %w", err)
+		return Decision{}, fmt.Errorf("match robots.txt policy: %w", err)
 	}
 	if isRobotsTXTRequestPath(requestPath) {
-		return true, nil
+		return Decision{Allowed: true, Directive: "implicit allow: robots.txt is always accessible"}, nil
 	}
 	if p == nil || len(p.rules) == 0 {
-		return true, nil
+		return Decision{Allowed: true, Directive: "implicit allow"}, nil
 	}
 
-	allowed := true
+	decision := Decision{Allowed: true, Directive: "implicit allow"}
 	bestSpecificity := -1
+	conflictingAtBestSpecificity := false
+	conflictDirective := ""
 	remainingOperations := MaxPolicyMatchOperations
 	for index, rule := range p.rules {
 		if index%policyContextCheckInterval == 0 {
 			if err := ctx.Err(); err != nil {
-				return false, fmt.Errorf("match robots.txt policy: %w", err)
+				return Decision{}, fmt.Errorf("match robots.txt policy: %w", err)
 			}
 		}
 		matched, err := patternMatchesContext(
@@ -171,18 +289,41 @@ func (p *Policy) allowsNormalizedContext(ctx context.Context, requestPath string
 			&remainingOperations,
 		)
 		if err != nil {
-			return false, fmt.Errorf("match robots.txt policy: %w", err)
+			return Decision{}, fmt.Errorf("match robots.txt policy: %w", err)
 		}
 		if !matched {
 			continue
 		}
-		if rule.specificity > bestSpecificity || (rule.specificity == bestSpecificity && rule.allow) {
-			allowed = rule.allow
+		if rule.specificity > bestSpecificity {
+			decision.Allowed = rule.allow
+			decision.Directive = directiveText(rule)
 			bestSpecificity = rule.specificity
+			conflictingAtBestSpecificity = false
+			conflictDirective = ""
+			continue
+		}
+		if rule.specificity == bestSpecificity && rule.allow != decision.Allowed {
+			conflictingAtBestSpecificity = true
+			if rule.allow {
+				conflictDirective = decision.Directive
+				decision.Allowed = true
+				decision.Directive = directiveText(rule)
+			} else {
+				conflictDirective = directiveText(rule)
+			}
 		}
 	}
+	decision.Conflict = conflictingAtBestSpecificity
+	decision.ConflictDirective = conflictDirective
+	return decision, nil
+}
 
-	return allowed, nil
+func directiveText(rule compiledRule) string {
+	name := "Disallow"
+	if rule.allow {
+		name = "Allow"
+	}
+	return name + ": " + rule.directive
 }
 
 func isRobotsTXTRequestPath(requestPath string) bool {
@@ -259,6 +400,20 @@ func stripComment(line string) string {
 }
 
 func selectGroup(groups []group, userAgent string) (group, bool) {
+	// Applebot uses Googlebot rules when no Applebot-specific group exists.
+	// A wildcard group does not take precedence over that provider fallback.
+	if strings.EqualFold(strings.TrimSpace(strings.SplitN(userAgent, "/", 2)[0]), "Applebot") {
+		if selected, ok := selectMatchingGroup(groups, "Applebot", false); ok {
+			return selected, true
+		}
+		if selected, ok := selectMatchingGroup(groups, "Googlebot", false); ok {
+			return selected, true
+		}
+	}
+	return selectMatchingGroup(groups, userAgent, true)
+}
+
+func selectMatchingGroup(groups []group, userAgent string, includeWildcard bool) (group, bool) {
 	bestLength := -1
 	var selected group
 	found := false
@@ -266,6 +421,9 @@ func selectGroup(groups []group, userAgent string) (group, bool) {
 	for _, group := range groups {
 		groupBestLength := -1
 		for _, agent := range group.agents {
+			if agent == "*" && !includeWildcard {
+				continue
+			}
 			if agentMatches(agent, userAgent) && len(agent) > groupBestLength {
 				groupBestLength = len(agent)
 			}

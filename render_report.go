@@ -40,6 +40,11 @@ func sanitizeRenderingRecord(record map[string]any) {
 			warnings[i] = sanitizeGEOTextForStorage(fmt.Sprint(v), 8192)
 		}
 	}
+	if diagnostic, ok := record["main_content_dependency"].(map[string]any); ok {
+		if evidence, ok := diagnostic["evidence"].(string); ok {
+			diagnostic["evidence"] = sanitizeGEOTextForStorage(evidence, 2048)
+		}
+	}
 	for _, key := range []string{"raw", "rendered"} {
 		if snapshot, ok := record[key].(map[string]any); ok {
 			for k, v := range snapshot {
@@ -67,9 +72,27 @@ func renderingReportDetails(value any) []reportDetail {
 	}
 	group := "JavaScript: HTML відповіді → DOM"
 	items := []reportDetail{{"Статус", reportValue(r["status"]), group}, {"Помилка", reportValue(r["error"]), group}, {"Застереження", reportValue(r["warnings"]), group}}
+	if diagnostic, ok := r["main_content_dependency"].(map[string]any); ok {
+		items = append(items,
+			reportDetail{"Залежність основного вмісту від JavaScript", reportValue(diagnostic["status"]), group},
+			reportDetail{"Пояснення залежності вмісту", reportValue(diagnostic["evidence"]), group},
+			reportDetail{"Схожість основного тексту HTML → DOM", reportValue(diagnostic["similarity_percent"]), group},
+		)
+	}
+	if agentic, ok := r["agentic"].(map[string]any); ok {
+		const agenticGroup = "Доступність інтерфейсу для AI-агентів"
+		items = append(items,
+			reportDetail{"Статус", reportValue(agentic["status"]), agenticGroup},
+			reportDetail{"Main landmarks", reportValue(agentic["main_landmarks"]), agenticGroup},
+			reportDetail{"Інтерактивні елементи без назви", reportValue(agentic["unnamed_interactive"]), agenticGroup},
+			reportDetail{"Поля форм без назви", reportValue(agentic["unnamed_form_controls"]), agenticGroup},
+			reportDetail{"Знахідки", reportValue(agentic["findings"]), agenticGroup},
+			reportDetail{"Декларативні WebMCP-форми (інформаційно)", reportValue(agentic["declarative_webmcp_forms"]), agenticGroup},
+		)
+	}
 	raw, _ := r["raw"].(map[string]any)
 	dom, _ := r["rendered"].(map[string]any)
-	for _, f := range []struct{ key, label string }{{"title", "Title"}, {"description", "Description"}, {"canonical", "Canonical"}, {"robots", "Meta robots"}, {"x_robots_tag", "X-Robots-Tag"}, {"h1", "H1"}, {"h1_count", "Кількість H1"}, {"words", "Слова"}, {"text_sample", "Вибірка тексту"}, {"internal_links", "Внутрішні посилання"}, {"external_links", "Зовнішні посилання"}, {"json_ld_count", "Блоки JSON-LD"}, {"hreflang", "Hreflang"}} {
+	for _, f := range []struct{ key, label string }{{"title", "Title"}, {"description", "Description"}, {"canonical", "Canonical"}, {"robots", "Meta robots"}, {"x_robots_tag", "X-Robots-Tag"}, {"h1", "H1"}, {"h1_count", "Кількість H1"}, {"words", "Слова"}, {"main_content_words", "Слова основного вмісту"}, {"main_content_source", "Джерело основного вмісту"}, {"text_sample", "Вибірка тексту"}, {"internal_links", "Внутрішні посилання"}, {"external_links", "Зовнішні посилання"}, {"json_ld_count", "Блоки JSON-LD"}, {"hreflang", "Hreflang"}} {
 		items = append(items, reportDetail{f.label, reportValue(raw[f.key]) + " → " + reportValue(dom[f.key]), group})
 	}
 	items = append(items, reportDetail{"Різниця (JSON)", reportValue(r["delta"]), group})

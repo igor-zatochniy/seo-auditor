@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -25,22 +28,60 @@ type VisibilityInput struct {
 }
 
 type VisibilityRecord struct {
-	Query         string `json:"query"`
-	URL           string `json:"url"`
-	Scope         string `json:"scope"`
-	Impressions   *int64 `json:"impressions"`
-	Clicks        *int64 `json:"clicks"`
-	ReportOrdinal *int   `json:"report_ordinal,omitempty"`
-	TargetID      *int64 `json:"target_id,omitempty"`
-	RequestURL    string `json:"-"`
+	Query              string   `json:"query"`
+	URL                string   `json:"url"`
+	Scope              string   `json:"scope"`
+	Impressions        *int64   `json:"impressions"`
+	Clicks             *int64   `json:"clicks"`
+	CTR                *float64 `json:"ctr,omitempty"`
+	Position           *float64 `json:"position,omitempty"`
+	Sessions           *int64   `json:"sessions,omitempty"`
+	SessionSource      string   `json:"session_source,omitempty"`
+	AIReferral         bool     `json:"ai_referral,omitempty"`
+	URLMatch           string   `json:"url_match,omitempty"`
+	MatchedFingerprint string   `json:"matched_fingerprint,omitempty"`
+	MatchKeyID         string   `json:"match_key_id,omitempty"`
+	ReportOrdinal      *int     `json:"report_ordinal,omitempty"`
+	TargetID           *int64   `json:"target_id,omitempty"`
+	RequestURL         string   `json:"-"`
 }
 
 func QueryKey(query string) string { return normalizedBrand(query) }
+
+// IsAIReferralSource is a conservative domain classifier for GA4 source values;
+// it does not imply that an AI system cited or retrieved a page.
+func IsAIReferralSource(raw string) bool {
+	source := strings.TrimSpace(strings.ToLower(raw))
+	if i := strings.Index(source, " / "); i >= 0 {
+		source = strings.TrimSpace(source[:i])
+	}
+	if !strings.Contains(source, "://") {
+		source = strings.SplitN(source, "/", 2)[0]
+	}
+	if parsed, err := url.Parse(source); err == nil && parsed.Host != "" {
+		source = parsed.Hostname()
+	} else if host, _, err := net.SplitHostPort(source); err == nil {
+		source = host
+	}
+	source = strings.TrimSuffix(strings.Trim(source, "[] ."), ".")
+	for _, domain := range []string{
+		"chatgpt.com", "chat.openai.com", "perplexity.ai", "gemini.google.com",
+		"bard.google.com", "copilot.microsoft.com", "claude.ai", "poe.com",
+		"you.com", "phind.com",
+	} {
+		if source == domain || strings.HasSuffix(source, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
 
 func ParseVisibilityCSV(input *VisibilityInput) ([]VisibilityRecord, error) {
 	switch input.Source {
 	case "gsc_web", "gsc_ai":
 		input.Engine = "google_ai"
+	case "ga4":
+		input.Engine = "other"
 	case "ai_observed":
 		switch input.Engine {
 		case "google_ai", "chatgpt", "gemini", "perplexity", "other":
@@ -91,8 +132,16 @@ func ParseVisibilityCSV(input *VisibilityInput) ([]VisibilityRecord, error) {
 			key = "impressions"
 		case "clicks", "кліки":
 			key = "clicks"
-		case "ctr", "position", "позиція":
-			continue
+		case "ctr":
+			key = "ctr"
+		case "position", "average position", "позиція":
+			key = "position"
+		case "sessions", "сеанси":
+			key = "sessions"
+		case "session source", "session source / medium", "source", "source / medium", "джерело сеансу":
+			key = "session_source"
+		case "landing page", "landing page + query string", "page path", "сторінка входу":
+			key = "url"
 		default:
 			return nil, fmt.Errorf("непідтримуваний стовпець %d; потрібні Query, URL/Page, Impressions та/або Clicks", i+1)
 		}
@@ -105,11 +154,27 @@ func ParseVisibilityCSV(input *VisibilityInput) ([]VisibilityRecord, error) {
 	_, page := columns["url"]
 	_, impressions := columns["impressions"]
 	_, clicks := columns["clicks"]
-	if (!query && !page) || (!impressions && !clicks) {
+	_, ctr := columns["ctr"]
+	_, position := columns["position"]
+	_, sessions := columns["sessions"]
+	_, sessionSource := columns["session_source"]
+	if input.Source != "ga4" && ((!query && !page) || (!impressions && !clicks && !ctr && !position)) {
 		return nil, errors.New("CSV потребує запиту або URL та хоча б одного числового показника")
 	}
 	if input.Source == "gsc_ai" && (!page || !impressions) {
 		return nil, errors.New("GSC generative AI потребує URL та Impressions; query і clicks не підтверджені цим звітом")
+	}
+	if input.Source == "gsc_ai" && (query || clicks || ctr || position || sessions || sessionSource) {
+		return nil, errors.New("GSC generative AI: використовуйте лише URL та Impressions")
+	}
+	if input.Source == "gsc_web" && (sessions || sessionSource) {
+		return nil, errors.New("GSC Web не приймає GA4 Sessions або Session source")
+	}
+	if input.Source == "ga4" && (!page || !sessions || !sessionSource || query || impressions || clicks || ctr || position) {
+		return nil, errors.New("GA4 потребує Landing page, Session source і Sessions; інші метрики сюди не додавайте")
+	}
+	if input.Source == "ai_observed" && (ctr || position || sessions || sessionSource) {
+		return nil, errors.New("AI-спостереження підтримують лише підтверджені покази та кліки")
 	}
 	value := func(row []string, key string) string {
 		if i, ok := columns[key]; ok {
@@ -123,7 +188,31 @@ func ParseVisibilityCSV(input *VisibilityInput) ([]VisibilityRecord, error) {
 		}
 		n, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || n < 0 || n > 1_000_000_000_000 {
-			return nil, errors.New("покази й кліки мають бути невід'ємними цілими числами без розділювачів тисяч")
+			return nil, errors.New("числові показники мають бути невід'ємними цілими числами без розділювачів тисяч")
+		}
+		return &n, nil
+	}
+	decimal := func(raw string, percentage bool) (*float64, error) {
+		if raw == "" {
+			return nil, nil
+		}
+		raw = strings.TrimSpace(raw)
+		isPercent := percentage && strings.HasSuffix(raw, "%")
+		if isPercent {
+			raw = strings.TrimSpace(strings.TrimSuffix(raw, "%"))
+		}
+		if reader.Comma == ';' {
+			raw = strings.ReplaceAll(raw, ",", ".")
+		}
+		n, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 {
+			return nil, errors.New("CTR і позиція мають бути скінченними невід'ємними числами")
+		}
+		if isPercent {
+			n /= 100
+		}
+		if percentage && n > 1 || !percentage && n > 10000 {
+			return nil, errors.New("CTR має бути в діапазоні 0–100%, позиція — від 0 до 10000")
 		}
 		return &n, nil
 	}
@@ -137,34 +226,59 @@ func ParseVisibilityCSV(input *VisibilityInput) ([]VisibilityRecord, error) {
 		if err != nil {
 			return nil, fmt.Errorf("некоректний CSV у рядку %d", len(rows)+2)
 		}
-		r := VisibilityRecord{Query: value(row, "query"), RequestURL: value(row, "url")}
-		if !cleanText(r.Query, 300) || len(r.RequestURL) > 2048 || (r.Query == "" && r.RequestURL == "") {
+		r := VisibilityRecord{Query: value(row, "query"), RequestURL: value(row, "url"), SessionSource: value(row, "session_source")}
+		if !cleanText(r.Query, 300) || len(r.RequestURL) > 2048 || (input.Source != "ga4" && r.Query == "" && r.RequestURL == "") {
 			return nil, fmt.Errorf("некоректний запит або URL у рядку %d", len(rows)+2)
 		}
+		if input.Source == "ga4" && (!cleanText(r.SessionSource, 200) || r.RequestURL == "") {
+			return nil, fmt.Errorf("некоректне джерело сеансу або Landing page у рядку %d", len(rows)+2)
+		}
 		r.Query = strings.Join(strings.Fields(r.Query), " ")
+		r.SessionSource = strings.Join(strings.Fields(r.SessionSource), " ")
 		if r.Impressions, err = metric(value(row, "impressions")); err != nil {
 			return nil, err
 		}
 		if r.Clicks, err = metric(value(row, "clicks")); err != nil {
 			return nil, err
 		}
-		if r.Impressions == nil && r.Clicks == nil {
+		if r.CTR, err = decimal(value(row, "ctr"), true); err != nil {
+			return nil, err
+		}
+		if r.Position, err = decimal(value(row, "position"), false); err != nil {
+			return nil, err
+		}
+		if r.Sessions, err = metric(value(row, "sessions")); err != nil {
+			return nil, err
+		}
+		if input.Source == "ga4" {
+			if r.Sessions == nil {
+				return nil, errors.New("GA4: Sessions мають бути вказані для кожного рядка")
+			}
+			r.AIReferral = IsAIReferralSource(r.SessionSource)
+		} else if r.Impressions == nil && r.Clicks == nil && r.CTR == nil && r.Position == nil {
 			return nil, errors.New("рядок CSV не містить спостережених показників")
 		}
 		if r.Impressions != nil && r.Clicks != nil && *r.Clicks > *r.Impressions {
 			return nil, errors.New("кліків не може бути більше за покази")
 		}
-		if input.Source == "gsc_ai" && (r.Query != "" || r.Clicks != nil) {
+		if input.Source == "gsc_ai" && (r.Query != "" || r.Clicks != nil || r.CTR != nil || r.Position != nil) {
 			return nil, errors.New("GSC generative AI: query та clicks мають бути порожніми; не переносіть їх зі звичайного Web-звіту")
 		}
 		r.Scope = "query_url"
-		if r.Query == "" {
+		if input.Source == "ga4" {
 			r.Scope = "url"
-		}
-		if r.RequestURL == "" {
-			r.Scope = "query"
+		} else {
+			if r.Query == "" {
+				r.Scope = "url"
+			}
+			if r.RequestURL == "" {
+				r.Scope = "query"
+			}
 		}
 		key := QueryKey(r.Query) + "\x00" + r.RequestURL
+		if input.Source == "ga4" {
+			key += "\x00" + strings.ToLower(r.SessionSource)
+		}
 		if seen[key] {
 			return nil, errors.New("CSV містить повторний запит/URL; об'єднайте рядки одного періоду перед імпортом")
 		}

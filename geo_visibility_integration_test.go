@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -190,5 +191,93 @@ func TestGEOVisibilityMigrationFrom18PreservesSourceData(t *testing.T) {
 	}
 	if err = app.pool.QueryRow(t.Context(), "SELECT COUNT(*) FROM audit_results WHERE run_id=$1", cfg.RunID).Scan(&count); err != nil || count != 2 {
 		t.Fatal("Upgrade 18→19 пошкодив SEO")
+	}
+}
+
+func TestImpactAnalyticsSeparatesGSCGA4AndAIImpressions(t *testing.T) {
+	app, report, _ := visibilityReportFixture(t)
+	ctx := t.Context()
+	importCSV := func(source, start, end, csv string) string {
+		t.Helper()
+		input := geo.VisibilityInput{ID: newWebRunID(), Source: source, PeriodStart: start, PeriodEnd: end, Country: "US", Device: "all", CSV: csv}
+		records, err := geo.ParseVisibilityCSV(&input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created, err := app.storeVisibilityImport(ctx, report.ID, input, records)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return created.ID
+	}
+	baseline := importCSV("gsc_web", "2026-08-01", "2026-08-31", "Page,Clicks,Impressions,CTR,Position\nhttps://example.com/report?token=alpha,500,10000,5%,4\nhttps://example.com/report?token=beta,50,1000,5%,4\n")
+	web := importCSV("gsc_web", "2026-09-01", "2026-09-30", "Page,Clicks,Impressions,CTR,Position\nhttps://example.com/report?token=alpha,10,1000,1%,4\nhttps://example.com/report?token=beta,15,300,5%,4\n")
+	ai := importCSV("gsc_ai", "2026-09-01", "2026-09-30", "Page,Impressions\nhttps://example.com/report?token=alpha,700\nhttps://example.com/report?token=beta,300\n")
+	ga4 := importCSV("ga4", "2026-09-01", "2026-09-30", "Landing page,Session source,Sessions\n/report?token=alpha,chatgpt.com / referral,12\n/report?token=beta,example.com / referral,5\n")
+	request := httptest.NewRequest("GET", "http://127.0.0.1:8080/api/geo/reports/"+report.ID+"/impact-analytics?gsc_web="+web+"&gsc_ai="+ai+"&ga4="+ga4, nil)
+	request.Header.Set("Authorization", "Bearer "+testWebToken)
+	request.Header.Set("Origin", "http://127.0.0.1:8080")
+	request.Header.Set("X-SEO-Auditor-Request", "1")
+	response := httptest.NewRecorder()
+	app.handler().ServeHTTP(response, request)
+	var result struct {
+		Baseline *impactDataset `json:"baseline"`
+		Items    []impactPageDB `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != 200 {
+		t.Fatalf("impact API: status=%d body=%s err=%v", response.Code, response.Body.String(), err)
+	}
+	if result.Baseline == nil || result.Baseline.ID != baseline || len(result.Items) != 2 {
+		t.Fatalf("baseline/pages: %+v count=%d", result.Baseline, len(result.Items))
+	}
+	first := result.Items[0]
+	if first.TargetID != 1 || first.URLMatch != "exact" || first.GSCImpressions == nil || *first.GSCImpressions != 1000 || first.GSCClicks == nil || *first.GSCClicks != 10 || first.GSCCTR == nil || math.Abs(*first.GSCCTR-.01) > 1e-9 {
+		t.Fatalf("GSC Web metrics: %+v", first)
+	}
+	if first.GSC_AIImpressions == nil || *first.GSC_AIImpressions != 700 || first.AIReferralSessions == nil || *first.AIReferralSessions != 12 || first.GA4Sessions == nil || *first.GA4Sessions != 12 {
+		t.Fatalf("AI/GА4 metrics mixed or missing: %+v", first)
+	}
+	if first.OpportunityClicks == nil || math.Abs(*first.OpportunityClicks-40) > 1e-9 || first.OpportunityConfidence != "low" {
+		t.Fatalf("opportunity estimate: %+v", first)
+	}
+	if result.Items[1].AIReferralSessions != nil || result.Items[1].GA4Sessions == nil || *result.Items[1].GA4Sessions != 5 {
+		t.Fatalf("non-AI referral was classified as AI: %+v", result.Items[1])
+	}
+	var stored string
+	if err := app.pool.QueryRow(ctx, "SELECT jsonb_agg(observation)::text FROM geo_visibility_rows WHERE import_id=$1", ga4).Scan(&stored); err != nil || strings.Contains(stored, "token=alpha") || strings.Contains(stored, "token=beta") {
+		t.Fatalf("raw GA4 query parameter leaked to storage: %s err=%v", stored, err)
+	}
+}
+
+func TestImpactAnalyticsMigrationDownUpPreservesGA4Import(t *testing.T) {
+	app, report, cfg := visibilityReportFixture(t)
+	ctx := t.Context()
+	id := newWebRunID()
+	if _, err := app.pool.Exec(ctx, `INSERT INTO geo_visibility_imports
+		(id,report_id,payload_hash,source,engine,period_start,period_end,country,device,row_count)
+		VALUES($1,$2,$3,'ga4','other','2026-09-01','2026-09-30','US','all',1)`, id, report.ID, fingerprintURL(cfg.TargetFingerprintKey, "ga4-migration-fixture")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.pool.Exec(ctx, `INSERT INTO geo_visibility_rows(import_id,ordinal,observation)
+		VALUES($1,1,'{"url":"https://example.com/","sessions":3}')`, id); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(postgresMigrationDriver, cfg.DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = goose.DownToContext(ctx, db, migrationDir, 40); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = app.pool.QueryRow(ctx, "SELECT COUNT(*) FROM geo_visibility_rows WHERE import_id=$1", id).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rollback deleted GA4 data: rows=%d err=%v", count, err)
+	}
+	if err = applySchemaMigrations(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err = app.pool.QueryRow(ctx, "SELECT COUNT(*) FROM geo_visibility_rows WHERE import_id=$1", id).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("upgrade did not preserve GA4 data: rows=%d err=%v", count, err)
 	}
 }

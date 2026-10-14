@@ -11,6 +11,7 @@
 	defaults.push("rendering_status");
 	filters.rendering_issues="JavaScript: неповна перевірка";
 	filters.javascript_changes="Зміни після JavaScript";
+	filters.main_content_js_risk="Основний вміст залежить від JavaScript";
   Object.assign(filters,{deep_pages:"Понад 3 кліки",orphan_candidates:"Orphan candidates",broken_internal:"Биті внутрішні посилання",redirecting_internal:"Внутрішні редиректи"});
   let fields = [], columns = defaults.slice(), rows = [], cursors = [""], next = "", historyNext = "", historyCursor = "", pollTimer, refreshCount = 0, lastStatus = "", resultRequest = 0;
   const notice = message => { $("notice").textContent = message; $("notice").hidden = !message; };
@@ -87,6 +88,7 @@
     try {
       const p=await api(`/api/audits/${runID}/progress`); const run=p.run;
       $("tab-graph").hidden=run.mode!=="site";
+      $("tab-coverage").hidden=run.mode!=="site";$("tab-facets").hidden=run.mode!=="site";
       const badge=statusBadge(run.status); badge.id="run-status"; $("run-status").replaceWith(badge);
       $("run-reference").textContent="АУДИТ / "+run.id;
       $("run-time").textContent=`${formatDate(run.started_at)} · ${elapsed(run.started_at,run.finished_at)}`;
@@ -203,7 +205,7 @@
     document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>$(button.dataset.close).close());
     if(!runID) { await loadHistory(); return; }
     for(const format of ["html","csv"]) $(format+"-export").href=`/api/audits/${runID}/export/${format}`;
-    for(const view of ["overview","pages","graph","international","duplicates","routes"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages","graph","international","duplicates","routes"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); } if(["international","duplicates","routes"].includes(view)) document.dispatchEvent(new Event("seo:"+view+"-open")); };
+    for(const view of ["overview","pages","graph","international","duplicates","routes","coverage","facets","rules"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages","graph","international","duplicates","routes","coverage","facets","rules"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); } if(["international","duplicates","routes","coverage","facets","rules"].includes(view)) document.dispatchEvent(new Event("seo:"+view+"-open")); };
     $("graph-filter").onchange=safely(resetGraph);$("graph-target").onchange=safely(resetGraph);
     $("graph-reset").onclick=safely(()=>{$("graph-target").value="";$("graph-filter").value="all";return resetGraph();});
     $("graph-next").onclick=safely(()=>{if(graphNext)graphCursors.push(graphNext);return graph();});

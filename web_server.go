@@ -48,7 +48,7 @@ func serveAuditor(ctx context.Context, pool *pgxpool.Pool, cfg Config) int {
 	manager := newAuditManager(ctx, pool, cfg)
 	app := &webServer{pool: pool, cfg: cfg, web: wc, manager: manager, queries: make(chan struct{}, 3), submissions: make(chan struct{}, 1)}
 	server := &http.Server{Addr: wc.Addr, Handler: app.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
-		WriteTimeout: max(cfg.ReportExportTimeout, geoOperationTimeout) + 5*time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+		WriteTimeout: max(cfg.ReportExportTimeout, geoOperationTimeout, aiFetchDiagnosticTimeout(cfg)) + 5*time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	listener, err := net.Listen("tcp", wc.Addr)
 	if err != nil {
 		slog.Error("Не вдалося відкрити web-порт", "error", err)
@@ -88,6 +88,8 @@ func (s *webServer) handler() http.Handler {
 	s.registerGEOStrategy(mux)
 	s.registerSchedules(mux)
 	s.registerBotAnalytics(mux)
+	s.registerCrawlDiagnostics(mux)
+	s.registerAuditRules(mux)
 	assets, _ := fs.Sub(webAssets, "web/static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(assets))))
 	page := template.Must(template.ParseFS(webAssets, "web/templates/index.html"))
@@ -186,11 +188,17 @@ func (s *webServer) secure(next http.Handler) http.Handler {
 				return
 			}
 			timeout := effectiveDBFetchTimeout(s.cfg)
+			if strings.Contains(r.URL.Path, "/coverage") || strings.HasSuffix(r.URL.Path, "/facets") || strings.Contains(r.URL.Path, "/rules") {
+				timeout = 30 * time.Second
+			}
 			if strings.Contains(r.URL.Path, "/export/") {
 				timeout = s.cfg.ReportExportTimeout
 			}
 			if r.Method == "POST" {
 				timeout = s.cfg.FinalizationTimeout
+			}
+			if r.URL.Path == "/api/bots/fetch-diagnostics" {
+				timeout = aiFetchDiagnosticTimeout(s.cfg)
 			}
 			if isGEOCorpusOperation(r) {
 				timeout = geoOperationTimeout

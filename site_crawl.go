@@ -126,10 +126,13 @@ func insertSiteAuditRun(ctx context.Context, tx pgx.Tx, cfg Config, options site
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_run_targets(run_id,target_id,request_url) VALUES($1,1,$2)`, cfg.RunID, options.RootURL); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(ctx, `INSERT INTO audit_crawl_inventory_state(run_id,captured) VALUES($1,TRUE)`, cfg.RunID); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_site_nodes(run_id,target_id,url_fingerprint,safe_url,frontier_depth) VALUES($1,1,$2,$3,0)`, cfg.RunID, fingerprintURL(cfg.TargetFingerprintKey, options.RootURL), redactURL(options.RootURL)); err != nil {
 		return err
 	}
-	return nil
+	return storeInventory(ctx, tx, cfg.RunID, []inventoryRecord{inventoryURL(cfg, options.RootURL, 0, 0)})
 }
 
 func loadSiteCrawl(ctx context.Context, pool *pgxpool.Pool, cfg Config) (*siteCrawl, error) {

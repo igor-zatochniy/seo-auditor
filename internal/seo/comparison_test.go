@@ -75,3 +75,43 @@ func TestComparisonMarksTruncatedDescriptionIncomplete(t *testing.T) {
 		t.Fatal("truncated description reported as complete evidence")
 	}
 }
+
+func TestMainContentDependencyDetectsJSOnlyContentAndHydration(t *testing.T) {
+	raw := Snapshot(comparisonPage(t, `<html><body><main><div id="app"></div></main></body></html>`))
+	dom := Snapshot(comparisonPage(t, `<html><body><main>`+strings.Repeat("rendered ", 180)+`</main></body></html>`))
+	diagnostic := AssessMainContentDependency(raw, dom, true)
+	if diagnostic.Status != "high" || diagnostic.RawWords != 0 || diagnostic.RenderedWords < mainContentSubstantialWords {
+		t.Fatalf("client-rendered content not detected: %+v", diagnostic)
+	}
+
+	content := strings.Repeat("shared article content ", 100)
+	server := Snapshot(comparisonPage(t, `<html><body><nav>`+strings.Repeat("navigation ", 120)+`</nav><main>`+content+`</main></body></html>`))
+	hydrated := Snapshot(comparisonPage(t, `<html><body><nav>`+strings.Repeat("different menu ", 120)+`</nav><main>`+content+`<button>Client control</button></main></body></html>`))
+	diagnostic = AssessMainContentDependency(server, hydrated, true)
+	if diagnostic.Status != "not_detected" || diagnostic.SimilarityPercent == nil || *diagnostic.SimilarityPercent != 100 {
+		t.Fatalf("hydration with unchanged main content was flagged: %+v", diagnostic)
+	}
+}
+
+func TestMainContentDependencyDetectsReplacementAtSimilarWordCount(t *testing.T) {
+	server := Snapshot(comparisonPage(t, `<html><body><main>`+strings.Repeat("alpha topic source ", 80)+`</main></body></html>`))
+	dom := Snapshot(comparisonPage(t, `<html><body><main>`+strings.Repeat("omega product answer ", 80)+`</main></body></html>`))
+	diagnostic := AssessMainContentDependency(server, dom, true)
+	if server.MainContentWords != dom.MainContentWords || diagnostic.Status != "warning" || diagnostic.SimilarityPercent == nil || *diagnostic.SimilarityPercent >= mainContentSimilarityFloor {
+		t.Fatalf("same-size replacement was missed: raw=%d rendered=%d result=%+v", server.MainContentWords, dom.MainContentWords, diagnostic)
+	}
+}
+
+func TestMainContentDependencyIgnoresNavigationAndMarksIncompleteUnknown(t *testing.T) {
+	navigationOnly := `<html><body><nav>` + strings.Repeat("menu navigation item ", 100) + `</nav></body></html>`
+	raw := Snapshot(comparisonPage(t, navigationOnly))
+	dom := Snapshot(comparisonPage(t, navigationOnly))
+	diagnostic := AssessMainContentDependency(raw, dom, true)
+	if raw.MainContentWords != 0 || diagnostic.Status != "unknown" {
+		t.Fatalf("navigation text was treated as main content: raw=%d result=%+v", raw.MainContentWords, diagnostic)
+	}
+	diagnostic = AssessMainContentDependency(raw, dom, false)
+	if diagnostic.Status != "unknown" {
+		t.Fatalf("incomplete rendering was not unknown: %+v", diagnostic)
+	}
+}

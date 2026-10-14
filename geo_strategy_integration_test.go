@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/aicitation"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pressly/goose/v3"
@@ -21,7 +22,17 @@ func finishStrategyFixture(ctx context.Context, pool *pgxpool.Pool, cfg Config, 
 	if blocked {
 		rules = geo.Blocked
 	}
-	signals := &geo.Signals{Version: 3, Complete: true, Excerpt: "Merchanto chargeback protection", FirstParagraph: "Chargeback protection", Search: geo.SearchControls{GooglebotRules: geo.Allowed, OAISearchBotRules: rules, GoogleIndexing: geo.Allowed, GoogleSnippet: geo.Allowed}, HTTP: &geo.HTTPObservation{Status: 200}, Entities: &geo.EntitySample{Version: 1, Complete: true, Organizations: []geo.EntityRecord{{Name: "Merchanto"}}}}
+	checkedAt := time.Now().UTC()
+	statusCode := 200
+	aiPolicies := make([]geo.AIControl, 0, len(geo.SupportedAIPolicySpecs))
+	for _, spec := range geo.SupportedAIPolicySpecs {
+		status := geo.Allowed
+		if spec.Token == "OAI-SearchBot" {
+			status = rules
+		}
+		aiPolicies = append(aiPolicies, geo.AIControl{Token: spec.Token, Provider: spec.Provider, Purpose: spec.Purpose, Status: status, Directive: "Allow: /", RobotsURL: "https://example.com/robots.txt", CheckedAt: &checkedAt, HTTPStatus: &statusCode, Confidence: "robots_parsed"})
+	}
+	signals := &geo.Signals{Version: 3, Complete: true, Excerpt: "Merchanto chargeback protection", FirstParagraph: "Chargeback protection", Search: geo.SearchControls{GooglebotRules: geo.Allowed, OAISearchBotRules: rules, GPTBotRules: geo.Allowed, AIPolicies: aiPolicies, GoogleIndexing: geo.Allowed, GoogleSnippet: geo.Allowed}, HTTP: &geo.HTTPObservation{Status: 200}, Entities: &geo.EntitySample{Version: 1, Complete: true, Organizations: []geo.EntityRecord{{Name: "Merchanto"}}}}
 	if blocked {
 		signals.Entities.Organizations = nil
 	}
@@ -83,12 +94,24 @@ func TestGEOProfilesCaptureScheduledRunsAndPreserveHistory(t *testing.T) {
 	web := testWebApp()
 	app.web, app.queries, app.submissions = web.web, web.queries, web.submissions
 	cleanupStrategy(t, app)
-	input := geoProfileInput{ID: newWebRunID(), ScheduleID: scheduleID, Name: "Профіль бренду", Domain: "example.com", Brand: "Merchanto", Queries: "chargeback protection\nStripe integration"}
+	input := geoProfileInput{ID: newWebRunID(), ScheduleID: scheduleID, Name: "Профіль бренду", Domain: "example.com", Brand: "Merchanto", Queries: "chargeback protection\nStripe integration", DesiredAIPolicy: map[string]string{"googlebot": geo.Blocked}}
 	if err := app.storeGEOProfile(ctx, input); err != nil {
 		t.Fatal(err)
 	}
+	entityPayload := `{"brand_entity":{"canonical_name":"Merchanto","aliases":["Merchanto Payments"],"entity_type":"company","verified_domains":["example.com","merchanto.example"],"same_as_urls":["https://www.wikidata.org/entity/Q123"],"ambiguity_rules":[{"alias":"Merchanto Payments","context_terms":["chargeback"]}]}}`
+	if w := strategyRequest(app, "POST", "/api/geo/profiles/"+input.ID+"/update", entityPayload); w.Code != 200 {
+		t.Fatal("Налаштування сутності не збережено", w.Code, w.Body.String())
+	}
+	var savedEntity aicitation.Entity
+	if err := pool.QueryRow(ctx, "SELECT brand_entity FROM geo_profiles WHERE id=$1", input.ID).Scan(&savedEntity); err != nil || len(savedEntity.Aliases) != 1 || savedEntity.Aliases[0] != "Merchanto Payments" {
+		t.Fatal("Реєстр сутності не збережено", savedEntity, err)
+	}
+	var savedDesired map[string]string
+	if err := pool.QueryRow(ctx, "SELECT desired_ai_policy FROM geo_profiles WHERE id=$1", input.ID).Scan(&savedDesired); err != nil || savedDesired["googlebot"] != geo.Blocked || savedDesired["gptbot"] != geo.Unknown {
+		t.Fatal("Бажану політику не збережено з unknown defaults", savedDesired, err)
+	}
 	if err := app.storeGEOProfile(ctx, input); err != nil {
-		t.Fatal("Ідемпотентність:", err)
+		t.Fatal("Ідемпотентність створення після редагування сутності:", err)
 	}
 	bad := input
 	bad.ID = newWebRunID()
@@ -109,6 +132,10 @@ func TestGEOProfilesCaptureScheduledRunsAndPreserveHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitScheduled(t, app.manager)
+	var firstDesired map[string]string
+	if err = pool.QueryRow(ctx, "SELECT desired_ai_policy FROM geo_profile_runs WHERE profile_id=$1 AND run_id=$2", input.ID, first).Scan(&firstDesired); err != nil || firstDesired["googlebot"] != geo.Blocked {
+		t.Fatal("Перший запуск не зафіксував бажану політику", firstDesired, err)
+	}
 	if _, err := app.compareScheduledRun(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +147,9 @@ func TestGEOProfilesCaptureScheduledRunsAndPreserveHistory(t *testing.T) {
 		var details string
 		_ = pool.QueryRow(ctx, "SELECT jsonb_agg(jsonb_build_object('profile',j.profile_id,'run',j.run_id,'status',j.status,'error',j.error_message,'source_status',r.status))::text FROM geo_profile_runs j JOIN audit_runs r ON r.id=j.run_id").Scan(&details)
 		t.Fatalf("%v first=%s profile=%s jobs=%s", err, first, input.ID, details)
+	}
+	if w := strategyRequest(app, "POST", "/api/geo/profiles/"+input.ID+"/update", `{"desired_ai_policy":{"googlebot":"allowed","gptbot":"blocked"}}`); w.Code != 200 {
+		t.Fatal("Бажану політику профілю не оновлено", w.Code, w.Body.String())
 	}
 	blocked = true
 	second, err := app.manager.startScheduled(ctx, scheduleID)
@@ -138,6 +168,10 @@ func TestGEOProfilesCaptureScheduledRunsAndPreserveHistory(t *testing.T) {
 	if err = pool.QueryRow(ctx, "SELECT baseline_report_id::text FROM geo_profile_runs WHERE profile_id=$1 AND run_id=$2", input.ID, second).Scan(&baseline); err != nil || baseline != firstReport {
 		t.Fatalf("baseline=%s %v", baseline, err)
 	}
+	var secondDesired map[string]string
+	if err = pool.QueryRow(ctx, "SELECT desired_ai_policy FROM geo_profile_runs WHERE profile_id=$1 AND run_id=$2", input.ID, second).Scan(&secondDesired); err != nil || secondDesired["googlebot"] != geo.Allowed || secondDesired["gptbot"] != geo.Blocked || firstDesired["googlebot"] != geo.Blocked {
+		t.Fatalf("Snapshots бажаної політики змінилися неочікувано: first=%v second=%v err=%v", firstDesired, secondDesired, err)
+	}
 	if err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM geo_profile_changes WHERE profile_id=$1 AND run_id=$2 AND kind='oai_searchbot_rules'", input.ID, second).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("Подія OAI: %d %v", count, err)
 	}
@@ -147,6 +181,24 @@ func TestGEOProfilesCaptureScheduledRunsAndPreserveHistory(t *testing.T) {
 	var secondReport string
 	if err = pool.QueryRow(ctx, "SELECT report_id::text FROM geo_profile_runs WHERE profile_id=$1 AND run_id=$2", input.ID, second).Scan(&secondReport); err != nil {
 		t.Fatal(err)
+	}
+	policyResponse := strategyRequest(app, "GET", "/api/geo/reports/"+secondReport+"/ai-discoverability?limit=10", "")
+	var matrix aiDiscoverabilityResponse
+	if err = json.Unmarshal(policyResponse.Body.Bytes(), &matrix); err != nil || policyResponse.Code != 200 || !matrix.DesiredConfigured || matrix.BaselineRunID != first || len(matrix.Items) != 1 || len(matrix.Items[0].Controls) != len(geo.SupportedAIPolicySpecs) {
+		t.Fatalf("Матриця AI-політик: status=%d body=%s err=%v", policyResponse.Code, policyResponse.Body.String(), err)
+	}
+	var gptControl, oaiControl *aiPolicyComparison
+	for i := range matrix.Items[0].Controls {
+		control := &matrix.Items[0].Controls[i]
+		switch control.Spec.Token {
+		case "GPTBot":
+			gptControl = control
+		case "OAI-SearchBot":
+			oaiControl = control
+		}
+	}
+	if gptControl == nil || !gptControl.Mismatch || oaiControl == nil || oaiControl.Drift != "changed" || matrix.Summary[2].Drift != 1 {
+		t.Fatalf("Mismatch і policy drift не відокремлені: %+v summary=%+v", matrix.Items[0].Controls, matrix.Summary)
 	}
 	for _, v := range []struct{ id, start, end, csv string }{{firstReport, "2026-09-01", "2026-09-30", "URL,Impressions\nhttps://example.com/page,0\n"}, {secondReport, "2026-10-01", "2026-10-09", "URL,Impressions\nhttps://example.com/page,42\n"}} {
 		in := geo.VisibilityInput{ID: newWebRunID(), Source: "gsc_ai", PeriodStart: v.start, PeriodEnd: v.end, Country: "US", Device: "all", CSV: v.csv}

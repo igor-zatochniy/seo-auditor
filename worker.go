@@ -168,6 +168,7 @@ func worker(
 					data.GEO.Search.GooglebotRules = searchRules.GooglebotRules
 					data.GEO.Search.OAISearchBotRules = searchRules.OAISearchBotRules
 					data.GEO.Search.GPTBotRules = searchRules.GPTBotRules
+					data.GEO.Search.AIPolicies = searchRules.AIPolicies
 				}
 				resp.Body.Close()
 				reqCancel()
@@ -299,6 +300,7 @@ func worker(
 		data.GEO.Search.GooglebotRules = searchRules.GooglebotRules
 		data.GEO.Search.OAISearchBotRules = searchRules.OAISearchBotRules
 		data.GEO.Search.GPTBotRules = searchRules.GPTBotRules
+		data.GEO.Search.AIPolicies = searchRules.AIPolicies
 		if err != nil {
 			data.RobotsAllowed = true
 			data.RobotsOutcome = robotsOutcomeAllowed

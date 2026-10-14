@@ -193,7 +193,9 @@
       $("csv-export").href=`/api/geo/reports/${reportID}/export/csv`;
       $("search-query").oninput=()=>{page=0;renderTable();};$("geo-filter").onchange=()=>{page=0;renderTable();};$("geo-page-size").onchange=()=>{page=0;renderTable();};
       $("geo-prev").onclick=()=>{page--;renderTable();};$("geo-next").onclick=()=>{page++;renderTable();};renderTable();
+      try { await window.seoAIPolicy.init({api,el,reportID}); } catch(error) { notice(error.message); }
       await window.seoVisibility.init({api,el,reportID,rows,notice});
+      try { await window.seoImpactAnalytics.init({api,el,reportID,notice}); } catch(error) { notice(error.message); }
     } else {
       const sources=await api("/api/geo/sources");
       for(const source of sources){const option=el("option",date(source.started_at)+" · "+source.total+" URL");option.value=source.id;$("source-list").append(option);}

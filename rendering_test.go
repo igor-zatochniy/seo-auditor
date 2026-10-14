@@ -53,6 +53,28 @@ func TestRenderingStorageIsRedactedAndBounded(t *testing.T) {
 	}
 }
 
+func TestRenderingReportIncludesAgenticSummary(t *testing.T) {
+	items := renderingReportDetails(map[string]any{
+		"status": "completed",
+		"agentic": map[string]any{
+			"status": "completed", "main_landmarks": float64(1),
+			"unnamed_interactive": float64(2), "unnamed_form_controls": float64(1),
+			"findings":                 []any{map[string]any{"element": "button (DOM 7)", "code": "unnamed_interactive"}},
+			"declarative_webmcp_forms": float64(0),
+		},
+	})
+	found := false
+	for _, item := range items {
+		if item.Label == "Знахідки" && strings.Contains(item.Value, "button (DOM 7)") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("agentic findings missing from archive report: %+v", items)
+	}
+}
+
 func TestRenderingConfigurationAndCaptureBounds(t *testing.T) {
 	cfg := Config{RenderJavaScript: true, RenderBrowserURL: "http://browser:9222", TargetLeaseDuration: 2 * time.Minute, HTTPTotalTimeout: 20 * time.Second, RobotsTotalTimeout: 10 * time.Second}
 	if err := validateRendering(cfg); err != nil {

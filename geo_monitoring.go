@@ -10,18 +10,21 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/igor-zatochniy/seo-auditor/internal/aicitation"
 	"github.com/igor-zatochniy/seo-auditor/internal/geo"
 	"github.com/jackc/pgx/v5"
 )
 
 type geoProfileInput struct {
-	ID         string `json:"id"`
-	ScheduleID string `json:"schedule_id"`
-	Name       string `json:"name"`
-	Domain     string `json:"domain"`
-	Brand      string `json:"brand"`
-	Queries    string `json:"queries"`
-	Semantic   bool   `json:"semantic,omitempty"`
+	ID              string             `json:"id"`
+	ScheduleID      string             `json:"schedule_id"`
+	Name            string             `json:"name"`
+	Domain          string             `json:"domain"`
+	Brand           string             `json:"brand"`
+	Queries         string             `json:"queries"`
+	Semantic        bool               `json:"semantic,omitempty"`
+	BrandEntity     *aicitation.Entity `json:"brand_entity,omitempty"`
+	DesiredAIPolicy map[string]string  `json:"desired_ai_policy,omitempty"`
 }
 
 func (s *webServer) storeGEOProfile(ctx context.Context, input geoProfileInput) error {
@@ -44,6 +47,27 @@ func (s *webServer) storeGEOProfile(ctx context.Context, input geoProfileInput) 
 	}
 	input.Domain, input.Brand, input.Queries = q.Domain, redactText(q.Brand), strings.Join(queries, "\n")
 	input.Name = redactText(input.Name)
+	entity := defaultGEOEntity(input.Brand, input.Domain)
+	if input.BrandEntity != nil {
+		entity, err = validateGEOEntity(*input.BrandEntity, input.Brand, input.Domain)
+		if err != nil {
+			return geoInputError{err.Error()}
+		}
+		input.BrandEntity = &entity
+	}
+	desired, err := geo.NormalizeDesiredAIPolicy(input.DesiredAIPolicy)
+	if err != nil {
+		return geoInputError{err.Error()}
+	}
+	input.DesiredAIPolicy = desired
+	entityJSON, err := json.Marshal(entity)
+	if err != nil {
+		return err
+	}
+	desiredJSON, err := json.Marshal(desired)
+	if err != nil {
+		return err
+	}
 	payload, _ := json.Marshal(input)
 	hash := fingerprintURL(s.cfg.TargetFingerprintKey, string(payload))
 	tx, err := s.pool.Begin(ctx)
@@ -86,12 +110,13 @@ func (s *webServer) storeGEOProfile(ctx context.Context, input geoProfileInput) 
 	if total >= 100 || perSchedule >= 10 {
 		return geoInputError{"Дозволено 100 GEO-профілів загалом і 10 на розклад."}
 	}
-	_, err = tx.Exec(ctx, "INSERT INTO geo_profiles(id,schedule_id,name,domain,brand,queries,request_hash,semantic) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", input.ID, input.ScheduleID, input.Name, input.Domain, input.Brand, queries, hash, input.Semantic)
+	_, err = tx.Exec(ctx, "INSERT INTO geo_profiles(id,schedule_id,name,domain,brand,queries,request_hash,semantic,brand_entity,desired_ai_policy) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", input.ID, input.ScheduleID, input.Name, input.Domain, input.Brand, queries, hash, input.Semantic, entityJSON, desiredJSON)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO geo_profile_runs(profile_id,run_id,report_id,scheduled_at)
-	 SELECT $1,sr.run_id,$2,sr.scheduled_at FROM audit_schedule_runs sr JOIN audit_runs r ON r.id=sr.run_id
+	_, err = tx.Exec(ctx, `INSERT INTO geo_profile_runs(profile_id,run_id,report_id,scheduled_at,desired_ai_policy)
+	 SELECT $1,sr.run_id,$2,sr.scheduled_at,p.desired_ai_policy FROM audit_schedule_runs sr JOIN audit_runs r ON r.id=sr.run_id
+	 JOIN geo_profiles p ON p.id=$1
 	 WHERE sr.schedule_id=$3 AND r.status IN ('completed','completed_with_errors') ORDER BY sr.scheduled_at DESC,sr.run_id DESC LIMIT 1`, input.ID, newWebRunID(), input.ScheduleID)
 	if err != nil {
 		return err
@@ -265,7 +290,7 @@ func (s *webServer) geoProfileCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *webServer) geoProfileList(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.pool.Query(r.Context(), `SELECT jsonb_build_object('id',p.id,'schedule_id',p.schedule_id,'name',p.name,'domain',p.domain,'brand',p.brand,'query_count',jsonb_array_length(p.queries),'enabled',p.enabled,'created_at',p.created_at,'schedule_name',s.name)
+	rows, err := s.pool.Query(r.Context(), `SELECT jsonb_build_object('id',p.id,'schedule_id',p.schedule_id,'name',p.name,'domain',p.domain,'brand',p.brand,'brand_entity',p.brand_entity,'desired_ai_policy',p.desired_ai_policy,'query_count',jsonb_array_length(p.queries),'enabled',p.enabled,'created_at',p.created_at,'schedule_name',s.name)
 	 FROM geo_profiles p JOIN audit_schedules s ON s.id=p.schedule_id ORDER BY p.created_at DESC,p.id LIMIT 100`)
 	if err != nil {
 		webDBError(w, err)
@@ -294,12 +319,51 @@ func (s *webServer) geoProfileUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Enabled bool `json:"enabled"`
+		Enabled         *bool              `json:"enabled"`
+		BrandEntity     *aicitation.Entity `json:"brand_entity"`
+		DesiredAIPolicy map[string]string  `json:"desired_ai_policy"`
 	}
-	if !decodeWebJSON(w, r, 1024, &body) {
+	if !decodeWebJSON(w, r, 32768, &body) {
 		return
 	}
-	tag, err := s.pool.Exec(r.Context(), "UPDATE geo_profiles SET enabled=$2 WHERE id=$1", id, body.Enabled)
+	if body.Enabled == nil && body.BrandEntity == nil && body.DesiredAIPolicy == nil {
+		writeWebError(w, 400, "empty_update", "Немає змін для збереження")
+		return
+	}
+	var entityJSON any
+	if body.BrandEntity != nil {
+		var name, domain string
+		if err := s.pool.QueryRow(r.Context(), "SELECT brand,domain FROM geo_profiles WHERE id=$1", id).Scan(&name, &domain); err != nil {
+			webDBError(w, err)
+			return
+		}
+		entity, err := validateGEOEntity(*body.BrandEntity, name, domain)
+		if err != nil {
+			writeWebError(w, 400, "invalid_brand_entity", err.Error())
+			return
+		}
+		encoded, err := json.Marshal(entity)
+		if err != nil {
+			webDBError(w, err)
+			return
+		}
+		entityJSON = encoded
+	}
+	var desiredJSON any
+	if body.DesiredAIPolicy != nil {
+		desired, err := geo.NormalizeDesiredAIPolicy(body.DesiredAIPolicy)
+		if err != nil {
+			writeWebError(w, 400, "invalid_ai_policy", err.Error())
+			return
+		}
+		encoded, err := json.Marshal(desired)
+		if err != nil {
+			webDBError(w, err)
+			return
+		}
+		desiredJSON = encoded
+	}
+	tag, err := s.pool.Exec(r.Context(), "UPDATE geo_profiles SET enabled=COALESCE($2,enabled),brand_entity=COALESCE($3::jsonb,brand_entity),desired_ai_policy=COALESCE($4::jsonb,desired_ai_policy) WHERE id=$1", id, body.Enabled, entityJSON, desiredJSON)
 	if err != nil {
 		webDBError(w, err)
 		return

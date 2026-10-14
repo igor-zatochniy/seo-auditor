@@ -53,6 +53,7 @@ func (b *renderCapture) Write(p []byte) (int, error) {
 func renderPageComparison(ctx context.Context, cfg Config, target string, body []byte, headers http.Header, raw SEOData, pageClient, robotsClient *http.Client, cache *robotsPolicyCache) *seo.RenderComparison {
 	start := time.Now()
 	result := &seo.RenderComparison{Status: "failed", Raw: seo.Snapshot(raw)}
+	result.MainContentDependency = seo.AssessMainContentDependency(result.Raw, nil, false)
 	defer func() { result.DurationMS = time.Since(start).Milliseconds() }()
 	ctx, cancel := context.WithTimeout(ctx, effectiveRenderTimeout(cfg))
 	defer cancel()
@@ -66,6 +67,7 @@ func renderPageComparison(ctx context.Context, cfg Config, target string, body [
 	result.Browser = out.Browser
 	result.Warnings = out.Warnings
 	result.Resources, result.ResourcesTruncated = out.Resources, out.ResourcesTruncated
+	result.Agentic = out.Agentic
 	if err != nil {
 		result.Error = sanitizeError(err)
 		return result
@@ -85,6 +87,7 @@ func renderPageComparison(ctx context.Context, cfg Config, target string, body [
 	if out.Blocked > 0 || len(out.Warnings) > 0 || !result.Raw.Complete || !result.Rendered.Complete {
 		result.Status = "partial"
 	}
+	result.MainContentDependency = seo.AssessMainContentDependency(result.Raw, result.Rendered, result.Status == "completed")
 	return result
 }
 

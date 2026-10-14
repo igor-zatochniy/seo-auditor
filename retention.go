@@ -38,6 +38,8 @@ const retentionCandidateSQL = `SELECT r.id::TEXT FROM audit_runs r
  AND NOT EXISTS (SELECT 1 FROM audit_run_targets t WHERE t.run_id=r.id AND t.status IN ('pending','running','abandoned'))
  AND NOT EXISTS (SELECT 1 FROM audit_schedule_runs s WHERE s.comparison_status='pending' AND (s.run_id=r.id OR s.baseline_run_id=r.id))
  AND NOT EXISTS (SELECT 1 FROM audit_adaptive_targets t WHERE t.baseline_run_id=r.id)
+ AND NOT EXISTS (SELECT 1 FROM audit_rule_runs j WHERE j.run_id=r.id AND (j.status='pending' OR j.automatic AND r.id IN
+   (SELECT h.run_id FROM audit_rule_runs h WHERE h.schedule_id=j.schedule_id AND h.key_check=j.key_check AND h.status='done' AND h.automatic ORDER BY h.created_at DESC,h.run_id DESC LIMIT 2)))
  AND NOT EXISTS (SELECT 1 FROM audit_adaptive_run_targets t JOIN audit_schedule_runs s ON s.run_id=t.run_id WHERE s.comparison_status='pending' AND t.baseline_run_id=r.id)
  AND NOT EXISTS (SELECT 1 FROM audit_schedule_runs s WHERE s.run_id=r.id AND r.id IN
    (SELECT h.run_id FROM audit_schedule_runs h WHERE h.schedule_id=s.schedule_id AND h.key_check=s.key_check
@@ -208,7 +210,8 @@ func forgetDisabledSchedule(ctx context.Context, pool *pgxpool.Pool, opts retent
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM audit_schedule_runs s JOIN audit_runs r ON r.id=s.run_id
 	 WHERE s.schedule_id=$1 AND (r.status='running' OR s.comparison_status='pending'))
 	 OR EXISTS(SELECT 1 FROM geo_profile_runs j JOIN geo_profiles p ON p.id=j.profile_id
-	 WHERE p.schedule_id=$1 AND j.status='pending')`, opts.ForgetSchedule).Scan(&active); err != nil {
+	 WHERE p.schedule_id=$1 AND j.status='pending')
+ OR EXISTS(SELECT 1 FROM audit_rule_runs j WHERE j.schedule_id=$1 AND j.status='pending')`, opts.ForgetSchedule).Scan(&active); err != nil {
 		return err
 	}
 	if active {

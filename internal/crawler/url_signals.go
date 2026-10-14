@@ -8,6 +8,7 @@ import (
 const URLSignalsVersion = "url-signals-v1"
 
 type URLReference struct {
+	Self         *bool    `json:"self,omitempty"`
 	Truncated    bool     `json:"truncated,omitempty"`
 	URL          string   `json:"url"`
 	Fingerprints []string `json:"fingerprints,omitempty"`

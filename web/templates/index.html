@@ -9,6 +9,8 @@
   <link rel="stylesheet" href="/static/duplicates.css">
 	<link rel="stylesheet" href="/static/crawl-extensions.css">
   <link rel="stylesheet" href="/static/bots.css">
+  <link rel="stylesheet" href="/static/crawl-diagnostics.css">
+  <script src="/static/crawl-diagnostics.js" defer></script>
   <script src="/static/rendering.js" defer></script>
   <script src="/static/diagnostics.js" defer></script>
   <script src="/static/structured-data.js" defer></script>
@@ -27,7 +29,7 @@
       <div class="section-heading"><div><p class="eyebrow">РОБОЧИЙ ПРОСТІР</p><h1>Новий аудит</h1></div><span class="muted" id="limit-label"></span></div>
       <form id="audit-form">
         <fieldset class="crawl-mode"><legend>Режим аудиту</legend><label><input type="radio" name="mode" value="list" checked> Список URL</label><label><input type="radio" name="mode" value="site"> Site Crawl</label></fieldset>
-		<label class="checkbox-label"><input type="checkbox" id="render-javascript" disabled> JavaScript і лабораторні LCP/CLS <span class="muted" id="render-availability"></span></label>
+		<label class="checkbox-label"><input type="checkbox" id="render-javascript" disabled> JavaScript, лабораторні LCP/CLS та доступність для AI-агентів <span class="muted" id="render-availability"></span></label>
         <div id="list-input">
         <label for="urls">URL сторінок</label>
         <textarea id="urls" rows="8" spellcheck="false" placeholder="https://example.com/&#10;https://example.com/about" required></textarea>
@@ -46,7 +48,25 @@
       <div class="summary" id="summary"></div>
       <div class="progress-line"><progress id="run-progress" max="100" value="0" aria-label="Прогрес аудиту"></progress><strong id="percentage">0%</strong></div>
       <div class="target-states" id="target-states"></div>
-      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button><button role="tab" id="tab-international" aria-selected="false" aria-controls="international">Міжнародне SEO</button><button role="tab" id="tab-duplicates" aria-selected="false" aria-controls="duplicates">Дублі контенту</button><button role="tab" id="tab-routes" aria-selected="false" aria-controls="routes">URL-маршрути</button></div>
+      <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button><button role="tab" id="tab-international" aria-selected="false" aria-controls="international">Міжнародне SEO</button><button role="tab" id="tab-duplicates" aria-selected="false" aria-controls="duplicates">Дублі контенту</button><button role="tab" id="tab-routes" aria-selected="false" aria-controls="routes">URL-маршрути</button><button role="tab" id="tab-coverage" aria-selected="false" aria-controls="coverage" hidden>Повнота обходу</button><button role="tab" id="tab-facets" aria-selected="false" aria-controls="facets" hidden>Фільтри URL</button><button role="tab" id="tab-rules" aria-selected="false" aria-controls="rules">Власні правила</button></div>
+      <section id="coverage" role="tabpanel" aria-labelledby="tab-coverage" hidden>
+        <div class="band-heading"><h2>Карта спостережених URL</h2><div class="actions"><button id="coverage-import">Імпорт GSC</button><button id="coverage-bots">Журнал ботів</button><button id="coverage-refresh" title="Оновити покриття" aria-label="Оновити покриття">↻</button></div></div>
+        <div id="coverage-summary" class="target-states"></div><p id="coverage-status" class="metric-note" role="status"></p>
+        <select id="coverage-filter" aria-label="Фільтр покриття"><option value="">Усі відомі URL</option><option value="missing">Без успішного результату</option><option value="orphan">Кандидати без вхідних посилань</option><option value="important">Важливі URL</option><option value="error">Помилки та robots</option></select>
+        <div class="table-wrap" tabindex="0"><table><thead><tr><th>URL / джерела</th><th>Перевірка</th><th>Вхідні посилання</th><th>Директиви Google</th><th>Записи ботів / збіги IP</th><th>Важлива</th></tr></thead><tbody id="coverage-rows"></tbody></table></div>
+        <div class="pagination"><button id="coverage-prev" aria-label="Попередні URL" title="Попередні URL">←</button><button id="coverage-next" aria-label="Наступні URL" title="Наступні URL">→</button></div>
+      </section>
+      <section id="facets" role="tabpanel" aria-labelledby="tab-facets" hidden>
+        <div class="band-heading"><h2>Сімейства параметризованих URL</h2><button id="facets-refresh" title="Оновити сімейства" aria-label="Оновити сімейства">↻</button></div><p id="facets-status" class="metric-note" role="status"></p>
+        <div class="table-wrap" tabindex="0"><table><thead><tr><th>Сімейство</th><th>Варіанти / аудитовано</th><th>Дублі тексту / non-self canonical</th><th>Директиви allowed / noindex</th><th>Параметри / діапазон пагінації</th><th>Записи ботів</th><th>Підстави для перевірки</th></tr></thead><tbody id="facets-rows"></tbody></table></div>
+        <div class="pagination"><button id="facets-prev" aria-label="Попередні сімейства" title="Попередні сімейства">←</button><button id="facets-next" aria-label="Наступні сімейства" title="Наступні сімейства">→</button></div>
+      </section>
+      <section id="rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+        <div class="band-heading"><h2>Знімок власних правил</h2><button id="rules-refresh" title="Оновити результати правил" aria-label="Оновити результати правил">↻</button></div>
+        <form id="rules-apply" class="actions"><select id="rules-schedule" aria-label="Набір правил розкладу"></select><button type="submit">Перевірити за правилами</button></form><p id="rules-status" class="metric-note" role="status"></p>
+        <div class="table-wrap" tabindex="0"><table><thead><tr><th>Сторінка</th><th>Правило / ревізія / пріоритет</th><th>Результат і доказ</th></tr></thead><tbody id="rules-rows"></tbody></table></div>
+        <div class="pagination"><button id="rules-prev" aria-label="Попередні перевірки" title="Попередні перевірки">←</button><button id="rules-next" aria-label="Наступні перевірки" title="Наступні перевірки">→</button></div>
+      </section>
 	  <section id="routes" role="tabpanel" aria-labelledby="tab-routes" hidden><div class="band-heading"><h2>Редиректи та canonical</h2><button id="routes-refresh" title="Оновити маршрути" aria-label="Оновити маршрути">↻</button></div><p id="routes-status" class="metric-note" role="status"></p><div class="table-wrap"><table><thead><tr><th>Сторінка</th><th>Редирект</th><th>Canonical</th><th>Джерела та вхідні посилання</th></tr></thead><tbody id="routes-rows"></tbody></table></div><div class="pagination"><button id="routes-previous" title="Попередні маршрути" aria-label="Попередні маршрути">←</button><button id="routes-next" title="Наступні маршрути" aria-label="Наступні маршрути">→</button></div></section>
       <section id="overview" role="tabpanel" aria-labelledby="tab-overview"><div class="band-heading"><h2>Технічні сигнали</h2><span class="muted" id="parsed-count"></span></div><div id="analytics" class="charts"></div><p class="metric-note">HTML-сигнали враховують лише успішно розібрані сторінки HTTP 200. Non-self canonical, відсутність JSON-LD та блокування robots.txt не є універсальними SEO-помилками. Noindex / none враховує будь-який scope директиви.</p></section>
       <section id="pages" role="tabpanel" aria-labelledby="tab-pages" hidden>

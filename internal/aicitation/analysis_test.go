@@ -35,3 +35,44 @@ func TestOversizedCitationIsExplicitlyLimited(t *testing.T) {
 		t.Fatal("Обрізання URL не позначено явно", a, err)
 	}
 }
+
+func TestEntityAliasesUnicodeContextAndCitationIdentity(t *testing.T) {
+	brand := Entity{
+		CanonicalName:   "Apple",
+		Aliases:         []string{"Apple Inc."},
+		EntityType:      "company",
+		VerifiedDomains: []string{"apple.com", "apple.example"},
+		SameAsURLs:      []string{"https://www.wikidata.org/entity/Q312"},
+		AmbiguityRules:  []AmbiguityRule{{Alias: "Apple", ContextTerms: []string{"iPhone", "Mac"}}},
+	}
+	ambiguous, err := AnalyzeEntities("I ate an Apple after lunch.", "https://notapple.com/article", brand, nil, nil)
+	if err != nil || ambiguous.BrandMention || ambiguous.BrandEntity.Status != "ambiguous" || len(ambiguous.BrandEntity.AmbiguousAliases) != 1 || len(ambiguous.Citations) != 1 || ambiguous.Citations[0].Relation != "external" {
+		t.Fatalf("неоднозначне слово не відокремлено: %+v, %v", ambiguous, err)
+	}
+	resolved, err := AnalyzeEntities("ＡＰＰＬＥ announced an iPhone update.", "https://sub.apple.example/news", brand, nil, nil)
+	if err != nil || !resolved.BrandMention || resolved.BrandEntity.Status != "matched" || len(resolved.Citations) != 1 || resolved.Citations[0].Relation != "own" {
+		t.Fatalf("NFKC/контекст/підтверджений домен не спрацювали: %+v, %v", resolved, err)
+	}
+	if !Mentions("Apple Inc. devices", "Apple Inc") || Mentions("pineapple is sweet", "apple") {
+		t.Fatal("межі токенів порушено")
+	}
+	separateSentence, err := AnalyzeEntities("Apple. The article mentions an iPhone later.", "", brand, nil, nil)
+	if err != nil || separateSentence.BrandEntity.Status != "ambiguous" {
+		t.Fatalf("контекст з іншого речення помилково розв'язав назву: %+v, %v", separateSentence.BrandEntity, err)
+	}
+	identityLink, err := AnalyzeEntities("Profile: https://www.wikidata.org/entity/Q312", "", brand, nil, nil)
+	if err != nil || !identityLink.BrandEntity.SameAsReferenced || identityLink.BrandMention {
+		t.Fatalf("sameAs помилково змішався зі згадкою бренду: %+v, %v", identityLink.BrandEntity, err)
+	}
+}
+
+func TestCitationAbsenceRequiresExplicitCompleteSources(t *testing.T) {
+	partial, err := AnalyzeEntities("Merchanto was mentioned", "https://other.example/source", Entity{CanonicalName: "Merchanto", EntityType: "company", VerifiedDomains: []string{"merchanto.example"}}, nil, nil)
+	if err != nil || partial.SourceCoverage != "provided_unreviewed" || partial.BrandEntity.Status != "matched" {
+		t.Fatalf("аналіз не повинен вигадувати повноту джерел: %+v, %v", partial, err)
+	}
+	limited, err := Analyze(strings.Repeat("https://other.example/source ", 1000), "", Brand{}, nil)
+	if err != nil || !limited.Limited || limited.SourceCoverage != "limited" {
+		t.Fatalf("обмежену вибірку не позначено: %+v, %v", limited, err)
+	}
+}

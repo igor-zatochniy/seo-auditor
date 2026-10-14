@@ -101,6 +101,38 @@ func TestConfirmedAIAnswerIsAtomicPrivateAndIdempotent(t *testing.T) {
 	if err := app.pool.QueryRow(t.Context(), "SELECT citation FROM geo_citation_checks WHERE report_id=$1 AND ordinal=1 AND engine='gemini'", report.ID).Scan(&citation); err != nil || citation != "unknown" {
 		t.Fatal("Невиявлене джерело помилково оголошено відсутнім", citation, err)
 	}
+	competitorSet := newWebRunID()
+	if _, err := app.pool.Exec(t.Context(), `INSERT INTO geo_competitor_sets(id,report_id,request_hash,max_pages,fresh_hours) VALUES($1,$2,$3,1,24)`, competitorSet, report.ID, fingerprintURL(app.cfg.TargetFingerprintKey, "competitor-test")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.pool.Exec(t.Context(), `INSERT INTO geo_competitor_jobs(set_id,ordinal,requested_url,domain,brand,site_mode,report_id) VALUES($1,1,'https://chargeflow.example/','chargeflow.example','Chargeflow',TRUE,$2)`, competitorSet, newWebRunID()); err != nil {
+		t.Fatal(err)
+	}
+	complete := aiAnswerInput{ID: newWebRunID(), Engine: "perplexity", Answer: "Merchanto and Chargeflow are mentioned in this answer.", Sources: "https://chargeflow.example/source", SourcesComplete: true, Confirmed: true, BrandMention: true}
+	preview = call("POST", base+"/answer/preview", complete)
+	if preview.Code != 200 || json.Unmarshal(preview.Body.Bytes(), &a) != nil {
+		t.Fatal("Не вдалося попередньо розпізнати цитату конкурента", preview.Code, preview.Body.String())
+	}
+	for _, source := range a.Citations {
+		if source.Relation == "competitor" {
+			complete.Selected = append(complete.Selected, source.ID)
+		}
+	}
+	if w = call("POST", base+"/answer", complete); w.Code != 201 {
+		t.Fatal("Повне перевірене джерело не збережено", w.Code, w.Body.String())
+	}
+	if err := app.pool.QueryRow(t.Context(), "SELECT citation FROM geo_citation_checks WHERE report_id=$1 AND ordinal=1 AND engine='perplexity'", report.ID).Scan(&citation); err != nil || citation != "no" {
+		t.Fatal("Повний список джерел не дав перевірений негативний результат", citation, err)
+	}
+	var summary struct {
+		Overall citationIntelligenceCounts `json:"overall"`
+	}
+	if w = call("GET", fmt.Sprintf("/api/geo/reports/%s/citation-intelligence", report.ID), nil); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &summary) != nil {
+		t.Fatal("Зведення Citation Intelligence", w.Code, w.Body.String())
+	}
+	if summary.Overall.ReviewedAnswers != 3 || summary.Overall.BrandMentionKnown != 3 || summary.Overall.BrandMentionYes != 2 || summary.Overall.OwnCitationYes != 1 || summary.Overall.OwnCitationNo != 1 || summary.Overall.OwnCitationUnknown != 1 || summary.Overall.CompetitorCited != 1 || summary.Overall.CompetitorWithoutOwn != 1 || summary.Overall.BrandMentionedNotCited != 1 || summary.Overall.ActionableGaps != 1 || summary.Overall.IncompleteSources != 2 {
+		t.Fatalf("Неправильні знаменники або статуси unknown: %+v", summary.Overall)
+	}
 }
 
 func TestOptionalSemanticCorpusUsesFullIndexAndPreservesLexical(t *testing.T) {

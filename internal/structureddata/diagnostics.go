@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const Version = "jsonld-diagnostics-v1"
+const Version = "jsonld-diagnostics-v2"
 const MaxIssues = 64
 
 type Issue struct {
@@ -22,12 +22,13 @@ type Issue struct {
 }
 
 type Report struct {
-	Version     string   `json:"version"`
-	Complete    bool     `json:"complete"`
-	Blocks      int      `json:"blocks"`
-	ValidBlocks int      `json:"valid_blocks"`
-	Types       []string `json:"types"`
-	Issues      []Issue  `json:"issues"`
+	Version     string           `json:"version"`
+	Complete    bool             `json:"complete"`
+	Blocks      int              `json:"blocks"`
+	ValidBlocks int              `json:"valid_blocks"`
+	Types       []string         `json:"types"`
+	Issues      []Issue          `json:"issues"`
+	Products    *ProductEvidence `json:"products,omitempty"`
 }
 
 type reference struct {
@@ -43,10 +44,12 @@ type Collector struct {
 	nodes     int
 	bytesRead int
 	finalized bool
+	products  []productOffer
+	offerIDs  map[string]productOffer
 }
 
 func NewCollector() *Collector {
-	return &Collector{report: Report{Version: Version, Complete: true, Types: []string{}, Issues: []Issue{}}, types: map[string]bool{}, ids: map[string]identity{}}
+	return &Collector{report: Report{Version: Version, Complete: true, Types: []string{}, Issues: []Issue{}}, types: map[string]bool{}, ids: map[string]identity{}, offerIDs: map[string]productOffer{}}
 }
 
 func (c *Collector) Incomplete() { c.report.Complete = false }
@@ -139,6 +142,24 @@ func (c *Collector) visit(value any, path string, depth int) {
 					c.Incomplete()
 				}
 				c.checkProperties(v, t, path)
+				if t == "Product" {
+					c.collectProduct(v)
+				}
+				if (t == "Offer" || t == "AggregateOffer" || t == "PriceSpecification" || t == "UnitPriceSpecification") && len(c.offerIDs) < 128 {
+					if id, ok := v["@id"].(string); ok && len(id) <= 2048 {
+						price := offerPrice(v, 0)
+						if old, exists := c.offerIDs[id]; exists {
+							price.price = price.price || old.price
+							price.complete = price.complete && old.complete
+							price.refs = append(price.refs, old.refs...)
+							if len(price.refs) > 128 {
+								price.refs = price.refs[:128]
+								price.complete = false
+							}
+						}
+						c.offerIDs[id] = price
+					}
+				}
 			}
 		}
 		if id, ok := v["@id"].(string); ok && len(id) <= 2048 {
@@ -256,6 +277,7 @@ func (c *Collector) Result(pageURL string) *Report {
 			}
 		}
 	}
+	c.report.Products = c.productResult(pageURL)
 	result := c.report
 	for typ := range c.types {
 		result.Types = append(result.Types, typ)
