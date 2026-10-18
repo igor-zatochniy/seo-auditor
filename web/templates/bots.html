@@ -14,8 +14,9 @@
     <section><div class="section-heading"><h1>Відвідування ботів</h1><button id="refresh-networks" title="Оновити офіційні IP-діапазони">↻ Оновити IP-діапазони</button></div><div id="network-status" class="target-states"></div></section>
     <section><h2>Імпорт журналу</h2>
       <form id="bot-import-form">
-        <div class="monitor-grid"><label>Домен<input id="bot-domain" required placeholder="example.com" maxlength="253"></label><label>Формат<select id="bot-format"><option value="jsonl">Nginx JSONL</option><option value="combined">Nginx / Apache combined</option></select></label></div>
-        <label for="bot-file-pick">Файл журналу</label><div class="actions"><button id="bot-file-pick" type="button">Обрати файл</button><span id="bot-file-name" class="muted">Файл не обрано</span></div><input id="bot-file" type="file" accept=".log,.txt,.jsonl,.ndjson" hidden>
+        <div class="monitor-grid"><label>Домен<input id="bot-domain" required placeholder="example.com" maxlength="253"></label><label>Формат<select id="bot-format"><option value="jsonl">Nginx JSONL</option><option value="combined">Nginx / Apache combined</option><option value="cloudfront">CloudFront standard TSV</option><option value="cloudflare">Cloudflare HTTP requests JSONL</option><option value="vercel">Vercel Drains proxy JSONL</option><option value="fastly">Fastly custom JSONL</option></select></label></div>
+        <label for="bot-file-pick">Файл журналу</label><div class="actions"><button id="bot-file-pick" type="button">Обрати файл</button><span id="bot-file-name" class="muted">Файл не обрано</span></div><input id="bot-file" type="file" accept=".log,.txt,.jsonl,.ndjson,.tsv,.json" hidden>
+        <p class="muted">CDN: потрібен експорт із часом, URL, HTTP-статусом, методом і User-Agent. <a href="/static/cdn-formats.txt" target="_blank" rel="noopener">Підтримувані поля й приклади</a>. Формат Fastly — налаштований JSONL; довільні формати автоматично не визначаються. IP та сирі журнали не зберігаються.</p>
         <label>Журнал<textarea id="bot-log" rows="5" required spellcheck="false"></textarea></label>
         <div class="actions"><button class="primary" id="bot-import" type="submit">Імпортувати</button><span id="bot-import-status" role="status"></span></div>
       </form>
@@ -32,7 +33,7 @@
     </section>
     <section><h2>Останні 100 імпортів</h2><div id="bot-imports" class="monitor-links"></div></section>
     <section id="bot-report" hidden><div class="band-heading"><h2 id="bot-report-title">Звіт</h2><span id="bot-report-stats" class="muted"></span></div><div id="bot-totals" class="target-states"></div>
-      <div class="table-wrap"><table><thead><tr><th>URL</th><th>Бот</th><th>Перевірка IP</th><th>Візити</th><th>HTTP-коди / помилки</th><th>Перший / останній візит</th></tr></thead><tbody id="bot-rows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>URL</th><th>Бот</th><th>Перевірка IP</th><th>Візити</th><th>HTTP-коди / помилки</th><th>Origin HTTP / кеш</th><th>Перший / останній візит</th></tr></thead><tbody id="bot-rows"></tbody></table></div>
       <div class="pagination"><span id="bot-page-count" role="status"></span><div class="actions"><button id="bot-prev" title="Попередня сторінка">←</button><button id="bot-next" title="Наступна сторінка">→</button></div></div>
     </section>
     <footer><span>Візит бота не є доказом індексації чи AI-цитування.</span></footer>

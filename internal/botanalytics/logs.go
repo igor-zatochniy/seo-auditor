@@ -40,6 +40,9 @@ type Record struct {
 	Verification string
 	Status       int
 	At           time.Time
+	OriginStatus *int
+	CacheStatus  string
+	EventID      string
 }
 type Stats struct {
 	Lines         int `json:"lines"`
@@ -47,6 +50,9 @@ type Stats struct {
 	Invalid       int `json:"invalid"`
 	NonBots       int `json:"non_bots"`
 	ForeignDomain int `json:"foreign_domain"`
+	Duplicates    int `json:"duplicates"`
+	NoHTTP        int `json:"no_http_response"`
+	SkippedMethod int `json:"skipped_method"`
 }
 
 func ParseRanges(raw []byte) ([]netip.Prefix, error) {
@@ -106,6 +112,9 @@ func Verify(ip netip.Addr, ranges Ranges, now time.Time) string {
 var combined = regexp.MustCompile(`^(\S+) \S+ \S+ \[([^\]]+)\] "([^"]+)" (\d{3}) \S+ "[^"]*" "([^"]*)"(?: .*)?$`)
 
 func Parse(ctx context.Context, reader io.Reader, format, domain string, ranges map[string]Ranges, now time.Time) ([]Record, Stats, error) {
+	if IsCDNFormat(format) {
+		return parseCDN(ctx, reader, format, domain, ranges, now)
+	}
 	stats := Stats{}
 	var err error
 	domain, err = geo.NormalizeDomain(domain)
@@ -165,7 +174,7 @@ func Parse(ctx context.Context, reader io.Reader, format, domain string, ranges 
 			stats.Invalid++
 			continue
 		}
-		records = append(records, Record{normalized, bot, Verify(ip, ranges[bot], now), status, at.UTC()})
+		records = append(records, Record{URL: normalized, Bot: bot, Verification: Verify(ip, ranges[bot], now), Status: status, At: at.UTC()})
 		stats.Accepted++
 	}
 	if err := scanner.Err(); err != nil {

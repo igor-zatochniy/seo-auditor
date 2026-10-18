@@ -90,6 +90,9 @@ func (s *webServer) handler() http.Handler {
 	s.registerBotAnalytics(mux)
 	s.registerCrawlDiagnostics(mux)
 	s.registerAuditRules(mux)
+	s.registerSearchInsights(mux)
+	s.registerPageTypes(mux)
+	mux.HandleFunc("GET /api/audits/{id}/cdn-diagnostics", s.cdnDiagnostics)
 	assets, _ := fs.Sub(webAssets, "web/static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(assets))))
 	page := template.Must(template.ParseFS(webAssets, "web/templates/index.html"))
@@ -188,13 +191,14 @@ func (s *webServer) secure(next http.Handler) http.Handler {
 				return
 			}
 			timeout := effectiveDBFetchTimeout(s.cfg)
-			if strings.Contains(r.URL.Path, "/coverage") || strings.HasSuffix(r.URL.Path, "/facets") || strings.Contains(r.URL.Path, "/rules") {
+			if strings.Contains(r.URL.Path, "/coverage") || strings.HasSuffix(r.URL.Path, "/facets") || strings.Contains(r.URL.Path, "/rules") || strings.HasSuffix(r.URL.Path, "/structure") || strings.Contains(r.URL.Path, "/landing-") || strings.Contains(r.URL.Path, "/search-imports") || strings.Contains(r.URL.Path, "/page-type") || strings.HasSuffix(r.URL.Path, "/cdn-diagnostics") {
 				timeout = 30 * time.Second
 			}
 			if strings.Contains(r.URL.Path, "/export/") {
 				timeout = s.cfg.ReportExportTimeout
 			}
-			if r.Method == "POST" {
+			// Bulk CSV imports are independent of audit terminal finalization.
+			if r.Method == "POST" && !strings.HasSuffix(r.URL.Path, "/search-imports") {
 				timeout = s.cfg.FinalizationTimeout
 			}
 			if r.URL.Path == "/api/bots/fetch-diagnostics" {

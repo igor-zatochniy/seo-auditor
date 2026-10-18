@@ -17,7 +17,7 @@
     if(current!==generation)return;
     $("bot-report").hidden=false;$("bot-report-title").textContent=data.summary.domain;
     const stats=data.summary.stats;
-    $("bot-report-stats").textContent=`${stats.lines} рядків · ${stats.accepted} візитів · ${stats.invalid} некоректних · ${stats.foreign_domain} поза доменом · імпорт ${date(data.summary.created_at)}`;
+    $("bot-report-stats").textContent=`${stats.lines} рядків · ${stats.accepted} візитів · ${stats.invalid} некоректних · ${stats.foreign_domain} поза доменом · дублів ID: ${stats.duplicates||0} · без HTTP-відповіді: ${stats.no_http_response||0} · імпорт ${date(data.summary.created_at)}`;
     const totals=$("bot-totals");totals.replaceChildren();
     for(const item of data.totals){
       const evidence=data.summary.range_evidence?.[item.bot];
@@ -27,10 +27,10 @@
     const rows=$("bot-rows");rows.replaceChildren();
     for(const item of data.items){
       const tr=el("tr");
-      tr.append(el("td",item.safe_url),el("td",item.bot),el("td",verification[item.verification]),el("td",item.visits),el("td",(item.status_codes||[]).join(", ")+" · помилок "+item.errors),el("td",date(item.first)+" / "+date(item.last)));
+      tr.append(el("td",item.safe_url),el("td",item.bot),el("td",verification[item.verification]),el("td",item.visits),el("td",(item.status_codes||[]).join(", ")+" · помилок "+item.errors),el("td",((item.origin_status_codes||[]).join(", ")||"Невідомо")+" / "+((item.cache_statuses||[]).join(", ")||"Невідомо")),el("td",date(item.first)+" / "+date(item.last)));
       rows.append(tr);
     }
-    if(!data.items.length){const td=el("td","Візитів ботів у цьому імпорті немає","empty");td.colSpan=6;const tr=el("tr");tr.append(td);rows.append(tr);}
+    if(!data.items.length){const td=el("td","Візитів ботів у цьому імпорті немає","empty");td.colSpan=7;const tr=el("tr");tr.append(td);rows.append(tr);}
     next=data.next;$("bot-prev").disabled=cursors.length===1;$("bot-next").disabled=!next;$("bot-page-count").textContent="Сторінка "+cursors.length;
   }
   const fetchLabels={html_received:"HTML отримано",challenge_suspected:"Підозра на challenge",http_rejected:"HTTP-відмова або тимчасова помилка",http_error:"HTTP-помилка",non_html:"Не HTML",empty_html:"Порожній HTML",blocked_by_robots:"Заборонено robots.txt",unknown:"Невідомо",network_error:"Мережева помилка",external_redirect:"Зовнішній редирект",redirect_limit:"Ліміт редиректів",redirect_invalid:"Некоректний редирект",body_read_error:"Помилка читання"};

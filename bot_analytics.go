@@ -228,7 +228,7 @@ func (s *webServer) importBotLogs(w http.ResponseWriter, r *http.Request) {
 		webDBError(w, err)
 		return
 	}
-	_, err = tx.CopyFrom(r.Context(), pgx.Identifier{"audit_bot_events"}, []string{"import_id", "ordinal", "safe_url", "target_fingerprint", "bot", "verification", "http_status", "observed_at", "url_shape", "coverage_fingerprint"}, pgx.CopyFromSlice(len(records), func(i int) ([]any, error) {
+	_, err = tx.CopyFrom(r.Context(), pgx.Identifier{"audit_bot_events"}, []string{"import_id", "ordinal", "safe_url", "target_fingerprint", "bot", "verification", "http_status", "observed_at", "url_shape", "coverage_fingerprint", "origin_status", "cache_status", "event_fingerprint"}, pgx.CopyFromSlice(len(records), func(i int) ([]any, error) {
 		record := records[i]
 		safe, _, _ := limitStorageString(redactURL(record.URL), 2048)
 		normalized, _, e := normalizeSiteURL(record.URL, false)
@@ -239,7 +239,16 @@ func (s *webServer) importBotLogs(w http.ResponseWriter, r *http.Request) {
 			shape = &value
 			coverageFP = fingerprintURL(s.cfg.TargetFingerprintKey, normalized)
 		}
-		return []any{input.ID, i + 1, safe, fingerprintURL(s.cfg.TargetFingerprintKey, record.URL), record.Bot, record.Verification, record.Status, record.At, shape, coverageFP}, nil
+		var eventFP []byte
+		if record.EventID != "" {
+			eventFP = fingerprintURL(s.cfg.TargetFingerprintKey, "cdn-event:"+input.Format+"\x00"+domain+"\x00"+record.EventID)
+		}
+		var cache *string
+		if record.CacheStatus != "" {
+			value := record.CacheStatus
+			cache = &value
+		}
+		return []any{input.ID, i + 1, safe, fingerprintURL(s.cfg.TargetFingerprintKey, record.URL), record.Bot, record.Verification, record.Status, record.At, shape, coverageFP, record.OriginStatus, cache, eventFP}, nil
 	}))
 	if err != nil {
 		webDBError(w, err)
@@ -290,7 +299,7 @@ func (s *webServer) botImportReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var summary map[string]any
-	err := s.pool.QueryRow(r.Context(), `SELECT jsonb_build_object('id',id,'domain',domain,'stats',stats,'range_evidence',range_evidence,'created_at',created_at) FROM audit_bot_imports WHERE id=$1`, id).Scan(&summary)
+	err := s.pool.QueryRow(r.Context(), `SELECT jsonb_build_object('id',id,'domain',domain,'format',format,'stats',stats,'range_evidence',range_evidence,'created_at',created_at) FROM audit_bot_imports WHERE id=$1`, id).Scan(&summary)
 	if err != nil {
 		webDBError(w, err)
 		return
@@ -317,7 +326,7 @@ func (s *webServer) botImportReport(w http.ResponseWriter, r *http.Request) {
 		webDBError(w, err)
 		return
 	}
-	rows, err = s.pool.Query(r.Context(), `SELECT MIN(ordinal),safe_url,bot,verification,COUNT(*),COUNT(*) FILTER(WHERE http_status>=400),MIN(observed_at),MAX(observed_at),ARRAY_AGG(DISTINCT http_status ORDER BY http_status) FROM audit_bot_events WHERE import_id=$1 GROUP BY target_fingerprint,safe_url,bot,verification HAVING MIN(ordinal)>$2 ORDER BY MIN(ordinal) LIMIT 101`, id, after)
+	rows, err = s.pool.Query(r.Context(), `SELECT MIN(ordinal),safe_url,bot,verification,COUNT(*),COUNT(*) FILTER(WHERE http_status>=400),MIN(observed_at),MAX(observed_at),ARRAY_AGG(DISTINCT http_status ORDER BY http_status),ARRAY_AGG(DISTINCT origin_status ORDER BY origin_status) FILTER(WHERE origin_status IS NOT NULL),ARRAY_AGG(DISTINCT cache_status ORDER BY cache_status) FILTER(WHERE cache_status IS NOT NULL) FROM audit_bot_events WHERE import_id=$1 GROUP BY target_fingerprint,safe_url,bot,verification HAVING MIN(ordinal)>$2 ORDER BY MIN(ordinal) LIMIT 101`, id, after)
 	if err != nil {
 		webDBError(w, err)
 		return
@@ -328,9 +337,11 @@ func (s *webServer) botImportReport(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var ordinal, count, failures int
 		var statuses []int
+		var origins []int
+		var caches []string
 		var safe, bot, verification string
 		var first, last time.Time
-		if err = rows.Scan(&ordinal, &safe, &bot, &verification, &count, &failures, &first, &last, &statuses); err != nil {
+		if err = rows.Scan(&ordinal, &safe, &bot, &verification, &count, &failures, &first, &last, &statuses, &origins, &caches); err != nil {
 			webDBError(w, err)
 			return
 		}
@@ -338,7 +349,7 @@ func (s *webServer) botImportReport(w http.ResponseWriter, r *http.Request) {
 			next = items[99]["cursor"].(int)
 			break
 		}
-		items = append(items, map[string]any{"cursor": ordinal, "safe_url": safe, "bot": bot, "verification": verification, "visits": count, "errors": failures, "first": first, "last": last, "status_codes": statuses})
+		items = append(items, map[string]any{"cursor": ordinal, "safe_url": safe, "bot": bot, "verification": verification, "visits": count, "errors": failures, "first": first, "last": last, "status_codes": statuses, "origin_status_codes": origins, "cache_statuses": caches})
 	}
 	if err = rows.Err(); err != nil {
 		webDBError(w, err)

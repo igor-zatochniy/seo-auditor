@@ -5,17 +5,20 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type ProductEvidence struct {
-	Count     int  `json:"count"`
-	WithPrice int  `json:"with_price"`
-	Complete  bool `json:"complete"`
+	Count            int  `json:"count"`
+	WithPrice        int  `json:"with_price"`
+	Complete         bool `json:"complete"`
+	WithAvailability *int `json:"with_availability,omitempty"`
 }
 type productOffer struct {
-	price    bool
-	refs     []string
-	complete bool
+	price        bool
+	refs         []string
+	complete     bool
+	availability bool
 }
 
 func offerPrice(value any, depth int) productOffer {
@@ -25,6 +28,13 @@ func offerPrice(value any, depth int) productOffer {
 	}
 	switch v := value.(type) {
 	case map[string]any:
+		if s, ok := v["availability"].(string); ok {
+			s = strings.TrimPrefix(strings.TrimPrefix(s, "https://schema.org/"), "http://schema.org/")
+			switch s {
+			case "InStock", "OutOfStock", "PreOrder", "BackOrder", "PreSale", "LimitedAvailability", "OnlineOnly", "InStoreOnly", "SoldOut", "Discontinued":
+				result.availability = true
+			}
+		}
 		if id, ok := v["@id"].(string); ok && len(v) == 1 && len(id) <= 2048 {
 			result.refs = []string{id}
 			return result
@@ -49,6 +59,7 @@ func offerPrice(value any, depth int) productOffer {
 		if spec, ok := v["priceSpecification"]; ok {
 			p := offerPrice(spec, depth+1)
 			result.price = result.price || p.price
+			result.availability = result.availability || p.availability
 			result.refs = append(result.refs, p.refs...)
 			result.complete = result.complete && p.complete
 		}
@@ -60,6 +71,7 @@ func offerPrice(value any, depth int) productOffer {
 		for _, child := range v {
 			p := offerPrice(child, depth+1)
 			result.price = result.price || p.price
+			result.availability = result.availability || p.availability
 			result.complete = result.complete && p.complete
 			result.refs = append(result.refs, p.refs...)
 		}
@@ -75,6 +87,8 @@ func (c *Collector) collectProduct(v map[string]any) {
 }
 func (c *Collector) productResult(pageURL string) *ProductEvidence {
 	result := &ProductEvidence{Count: len(c.products), Complete: c.report.Complete && c.report.ValidBlocks == c.report.Blocks}
+	availability := 0
+	result.WithAvailability = &availability
 	base, _ := url.Parse(pageURL)
 	normalize := func(raw string) string {
 		u, e := url.Parse(raw)
@@ -85,10 +99,22 @@ func (c *Collector) productResult(pageURL string) *ProductEvidence {
 	}
 	prices := map[string]productOffer{}
 	for id, price := range c.offerIDs {
-		prices[normalize(id)] = price
+		key := normalize(id)
+		if previous, exists := prices[key]; exists {
+			price.price = price.price || previous.price
+			price.availability = price.availability || previous.availability
+			price.complete = price.complete && previous.complete
+			price.refs = append(append([]string{}, price.refs...), previous.refs...)
+			if len(price.refs) > 128 {
+				price.refs = price.refs[:128]
+				price.complete = false
+			}
+		}
+		prices[key] = price
 	}
 	for _, product := range c.products {
 		price := product.price
+		available := product.availability
 		result.Complete = result.Complete && product.complete
 		queue := append([]string{}, product.refs...)
 		seen := map[string]bool{}
@@ -105,6 +131,7 @@ func (c *Collector) productResult(pageURL string) *ProductEvidence {
 				continue
 			}
 			price = price || p.price
+			available = available || p.availability
 			result.Complete = result.Complete && p.complete
 			queue = append(queue, p.refs...)
 		}
@@ -114,6 +141,31 @@ func (c *Collector) productResult(pageURL string) *ProductEvidence {
 		if price {
 			result.WithPrice++
 		}
+		if available {
+			availability++
+		}
 	}
 	return result
+}
+
+type ArticleEvidence struct {
+	Count      int  `json:"count"`
+	WithAuthor int  `json:"with_author"`
+	WithDate   int  `json:"with_date"`
+	Complete   bool `json:"complete"`
+}
+
+func (c *Collector) collectArticle(v map[string]any) {
+	c.articles.Count++
+	if hasValue(v["author"]) {
+		c.articles.WithAuthor++
+	}
+	if s, ok := v["datePublished"].(string); ok {
+		for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+			if _, err := time.Parse(layout, s); err == nil {
+				c.articles.WithDate++
+				break
+			}
+		}
+	}
 }

@@ -11,6 +11,10 @@
   <link rel="stylesheet" href="/static/bots.css">
   <link rel="stylesheet" href="/static/crawl-diagnostics.css">
   <script src="/static/crawl-diagnostics.js" defer></script>
+  <script src="/static/search-insights.js" defer></script>
+  <script src="/static/template-diagnostics.js" defer></script>
+  <link rel="stylesheet" href="/static/template-diagnostics.css">
+  <link rel="stylesheet" href="/static/search-insights.css">
   <script src="/static/rendering.js" defer></script>
   <script src="/static/diagnostics.js" defer></script>
   <script src="/static/structured-data.js" defer></script>
@@ -49,6 +53,40 @@
       <div class="progress-line"><progress id="run-progress" max="100" value="0" aria-label="Прогрес аудиту"></progress><strong id="percentage">0%</strong></div>
       <div class="target-states" id="target-states"></div>
       <div class="view-tabs" role="tablist"><button role="tab" id="tab-overview" aria-selected="true" aria-controls="overview">Огляд</button><button role="tab" id="tab-pages" aria-selected="false" aria-controls="pages">Сторінки</button><button role="tab" id="tab-graph" aria-selected="false" aria-controls="graph" hidden>Граф посилань</button><button role="tab" id="tab-international" aria-selected="false" aria-controls="international">Міжнародне SEO</button><button role="tab" id="tab-duplicates" aria-selected="false" aria-controls="duplicates">Дублі контенту</button><button role="tab" id="tab-routes" aria-selected="false" aria-controls="routes">URL-маршрути</button><button role="tab" id="tab-coverage" aria-selected="false" aria-controls="coverage" hidden>Повнота обходу</button><button role="tab" id="tab-facets" aria-selected="false" aria-controls="facets" hidden>Фільтри URL</button><button role="tab" id="tab-rules" aria-selected="false" aria-controls="rules">Власні правила</button></div>
+      <section id="landing" role="tabpanel" aria-labelledby="tab-landing" hidden>
+        <div class="band-heading"><h2>Посадкові сторінки в Google</h2><button id="landing-refresh" title="Оновити" aria-label="Оновити">↻</button></div>
+        <form id="search-import-form" class="actions"><label>CSV GSC<input id="search-file" type="file" accept=".csv,text/csv" required></label><label>Адреса сайту<select id="search-origin" required></select></label><button type="submit">Імпортувати</button></form>
+        <p id="search-import-status" role="status"></p><details><summary>Імпорти GSC</summary><div id="search-import-list"></div></details>
+        <div class="table-toolbar"><input id="landing-country" maxlength="3" placeholder="Країна: US / USA" aria-label="Країна"><select id="landing-device" aria-label="Пристрій"><option value="">Усі пристрої, окремими рядками</option><option value="desktop">Комп'ютер</option><option value="mobile">Телефон</option><option value="tablet">Планшет</option></select><select id="landing-geo" aria-label="GEO-звіт для очікуваних цілей"><option value="">Останній GEO-звіт</option></select></div>
+        <p id="landing-status" class="metric-note" role="status"></p>
+        <details><summary>Методика й обмеження</summary><p id="landing-notes" class="metric-note"></p></details>
+        <div class="table-wrap" tabindex="0"><table><thead><tr><th>Запит / сегмент</th><th>Очікувана ціль</th><th>Попередній лідер</th><th>Поточний лідер / частка показів</th><th>Сигнали для перевірки</th><th>Історія</th></tr></thead><tbody id="landing-rows"></tbody></table></div>
+        <div class="pagination"><button id="landing-prev" title="Попередні запити" aria-label="Попередні запити">←</button><button id="landing-next" title="Наступні запити" aria-label="Наступні запити">→</button></div>
+      </section>
+      <section id="types" role="tabpanel" aria-labelledby="tab-types" hidden>
+        <div class="band-heading"><h2>Діагностика типів сторінок</h2><button id="types-refresh" title="Оновити" aria-label="Оновити типи сторінок">↻</button></div>
+        <div class="table-toolbar"><select id="types-origin" aria-label="Сайт для класифікації"></select><select id="types-filter" aria-label="Тип сторінки"></select><button id="types-rules-open" type="button">Правила типів</button></div>
+        <p id="types-summary" class="metric-note"></p><p id="types-reviews" class="metric-note"></p><p id="types-status" role="status"></p>
+        <details><summary>Методика й обмеження</summary><p id="types-note" class="metric-note"></p></details>
+        <div class="table-wrap" tabindex="0"><table><thead><tr><th>URL / HTTP</th><th>Тип / впевненість</th><th>Підстава</th><th>Діагностика шаблону</th><th>Уточнення</th></tr></thead><tbody id="types-rows"></tbody></table></div>
+        <div class="pagination"><button id="types-prev" title="Попередні сторінки" aria-label="Попередні сторінки типів">←</button><button id="types-next" title="Наступні сторінки" aria-label="Наступні сторінки типів">→</button></div>
+      </section>
+      <section id="cdn" role="tabpanel" aria-labelledby="tab-cdn" hidden>
+        <div class="band-heading"><h2>Журнали CDN та відповіді crawler</h2><button id="cdn-refresh" title="Оновити" aria-label="Оновити CDN-діагностику">↻</button></div>
+        <div class="table-toolbar"><select id="cdn-origin" aria-label="Сайт для CDN"></select><select id="cdn-import" aria-label="Імпорт CDN"></select><a class="button" href="/bots">Імпортувати журнал CDN</a></div>
+        <p id="cdn-status" role="status"></p><details><summary>Джерела й обмеження</summary><p id="cdn-note" class="metric-note"></p></details>
+        <div class="table-wrap" tabindex="0"><table><thead><tr><th>URL / бот</th><th>Перевірка IP</th><th>Edge / origin / cache</th><th>Візити / час</th><th>Crawler / сигнали</th></tr></thead><tbody id="cdn-rows"></tbody></table></div>
+        <div class="pagination"><button id="cdn-prev" title="Попередні спостереження CDN" aria-label="Попередні спостереження CDN">←</button><button id="cdn-next" title="Наступні спостереження CDN" aria-label="Наступні спостереження CDN">→</button></div>
+      </section>
+      <section id="structure" role="tabpanel" aria-labelledby="tab-structure" hidden>
+        <div class="band-heading"><h2>Структура сайту</h2><button id="structure-refresh" title="Оновити" aria-label="Оновити">↻</button></div>
+        <div class="table-toolbar"><select id="structure-origin" aria-label="Адреса сайту"></select><input id="structure-day" type="date" aria-label="Дата GSC"><button id="structure-up" title="Батьківський розділ" aria-label="Батьківський розділ">↑</button><strong id="structure-path">/</strong></div>
+        <div class="table-toolbar"><input id="structure-country" maxlength="3" placeholder="Країна GSC: US / USA" aria-label="Країна GSC"><select id="structure-device" aria-label="Пристрій GSC"><option value="">Усі пристрої</option><option value="desktop">Комп'ютер</option><option value="mobile">Телефон</option><option value="tablet">Планшет</option></select></div>
+        <p id="structure-status" class="metric-note" role="status"></p>
+        <details><summary>Джерела й обмеження</summary><p id="structure-notes" class="metric-note"></p></details>
+        <div class="table-wrap" tabindex="0"><table><thead><tr><th>Розділ</th><th>Сторінки</th><th>HTTP-помилки / збої / robots</th><th>Noindex / невідомо</th><th>Інший canonical</th><th>GEO: сторінки / запити</th><th>GSC: покази / кліки / раніше</th><th>Боти: візити / підтверджені IP / HTTP-помилки</th></tr></thead><tbody id="structure-rows"></tbody></table></div>
+        <div class="pagination"><button id="structure-prev" title="Попередні розділи" aria-label="Попередні розділи">←</button><button id="structure-next" title="Наступні розділи" aria-label="Наступні розділи">→</button></div>
+      </section>
       <section id="coverage" role="tabpanel" aria-labelledby="tab-coverage" hidden>
         <div class="band-heading"><h2>Карта спостережених URL</h2><div class="actions"><button id="coverage-import">Імпорт GSC</button><button id="coverage-bots">Журнал ботів</button><button id="coverage-refresh" title="Оновити покриття" aria-label="Оновити покриття">↻</button></div></div>
         <div id="coverage-summary" class="target-states"></div><p id="coverage-status" class="metric-note" role="status"></p>
@@ -99,8 +137,11 @@
     <section id="history-section"><div class="band-heading"><h2 id="history-title">Останні аудити</h2><button id="history-refresh" title="Оновити історію" aria-label="Оновити історію">↻</button></div><div id="history-list" class="history-list"></div><div class="pagination"><button id="history-next" hidden>Попередні аудити →</button></div></section>
     <footer>SEO Auditor <span>PostgreSQL · локальний аудит</span></footer>
   </main>
+  <dialog id="landing-history-dialog"><div class="dialog-heading"><h2 id="landing-history-title">Історія посадкових сторінок</h2><button data-close="landing-history-dialog" title="Закрити" aria-label="Закрити">×</button></div><p id="landing-history-status" role="status"></p><div class="table-wrap"><table><thead><tr><th>Дата</th><th>URL / ідентичність</th><th>Покази / частка</th><th>Кліки</th><th>Середня позиція</th></tr></thead><tbody id="landing-history-rows"></tbody></table></div><div class="pagination"><button id="landing-history-prev" title="Попередні спостереження" aria-label="Попередні спостереження">←</button><button id="landing-history-next" title="Наступні спостереження" aria-label="Наступні спостереження">→</button></div></dialog>
   <dialog id="details-dialog"><div class="dialog-heading"><h2>Деталі сторінки</h2><button data-close="details-dialog" aria-label="Закрити" title="Закрити">×</button></div><p id="detail-url" class="detail-url"></p><div id="detail-content"></div></dialog>
   <dialog id="columns-dialog"><div class="dialog-heading"><h2>Колонки</h2><button data-close="columns-dialog" aria-label="Закрити" title="Закрити">×</button></div><div id="column-options"></div><button id="reset-columns">Відновити типові</button></dialog>
   <dialog id="duplicates-dialog"><div class="dialog-heading"><h2>Сторінки групи</h2><button data-close="duplicates-dialog" aria-label="Закрити" title="Закрити">×</button></div><p id="duplicates-member-status" role="status"></p><div class="table-wrap"><table><thead><tr><th>URL / мова / слова</th><th>Title / H1</th><th>Canonical</th></tr></thead><tbody id="duplicates-member-rows"></tbody></table></div><div class="pagination"><button id="duplicates-member-previous" title="Попередні сторінки" aria-label="Попередні сторінки">←</button><button id="duplicates-member-next" title="Наступні сторінки" aria-label="Наступні сторінки">→</button></div></dialog>
+  <dialog id="types-edit-dialog"><div class="dialog-heading"><h2>Уточнити тип сторінки</h2><button data-close="types-edit-dialog" title="Закрити" aria-label="Закрити">×</button></div><p id="types-edit-url"></p><form id="types-edit-form"><label>Тип<select id="types-edit-value"></select></label><label>Підстава<input id="types-edit-reason" required maxlength="500"></label><button type="submit">Зберегти уточнення</button></form><p id="types-edit-status" role="status"></p></dialog>
+  <dialog id="types-rules-dialog"><div class="dialog-heading"><h2>Правила типів для цього аудиту</h2><button data-close="types-rules-dialog" title="Закрити" aria-label="Закрити">×</button></div><p class="metric-note">Перше відповідне правило має пріоритет. Точний шлях або префікс із кінцевим *, наприклад /products/*. Ручний тип сторінки має вищий пріоритет.</p><form id="types-rules-form"><div id="types-rules-list"></div><div class="actions"><button id="types-rule-add" type="button" title="Нове правило">+ Правило</button><button type="submit">Зберегти правила</button></div></form><p id="types-rules-status" role="status"></p></dialog>
 </body>
 </html>

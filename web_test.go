@@ -39,6 +39,58 @@ func TestParseWebURLs(t *testing.T) {
 	}
 }
 
+func TestWebSearchImportsHaveIndependentBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		parent     bool
+	}{
+		{"bulk import", "/api/audits/11111111-1111-4111-8111-111111111111/search-imports", false},
+		{"ordinary post", "/api/audits", false},
+		{"caller cancellation", "/api/audits/11111111-1111-4111-8111-111111111111/search-imports", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := testWebApp()
+			app.cfg.FinalizationTimeout = time.Second
+			r := httptest.NewRequest("POST", "http://localhost"+tc.path, strings.NewReader("{}"))
+			r.Header.Set("Authorization", "Bearer "+testWebToken)
+			r.Header.Set("Origin", "http://localhost")
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("X-SEO-Auditor-Request", "1")
+			if tc.parent {
+				ctx, cancel := context.WithTimeout(r.Context(), 50*time.Millisecond)
+				defer cancel()
+				r = r.WithContext(ctx)
+			}
+			called := false
+			app.secure(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				deadline, ok := r.Context().Deadline()
+				if !ok {
+					t.Fatal("unbounded request")
+				}
+				remaining := time.Until(deadline)
+				switch {
+				case tc.parent:
+					if remaining > 50*time.Millisecond {
+						t.Fatal("caller deadline replaced", remaining)
+					}
+				case strings.HasSuffix(tc.path, "/search-imports"):
+					if remaining < 20*time.Second || remaining > 30*time.Second {
+						t.Fatal("bulk import inherited finalization budget", remaining)
+					}
+				default:
+					if remaining > time.Second {
+						t.Fatal("ordinary finalization budget changed", remaining)
+					}
+				}
+			})).ServeHTTP(httptest.NewRecorder(), r)
+			if !called {
+				t.Fatal("handler not reached")
+			}
+		})
+	}
+}
+
 func TestWebSecurityAndJSON(t *testing.T) {
 	app := testWebApp()
 	h := app.handler()

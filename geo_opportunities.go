@@ -21,6 +21,8 @@ import (
 func (s *webServer) registerGEOOpportunities(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/geo/reports/{id}/opportunities", s.geoOpportunityGet)
 	mux.HandleFunc("GET /api/geo/reports/{id}/tasks.csv", s.geoOpportunityGet)
+	mux.HandleFunc("GET /api/geo/reports/{id}/tasks.md", s.geoOpportunityGet)
+	mux.HandleFunc("GET /api/geo/reports/{id}/tasks.json", s.geoOpportunityGet)
 	mux.HandleFunc("GET /api/geo/reports/{id}/targets", s.geoTargets)
 	mux.HandleFunc("POST /api/geo/reports/{id}/queries/{ordinal}/target", s.geoTargetDecision)
 	mux.HandleFunc("GET /api/geo/reports/{id}/queries/{ordinal}/target-history", s.geoTargetHistory)
@@ -172,8 +174,25 @@ func (s *webServer) geoOpportunityGet(w http.ResponseWriter, r *http.Request) {
 		webDBError(w, err)
 		return
 	}
+	var bundle *remediationPackage
+	if strings.HasSuffix(r.URL.Path, "tasks.md") || strings.HasSuffix(r.URL.Path, "tasks.json") {
+		value, e := buildRemediationPackage(ctx, tx, report, plan)
+		if e != nil {
+			webDBError(w, e)
+			return
+		}
+		bundle = &value
+	}
 	if err = tx.Commit(ctx); err != nil {
 		webDBError(w, err)
+		return
+	}
+	if bundle != nil {
+		format := "md"
+		if strings.HasSuffix(r.URL.Path, ".json") {
+			format = "json"
+		}
+		writeRemediationPackage(w, *bundle, format)
 		return
 	}
 	if strings.HasSuffix(r.URL.Path, "tasks.csv") {

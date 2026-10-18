@@ -23,7 +23,7 @@ const geoIndexModel = geo.Model + "/postgres-v1"
 func isGEOCorpusOperation(r *http.Request) bool {
 	return r.Method == http.MethodPost && (r.URL.Path == "/api/geo/reports" || strings.HasSuffix(r.URL.Path, "/target") || strings.HasSuffix(r.URL.Path, "/visibility/imports")) ||
 		r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/geo/reports/") &&
-			(strings.HasSuffix(r.URL.Path, "/opportunities") || strings.HasSuffix(r.URL.Path, "/tasks.csv"))
+			(strings.HasSuffix(r.URL.Path, "/opportunities") || strings.HasSuffix(r.URL.Path, "/tasks.csv") || strings.HasSuffix(r.URL.Path, "/tasks.md") || strings.HasSuffix(r.URL.Path, "/tasks.json"))
 }
 
 type geoCorpusSummary struct {

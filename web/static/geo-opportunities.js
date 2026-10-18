@@ -39,6 +39,9 @@ window.seoOpportunities = {
       } finally {if(current===generation)$("opportunity-refresh").disabled=false;}
     }
     $("opportunity-export").href=`/api/geo/reports/${reportID}/tasks.csv`;
+    for(const format of ["md","json"]){const link=$("opportunity-"+format);if(link){link.href=`/api/geo/reports/${reportID}/tasks.${format}`;link.removeAttribute?.("aria-disabled");}}
+    if($("opportunity-copy"))$("opportunity-copy").disabled=false;
+    if($("opportunity-copy"))$("opportunity-copy").onclick=safe(async()=>{const button=$("opportunity-copy");button.disabled=true;try{const response=await fetch(`/api/geo/reports/${reportID}/tasks.md`,{credentials:"same-origin"});if(!response.ok)throw Error("Пакет не вдалося отримати");const text=await response.text();if(!navigator.clipboard?.writeText)throw Error("Буфер обміну недоступний; завантажте Markdown");await navigator.clipboard.writeText(text);notice("Пакет скопійовано локально. Перегляньте його перед передаванням зовнішньому AI.");}finally{button.disabled=false;}});
     $("opportunity-refresh").onclick=safe(loadPlan);
     $("opportunity-search").oninput=()=>{taskPage=0;taskTable();};$("opportunity-priority").onchange=()=>{taskPage=0;taskTable();};
     $("opportunity-prev").onclick=()=>{taskPage--;taskTable();};$("opportunity-next").onclick=()=>{taskPage++;taskTable();};

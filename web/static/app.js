@@ -205,7 +205,7 @@
     document.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>$(button.dataset.close).close());
     if(!runID) { await loadHistory(); return; }
     for(const format of ["html","csv"]) $(format+"-export").href=`/api/audits/${runID}/export/${format}`;
-    for(const view of ["overview","pages","graph","international","duplicates","routes","coverage","facets","rules"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages","graph","international","duplicates","routes","coverage","facets","rules"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); } if(["international","duplicates","routes","coverage","facets","rules"].includes(view)) document.dispatchEvent(new Event("seo:"+view+"-open")); };
+    for(const view of ["overview","pages","graph","international","duplicates","routes","coverage","facets","rules","landing","structure","types","cdn"]) $("tab-"+view).onclick=()=>{for(const name of ["overview","pages","graph","international","duplicates","routes","coverage","facets","rules","landing","structure","types","cdn"]) { $(name).hidden=name!==view; $("tab-"+name).setAttribute("aria-selected",String(name===view)); } if(["international","duplicates","routes","coverage","facets","rules","landing","structure","types","cdn"].includes(view)) document.dispatchEvent(new Event("seo:"+view+"-open")); };
     $("graph-filter").onchange=safely(resetGraph);$("graph-target").onchange=safely(resetGraph);
     $("graph-reset").onclick=safely(()=>{$("graph-target").value="";$("graph-filter").value="all";return resetGraph();});
     $("graph-next").onclick=safely(()=>{if(graphNext)graphCursors.push(graphNext);return graph();});

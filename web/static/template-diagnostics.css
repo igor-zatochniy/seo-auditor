@@ -1,0 +1,12 @@
+#types-rows small,#cdn-rows small{display:block;margin-top:6px;color:var(--muted,#526575)}
+#types-rows td,#cdn-rows td{vertical-align:top;overflow-wrap:anywhere}
+.type-check{margin-bottom:12px;max-width:540px}.type-check strong{font-size:14px}
+.type-state-review{color:#a34b0b}.type-state-observed{color:#09754f}.type-state-unknown{color:#526575}
+#types-rules-list>div{display:grid;grid-template-columns:minmax(150px,1fr) minmax(130px,180px) 44px;gap:8px;margin-bottom:12px}
+#types-edit-form{display:grid;gap:16px}#types-edit-form label{display:grid;gap:6px}
+#types-edit-url{overflow-wrap:anywhere}#types-rules-dialog{width:min(760px,calc(100% - 32px))}
+#types-rules-list input,#types-rules-list select{min-width:0;width:100%}
+@media(max-width:560px){#types-rules-list>div{grid-template-columns:minmax(100px,1fr) 44px}#types-rules-list select{grid-column:1;grid-row:2}#types-rules-list button{grid-column:2;grid-row:1 / span 2}}
+#types table,#cdn table{min-width:1100px;table-layout:fixed}
+#types th:first-child,#cdn th:first-child{width:26%}#types th:nth-child(4){width:32%}#types th:last-child{width:10%}
+#types-rows tr,#cdn-rows tr{cursor:default}

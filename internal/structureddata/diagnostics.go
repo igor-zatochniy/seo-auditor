@@ -29,6 +29,7 @@ type Report struct {
 	Types       []string         `json:"types"`
 	Issues      []Issue          `json:"issues"`
 	Products    *ProductEvidence `json:"products,omitempty"`
+	Articles    *ArticleEvidence `json:"articles,omitempty"`
 }
 
 type reference struct {
@@ -46,6 +47,7 @@ type Collector struct {
 	finalized bool
 	products  []productOffer
 	offerIDs  map[string]productOffer
+	articles  ArticleEvidence
 }
 
 func NewCollector() *Collector {
@@ -134,6 +136,7 @@ func (c *Collector) visit(value any, path string, depth int) {
 				types = append(types, schemaType(t))
 			}
 		}
+		articleCollected := false
 		for _, t := range types {
 			if t != "" {
 				if len(c.types) < 64 {
@@ -145,11 +148,16 @@ func (c *Collector) visit(value any, path string, depth int) {
 				if t == "Product" {
 					c.collectProduct(v)
 				}
+				if !articleCollected && (t == "Article" || t == "NewsArticle" || t == "BlogPosting") {
+					c.collectArticle(v)
+					articleCollected = true
+				}
 				if (t == "Offer" || t == "AggregateOffer" || t == "PriceSpecification" || t == "UnitPriceSpecification") && len(c.offerIDs) < 128 {
 					if id, ok := v["@id"].(string); ok && len(id) <= 2048 {
 						price := offerPrice(v, 0)
 						if old, exists := c.offerIDs[id]; exists {
 							price.price = price.price || old.price
+							price.availability = price.availability || old.availability
 							price.complete = price.complete && old.complete
 							price.refs = append(price.refs, old.refs...)
 							if len(price.refs) > 128 {
@@ -278,6 +286,8 @@ func (c *Collector) Result(pageURL string) *Report {
 		}
 	}
 	c.report.Products = c.productResult(pageURL)
+	c.articles.Complete = c.report.Complete && c.report.Blocks == c.report.ValidBlocks
+	c.report.Articles = &c.articles
 	result := c.report
 	for typ := range c.types {
 		result.Types = append(result.Types, typ)
