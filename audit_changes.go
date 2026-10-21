@@ -93,6 +93,22 @@ LEFT JOIN LATERAL (
 ) p ON TRUE
 CROSS JOIN LATERAL (SELECT c.scan_status='completed' AND c.status_code=200
  AND p.scan_status='completed' AND p.status_code=200 AS parsed) flags
+LEFT JOIN LATERAL (
+ SELECT BOOL_OR(ref.kind='html' AND NOT (ref.current_fingerprints ?| ARRAY(SELECT jsonb_array_elements_text(ref.previous_fingerprints)))) AS canonical_changed,
+        BOOL_OR(ref.kind='redirect' AND NOT (ref.current_fingerprints ?| ARRAY(SELECT jsonb_array_elements_text(ref.previous_fingerprints)))) AS redirect_changed
+ FROM (
+  SELECT v.*,
+   CASE WHEN jsonb_typeof(v.current_ref->'fingerprints')='array' THEN v.current_ref->'fingerprints' ELSE '[]'::JSONB END AS current_fingerprints,
+   CASE WHEN jsonb_typeof(v.previous_ref->'fingerprints')='array' THEN v.previous_ref->'fingerprints' ELSE '[]'::JSONB END AS previous_fingerprints
+  FROM (VALUES ('html',c.url_signals->'html',p.url_signals->'html'),
+               ('redirect',c.url_signals->'redirect',p.url_signals->'redirect')) v(kind,current_ref,previous_ref)
+ ) ref
+ WHERE c.url_signals->>'version'='url-signals-v1' AND p.url_signals->>'version'=c.url_signals->>'version'
+ AND c.url_signals->>'complete'='true' AND p.url_signals->>'complete'='true'
+ AND ref.current_ref->>'valid'='true' AND ref.previous_ref->>'valid'='true'
+ AND COALESCE(ref.current_ref->>'truncated','false')='false' AND COALESCE(ref.previous_ref->>'truncated','false')='false'
+ AND jsonb_array_length(ref.current_fingerprints)>0 AND jsonb_array_length(ref.previous_fingerprints)>0
+) identities ON TRUE
 CROSS JOIN LATERAL (VALUES
  ('http_error','critical',c.status_code>=400 AND c.status_code IS DISTINCT FROM p.status_code,p.status_code::TEXT,c.status_code::TEXT),
  ('noindex','critical',flags.parsed AND p.geo_signals->'search'->>'google_indexing'='allowed'
@@ -100,8 +116,12 @@ CROSS JOIN LATERAL (VALUES
  ('robots_blocked','critical',p.robots_outcome='allowed' AND c.robots_outcome='disallowed',p.robots_outcome,c.robots_outcome),
  ('request_failed','critical',c.scan_status='failed' AND COALESCE(c.status_code,0)<400 AND p.scan_status IS DISTINCT FROM 'failed',p.scan_status,c.error_code),
  ('canonical_changed','warning',flags.parsed AND NOT c.canonical_url_truncated AND NOT p.canonical_url_truncated
-   AND COALESCE(c.canonical_url,'')<>COALESCE(p.canonical_url,''),p.canonical_url,c.canonical_url),
- ('redirect_changed','warning',c.is_redirect AND (NOT p.is_redirect OR c.redirect_url IS DISTINCT FROM p.redirect_url OR c.status_code IS DISTINCT FROM p.status_code),p.redirect_url,c.redirect_url),
+   AND COALESCE(c.url_signals->>'complete','true')='true' AND COALESCE(p.url_signals->>'complete','true')='true'
+   AND (COALESCE(c.canonical_url,'')<>COALESCE(p.canonical_url,'') OR identities.canonical_changed),p.canonical_url,c.canonical_url),
+ ('redirect_changed','warning',c.is_redirect AND (NOT p.is_redirect OR c.status_code IS DISTINCT FROM p.status_code
+   OR (NOT c.redirect_url_truncated AND NOT p.redirect_url_truncated
+     AND COALESCE(c.url_signals->>'complete','true')='true' AND COALESCE(p.url_signals->>'complete','true')='true'
+     AND (c.redirect_url IS DISTINCT FROM p.redirect_url OR identities.redirect_changed))),p.redirect_url,c.redirect_url),
  ('title_missing','warning',flags.parsed AND COALESCE(p.title,'')<>'' AND COALESCE(c.title,'')='',p.title,c.title),
  ('description_missing','warning',flags.parsed AND COALESCE(p.description,'')<>'' AND COALESCE(c.description,'')='',p.description,c.description),
  ('h1_missing','warning',flags.parsed AND p.h1_count>0 AND c.h1_count=0,p.h1,c.h1),

@@ -70,6 +70,22 @@ func TestBrowserAgenticAccessibilityTree(t *testing.T) {
 	}
 }
 
+func TestBrowserOversizedAXKeepsRenderedHTML(t *testing.T) {
+	endpoint := browserEndpoint(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	body := `<html><head><title>Preserved SEO</title></head><body><main><div id="label">` + strings.Repeat("a", 32768) + `</div>` + strings.Repeat(`<button aria-labelledby="label">x</button>`, 100) + `</main></body></html>`
+	out, err := Page(ctx, endpoint, "https://example.com/large-ax", "SEO-Test", Resource{200, http.Header{"Content-Type": []string{"text/html"}}, []byte(body)}, 1<<20, func(context.Context, string) (Resource, error) {
+		return Resource{}, errors.New("unexpected resource request")
+	})
+	if err != nil || !strings.Contains(out.HTML, "Preserved SEO") || out.Agentic == nil || out.Agentic.Status != "unknown" {
+		t.Fatalf("AX budget lost main rendering: err=%v agentic=%+v html_bytes=%d", err, out.Agentic, len(out.HTML))
+	}
+	if !strings.Contains(out.Agentic.Explanation, "ліміт") {
+		t.Fatalf("missing AX budget explanation: %+v", out.Agentic)
+	}
+}
+
 func TestBrowserTimeoutAndDOMLimit(t *testing.T) {
 	endpoint := browserEndpoint(t)
 	for _, tc := range []struct {

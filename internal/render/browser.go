@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/chromedp/cdproto/accessibility"
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
@@ -267,12 +266,15 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 		out.Warnings = append(out.Warnings, "Shadow DOM не входить до серіалізованого light DOM.")
 	}
 	err = chromedp.Run(tab, chromedp.ActionFunc(func(ctx context.Context) error {
-		report, inspectErr := inspectAgenticReadiness(ctx, snapshot.WebMCPForms)
+		report, inspectErr := inspectAgenticReadiness(ctx, wsURL, snapshot.WebMCPForms)
 		out.Agentic = report
 		return inspectErr
 	}))
 	if err != nil {
 		out.Agentic = unknownAgenticReport(snapshot.WebMCPForms)
+		if errors.Is(err, errAgenticAXLimit) {
+			out.Agentic.Explanation = "Accessibility tree перевищило безпечний ліміт CDP-відповіді; основний HTML збережено, стан інтерактивних елементів невідомий."
+		}
 	}
 	out.HTML = snapshot.HTML
 	_ = chromedp.Run(tab, page.StopLoading())
@@ -282,12 +284,9 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 const maxAgenticAXNodes = 100000
 const maxAgenticFindings = 40
 
-func inspectAgenticReadiness(ctx context.Context, webmcpForms int) (*AgenticReport, error) {
-	if err := accessibility.Enable().Do(ctx); err != nil {
-		return nil, err
-	}
-	var tree agenticAXTree
-	if err := cdp.Execute(ctx, accessibility.CommandGetFullAXTree, accessibility.GetFullAXTree(), &tree); err != nil {
+func inspectAgenticReadiness(ctx context.Context, wsURL string, webmcpForms int) (*AgenticReport, error) {
+	tree, err := loadBoundedAXTree(ctx, wsURL, chromedp.FromContext(ctx).Target.TargetID)
+	if err != nil {
 		return nil, err
 	}
 	nodes := tree.Nodes
