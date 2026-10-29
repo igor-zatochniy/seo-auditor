@@ -5,6 +5,7 @@ FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d6
 WORKDIR /src
 
 COPY go.mod go.sum ./
+COPY third_party/chromedp ./third_party/chromedp
 RUN go mod download
 
 COPY . .
@@ -27,6 +28,7 @@ WORKDIR /app
 
 COPY --from=builder /out/seo-auditor ./seo-auditor
 COPY LICENSE /usr/share/licenses/seo-auditor/LICENSE
+COPY third_party/chromedp/LICENSE /usr/share/licenses/seo-auditor/chromedp-LICENSE
 COPY internal/seo/fonts/LICENSE /usr/share/licenses/seo-auditor/LiberationSans-LICENSE
 COPY internal/render/vendor/web-vitals.LICENSE /usr/share/licenses/seo-auditor/web-vitals-LICENSE
 

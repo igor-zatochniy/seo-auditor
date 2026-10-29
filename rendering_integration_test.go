@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/igor-zatochniy/seo-auditor/internal/seo"
 )
@@ -107,6 +108,46 @@ func TestRenderingFailureKeepsResponseResult(t *testing.T) {
 	var encoded []byte
 	if err := pool.QueryRow(ctx, "SELECT rendering FROM audit_results WHERE run_id=$1", cfg.RunID).Scan(&encoded); err != nil || !json.Valid(encoded) {
 		t.Fatal("invalid JSON")
+	}
+}
+
+func TestRenderingConsoleBudgetKeepsResponseAndTerminalRun(t *testing.T) {
+	endpoint := os.Getenv("RENDER_TEST_BROWSER_URL")
+	if endpoint == "" {
+		t.Skip("RENDER_TEST_BROWSER_URL не налаштовано")
+	}
+	ctx, pool, cfg := webIntegration(t, 2*time.Minute)
+	cfg.RenderJavaScript = true
+	cfg.RenderBrowserURL = endpoint
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/robots.txt" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><head><title>Freeze fixture</title></head><body><main>Visible content remains small.</main><script>const s='x'.repeat(64*1024*1024);for(let i=0;i<4;i++)console.log(s,i);</script></body></html>`)
+	}))
+	defer fixture.Close()
+	if err := createExplicitAuditRun(ctx, pool, &cfg, []string{fixture.URL + "/page"}); err != nil {
+		t.Fatal(err)
+	}
+	if code := executeCapturedAuditRun(ctx, pool, cfg, false); code != exitSuccess {
+		t.Fatalf("CDP budget failure broke raw SEO: exit=%d", code)
+	}
+	var status, title, renderStatus, renderError string
+	if err := pool.QueryRow(ctx, `SELECT scan_status,title,rendering->>'status',rendering->>'error' FROM audit_results WHERE run_id=$1`, cfg.RunID).Scan(&status, &title, &renderStatus, &renderError); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || title != "Freeze fixture" || renderStatus != "failed" || !strings.Contains(renderError, "CDP") {
+		t.Fatalf("lost raw result or controlled error: %s %s %s %s", status, title, renderStatus, renderError)
+	}
+	var terminal bool
+	if err := pool.QueryRow(ctx, `SELECT status='completed' AND finished_at IS NOT NULL FROM audit_runs WHERE id=$1`, cfg.RunID).Scan(&terminal); err != nil || !terminal {
+		t.Fatalf("run did not reach a terminal state: %v", err)
+	}
+	var incomplete int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_run_targets WHERE run_id=$1 AND status IN ('pending','running')`, cfg.RunID).Scan(&incomplete); err != nil || incomplete != 0 {
+		t.Fatalf("CDP failure left incomplete targets: %d %v", incomplete, err)
 	}
 }
 

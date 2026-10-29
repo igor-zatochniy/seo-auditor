@@ -51,6 +51,27 @@ func TestBrowserUsesCapturedHTMLAndBroker(t *testing.T) {
 	}
 }
 
+func TestBrowserConsoleBurstLimited(t *testing.T) {
+	endpoint := browserEndpoint(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	body := `<html><head><title>Freeze fixture</title></head><body><main>Visible content remains small.</main><script>const s='x'.repeat(64*1024*1024);for(let i=0;i<4;i++)console.log(s,i);</script></body></html>`
+	_, err := Page(ctx, endpoint, "https://example.com/console-burst", "SEO-Test", Resource{200, http.Header{"Content-Type": []string{"text/html"}}, []byte(body)}, 1<<20, func(context.Context, string) (Resource, error) {
+		return Resource{}, errors.New("unexpected resource request")
+	})
+	if !errors.Is(err, errCDPBudget) {
+		t.Fatalf("console burst did not produce a controlled transport limit: %v", err)
+	}
+	// The shared browser must remain usable after closing the hostile session.
+	safe := `<html><head><title>After burst</title></head><body><main>Safe page</main></body></html>`
+	out, err := Page(ctx, endpoint, "https://example.com/after-burst", "SEO-Test", Resource{200, http.Header{"Content-Type": []string{"text/html"}}, []byte(safe)}, 1<<20, func(context.Context, string) (Resource, error) {
+		return Resource{}, errors.New("unexpected resource request")
+	})
+	if err != nil || !strings.Contains(out.HTML, "After burst") {
+		t.Fatalf("transport failure broke subsequent pages: %v", err)
+	}
+}
+
 func TestBrowserAgenticAccessibilityTree(t *testing.T) {
 	endpoint := browserEndpoint(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

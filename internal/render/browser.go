@@ -65,9 +65,18 @@ func pageRun(ctx context.Context, endpoint, target, userAgent string, response R
 	if err != nil {
 		return out, err
 	}
+	var transportLimited atomic.Bool
+	defer func() {
+		if transportLimited.Load() {
+			err = errCDPBudget
+		}
+	}()
 	allocator, closeAllocator := chromedp.NewRemoteAllocator(ctx, wsURL)
 	defer closeAllocator()
-	root, closeRoot := chromedp.NewContext(allocator, chromedp.WithErrorf(func(string, ...any) {}))
+	root, closeRoot := chromedp.NewContext(allocator, chromedp.WithErrorf(func(string, ...any) {}),
+		chromedp.WithBrowserOption(chromedp.WithTransportDialer(func(dialCtx context.Context, endpoint string) (chromedp.Transport, error) {
+			return dialBoundedCDP(dialCtx, ctx, endpoint, func() { transportLimited.Store(true) })
+		})))
 	defer closeRoot()
 	if err = chromedp.Run(root); err != nil {
 		return out, fmt.Errorf("підключення до Chromium: %w", err)
