@@ -1,5 +1,6 @@
-FROM chromedp/headless-shell@sha256:47e3a0c0cbef29e321d16c893cd804996243f710ca7855770dd4f9c4cd2b8627
+FROM chromedp/headless-shell@sha256:f76fce2964611eb1e25b90d906727884db12a8918a6d85a0df2619a9ef845c7c
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      libbrotli1=1.1.0-2+deb13u1 \
       libexpat1=2.9.0-1~deb13u1 \
       libpcre2-8-0=10.46-1~deb13u3 \
       libssl3t64=3.5.7-1~deb13u3 \
