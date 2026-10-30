@@ -16,7 +16,7 @@ import (
 const (
 	migrationDir            = "initdb"
 	migrationVersionTable   = "schema_migrations"
-	requiredSchemaVersion   = int64(46)
+	requiredSchemaVersion   = int64(47)
 	postgresMigrationDriver = "pgx"
 	migrationAdvisoryLockID = int64(8_247_310_003)
 	migrationUnlockTimeout  = 5 * time.Second
@@ -66,6 +66,9 @@ func applySchemaMigrationsDB(ctx context.Context, db *sql.DB) error {
 	if err := sanitizeLegacyURLColumnsBeforeMigration004(ctx, db); err != nil {
 		return err
 	}
+	if err := recoverVisibilityCanonicalIndexBeforeMigration047(ctx, db); err != nil {
+		return err
+	}
 
 	if err := goose.UpContext(ctx, db, migrationDir); err != nil {
 		return fmt.Errorf("apply schema migrations: %w", err)
@@ -90,6 +93,29 @@ type legacyMigrationURLColumn struct {
 	table    string
 	column   string
 	identity bool
+}
+
+func recoverVisibilityCanonicalIndexBeforeMigration047(ctx context.Context, db *sql.DB) error {
+	version, err := currentMigrationVersion(ctx, db)
+	if err != nil {
+		return fmt.Errorf("read schema version before visibility index recovery: %w", err)
+	}
+	if version >= 47 {
+		return nil
+	}
+	var invalid bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (
+ SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('audit_results_visibility_canonical_idx')
+ AND indrelid=to_regclass('audit_results') AND NOT indisvalid)`).Scan(&invalid); err != nil {
+		return fmt.Errorf("inspect interrupted visibility index: %w", err)
+	}
+	// A completed concurrent build may survive a timeout while recording the version.
+	if invalid {
+		if _, err := db.ExecContext(ctx, "DROP INDEX CONCURRENTLY IF EXISTS audit_results_visibility_canonical_idx"); err != nil {
+			return fmt.Errorf("drop interrupted visibility index: %w", err)
+		}
+	}
+	return nil
 }
 
 func sanitizeLegacyURLColumnsBeforeMigration004(ctx context.Context, db *sql.DB) error {

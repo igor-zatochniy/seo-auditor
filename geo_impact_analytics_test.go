@@ -32,6 +32,19 @@ func TestChooseVisibilityMatchIsExplicitAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestVisibilityCandidateAccumulatorIsBoundedAndPreservesAmbiguity(t *testing.T) {
+	var items []visibilityTargetCandidate
+	for i := range 10000 {
+		items = appendVisibilityCandidate(items, visibilityTargetCandidate{id: int64(i/2 + 1)})
+		if len(items) > 2 {
+			t.Fatalf("unbounded candidates: %d", len(items))
+		}
+	}
+	if _, match := chooseVisibilityMatch(items, nil); match != "ambiguous" {
+		t.Fatalf("ambiguity lost: %q", match)
+	}
+}
+
 func TestSignedQueryValuesRemainDistinctForMatching(t *testing.T) {
 	secret := []byte("test-only-fingerprint-key")
 	a := fingerprintURL(secret, "https://example.com/report?token=AAAA")

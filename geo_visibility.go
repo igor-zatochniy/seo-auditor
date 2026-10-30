@@ -36,9 +36,21 @@ const visibilityColumns = `id::text,report_id::text,source,engine,period_start::
 
 type visibilityTargetCandidate struct {
 	id          int64
-	url         string
 	fingerprint string
 	keyID       string
+}
+
+const visibilityLookupBatchSize = 64
+
+type visibilityBinding struct {
+	exact, canonical []visibilityTargetCandidate
+	identity, first  string
+	multiple         bool
+}
+
+type visibilityLookupRequest struct {
+	record      int
+	fingerprint string
 }
 
 func scanVisibilityImport(row pgx.Row) (geoVisibilityImport, error) {
@@ -148,59 +160,55 @@ func (s *webServer) bindVisibilityRecords(ctx context.Context, tx pgx.Tx, report
 	if err != nil {
 		return err
 	}
-	byExact := map[string][]visibilityTargetCandidate{}
-	byCanonical := map[string][]visibilityTargetCandidate{}
-	targetRows, err := tx.Query(ctx, `SELECT target_id,safe_url,target_fingerprint,fingerprint_key_id,url_signals
- FROM audit_results WHERE run_id=$1 AND scan_status='completed' AND status_code IS NOT NULL ORDER BY target_id`, sourceID)
-	if err != nil {
-		return err
-	}
-	for targetRows.Next() {
-		var candidate visibilityTargetCandidate
-		var fingerprint, rawSignals []byte
-		if err = targetRows.Scan(&candidate.id, &candidate.url, &fingerprint, &candidate.keyID, &rawSignals); err != nil {
-			targetRows.Close()
+	bindings := make([]visibilityBinding, len(records))
+	relative := make(map[int]*url.URL)
+	requests := make([]visibilityLookupRequest, 0, visibilityLookupBatchSize)
+	flush := func() error {
+		if len(requests) == 0 {
+			return nil
+		}
+		if err := s.lookupVisibilityBatch(ctx, tx, sourceID, requests, bindings); err != nil {
 			return err
 		}
-		candidate.fingerprint = hex.EncodeToString(fingerprint)
-		key := candidate.keyID + "\x00" + candidate.fingerprint
-		byExact[key] = append(byExact[key], candidate)
-		var signals crawler.URLSignals
-		if len(rawSignals) > 0 && json.Unmarshal(rawSignals, &signals) == nil && signals.HTML != nil && signals.HTML.Valid && !signals.HTML.Truncated {
-			for _, fp := range signals.HTML.Fingerprints {
-				if len(fp) != 64 {
-					continue
-				}
-				byCanonical[candidate.keyID+"\x00"+fp] = append(byCanonical[candidate.keyID+"\x00"+fp], candidate)
-			}
+		requests = requests[:0]
+		return nil
+	}
+	addURL := func(i int, normalized string) error {
+		parsed, parseErr := url.Parse(normalized)
+		if parseErr != nil {
+			return parseErr
 		}
-	}
-	err = targetRows.Err()
-	targetRows.Close()
-	if err != nil {
-		return err
-	}
-	// GA4 exports contain a path rather than an absolute URL. Resolve it only
-	// against origins present in this report's audit; keep the query string intact.
-	origins := map[string]struct{}{}
-	for _, candidates := range byExact {
-		for _, candidate := range candidates {
-			parsed, parseErr := url.Parse(candidate.url)
-			if parseErr == nil && parsed.Scheme != "" && parsed.Host != "" {
-				origins[parsed.Scheme+"://"+parsed.Host] = struct{}{}
-			}
+		authority, normalizeErr := crawler.NormalizeAuthority(parsed)
+		if normalizeErr != nil {
+			return geoInputError{fmt.Sprintf("Некоректний host у рядку %d.", i+2)}
 		}
+		parsed.Host = authority
+		if parsed.Path == "" {
+			parsed.Path = "/"
+		}
+		identity := parsed.String()
+		binding := &bindings[i]
+		if binding.first == "" {
+			binding.first = normalized
+		} else if binding.first != normalized {
+			binding.multiple = true
+		}
+		if identity > binding.identity {
+			binding.identity = identity
+		}
+		requests = append(requests, visibilityLookupRequest{i, hex.EncodeToString(fingerprintURL(s.cfg.TargetFingerprintKey, identity))})
+		if len(requests) == visibilityLookupBatchSize {
+			return flush()
+		}
+		return nil
 	}
-	seen := map[string]bool{}
 	for i := range records {
 		if err = ctx.Err(); err != nil {
 			return err
 		}
 		r := &records[i]
 		r.Query = sanitizeGEOTextForStorage(r.Query, 300)
-		identityURL := ""
 		if r.RequestURL != "" {
-			normalizedURLs := []string{}
 			parsedInput, parseErr := url.Parse(strings.TrimSpace(r.RequestURL))
 			if parseErr != nil {
 				return geoInputError{fmt.Sprintf("Некоректний URL у рядку %d.", i+2)}
@@ -210,68 +218,76 @@ func (s *webServer) bindVisibilityRecords(ctx context.Context, tx pgx.Tx, report
 				if normalizeErr != nil || !geo.InDomain(normalized, domain) {
 					return geoInputError{fmt.Sprintf("URL у рядку %d не належить домену звіту або некоректний.", i+2)}
 				}
-				normalizedURLs = append(normalizedURLs, normalized)
+				if err := addURL(i, normalized); err != nil {
+					return err
+				}
 			} else if source == "ga4" {
 				if strings.HasPrefix(r.RequestURL, "//") || parsedInput.Opaque != "" || parsedInput.Path == "" || strings.HasPrefix(strings.ToLower(r.RequestURL), "javascript:") {
 					return geoInputError{fmt.Sprintf("Некоректний Landing page у рядку %d.", i+2)}
 				}
-				for origin := range origins {
-					base, _ := url.Parse(origin + "/")
-					resolved := base.ResolveReference(parsedInput)
-					if normalized, normalizeErr := normalizeTargetURL(resolved.String(), true); normalizeErr == nil && geo.InDomain(normalized, domain) {
-						normalizedURLs = append(normalizedURLs, normalized)
-					}
-				}
-				if len(normalizedURLs) == 0 {
-					return geoInputError{fmt.Sprintf("Landing page у рядку %d неможливо зіставити з origin аудиту.", i+2)}
-				}
+				relative[i] = parsedInput
 			} else {
 				return geoInputError{fmt.Sprintf("URL у рядку %d має бути абсолютним.", i+2)}
 			}
-			uniqueURLs := map[string]bool{}
-			for _, normalized := range normalizedURLs {
-				uniqueURLs[normalized] = true
+		}
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	if len(relative) > 0 {
+		// A cursor keeps GA4 origin discovery bounded without truncating the corpus.
+		if _, err := tx.Exec(ctx, `DECLARE visibility_origins NO SCROLL CURSOR FOR
+ SELECT DISTINCT substring(safe_url FROM '^https?://[^/?#]+') AS origin
+ FROM audit_results WHERE run_id=$1 AND scan_status='completed' AND status_code IS NOT NULL
+ AND safe_url ~ '^https?://[^/?#]+' ORDER BY origin`, sourceID); err != nil {
+			return err
+		}
+		for {
+			origins, err := visibilityOriginBatch(ctx, tx)
+			if err != nil {
+				return err
 			}
-			normalizedURLs = normalizedURLs[:0]
-			for normalized := range uniqueURLs {
-				normalizedURLs = append(normalizedURLs, normalized)
+			if len(origins) == 0 {
+				break
 			}
-			sort.Strings(normalizedURLs)
-			if len(normalizedURLs) == 1 {
-				r.URL = redactURL(normalizedURLs[0])
-			} else {
-				r.URL = sanitizeGEOTextForStorage(redactURL(r.RequestURL), 2048)
-			}
-			exactMatches := []visibilityTargetCandidate{}
-			for _, normalized := range normalizedURLs {
-				parsed, _ := url.Parse(normalized)
-				authority, normalizeErr := crawler.NormalizeAuthority(parsed)
-				if normalizeErr != nil {
-					return geoInputError{fmt.Sprintf("Некоректний host у рядку %d.", i+2)}
+			for _, origin := range origins {
+				base, parseErr := url.Parse(origin + "/")
+				if parseErr != nil {
+					continue
 				}
-				parsed.Host = authority
-				if parsed.Path == "" {
-					parsed.Path = "/"
-				}
-				identityURL = parsed.String()
-				fp := hex.EncodeToString(fingerprintURL(s.cfg.TargetFingerprintKey, identityURL))
-				key := s.cfg.TargetFingerprintKeyID + "\x00" + fp
-				exactMatches = append(exactMatches, byExact[key]...)
-			}
-			canonicalMatches := []visibilityTargetCandidate{}
-			if len(uniqueVisibilityCandidates(exactMatches)) == 0 {
-				for _, normalized := range normalizedURLs {
-					parsed, _ := url.Parse(normalized)
-					authority, _ := crawler.NormalizeAuthority(parsed)
-					parsed.Host = authority
-					if parsed.Path == "" {
-						parsed.Path = "/"
+				for i, path := range relative {
+					if err := ctx.Err(); err != nil {
+						return err
 					}
-					fp := hex.EncodeToString(fingerprintURL(s.cfg.TargetFingerprintKey, parsed.String()))
-					canonicalMatches = append(canonicalMatches, byCanonical[s.cfg.TargetFingerprintKeyID+"\x00"+fp]...)
+					normalized, normalizeErr := normalizeTargetURL(base.ResolveReference(path).String(), true)
+					if normalizeErr == nil && geo.InDomain(normalized, domain) {
+						if err := addURL(i, normalized); err != nil {
+							return err
+						}
+					}
 				}
 			}
-			candidate, match := chooseVisibilityMatch(exactMatches, canonicalMatches)
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, "CLOSE visibility_origins"); err != nil {
+			return err
+		}
+	}
+	seen := map[string]bool{}
+	for i := range records {
+		r, binding := &records[i], &bindings[i]
+		if r.RequestURL != "" {
+			if binding.first == "" {
+				return geoInputError{fmt.Sprintf("Landing page у рядку %d неможливо зіставити з origin аудиту.", i+2)}
+			}
+			if binding.multiple {
+				r.URL = sanitizeGEOTextForStorage(redactURL(r.RequestURL), 2048)
+			} else {
+				r.URL = redactURL(binding.first)
+			}
+			candidate, match := chooseVisibilityMatch(binding.exact, binding.canonical)
 			switch match {
 			case "exact", "canonical_match":
 				setVisibilityMatch(r, candidate, match)
@@ -281,7 +297,7 @@ func (s *webServer) bindVisibilityRecords(ctx context.Context, tx pgx.Tx, report
 				r.URLMatch = "unmatched"
 			}
 		}
-		identity := geo.QueryKey(r.Query) + "\x00" + identityURL
+		identity := geo.QueryKey(r.Query) + "\x00" + binding.identity
 		if seen[identity] {
 			return geoInputError{"CSV містить повторний запит/URL після нормалізації."}
 		}
@@ -295,6 +311,104 @@ func (s *webServer) bindVisibilityRecords(ctx context.Context, tx pgx.Tx, report
 		r.RequestURL = ""
 	}
 	return nil
+}
+
+func visibilityOriginBatch(ctx context.Context, tx pgx.Tx) ([]string, error) {
+	rows, err := tx.Query(ctx, "FETCH FORWARD 64 FROM visibility_origins")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	origins := make([]string, 0, visibilityLookupBatchSize)
+	for rows.Next() {
+		var origin string
+		if err := rows.Scan(&origin); err != nil {
+			return nil, err
+		}
+		origins = append(origins, origin)
+	}
+	return origins, rows.Err()
+}
+
+func (s *webServer) lookupVisibilityBatch(ctx context.Context, tx pgx.Tx, sourceID string, requests []visibilityLookupRequest, bindings []visibilityBinding) error {
+	keys := make([]string, 0, len(requests))
+	seen := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		if !seen[request.fingerprint] {
+			keys = append(keys, request.fingerprint)
+			seen[request.fingerprint] = true
+		}
+	}
+	for _, canonical := range []bool{false, true} {
+		if canonical {
+			keys = keys[:0]
+			clear(seen)
+			for _, request := range requests {
+				if len(bindings[request.record].exact) == 0 && !seen[request.fingerprint] {
+					keys = append(keys, request.fingerprint)
+					seen[request.fingerprint] = true
+				}
+			}
+			if len(keys) == 0 {
+				break
+			}
+		}
+		predicate := "a.target_fingerprint=decode(k.fingerprint,'hex')"
+		if canonical {
+			predicate = `(a.url_signals->'html'->'fingerprints') @> jsonb_build_array(k.fingerprint)
+ AND a.url_signals->'html'->'valid'='true'::jsonb
+ AND (a.url_signals->'html'->'truncated' IS NULL OR a.url_signals->'html'->'truncated'='false'::jsonb)`
+		}
+		rows, err := tx.Query(ctx, `SELECT k.fingerprint,c.target_id,c.target_fingerprint,c.fingerprint_key_id
+ FROM unnest($2::text[]) AS k(fingerprint)
+ CROSS JOIN LATERAL (SELECT a.target_id,a.target_fingerprint,a.fingerprint_key_id FROM audit_results a
+ WHERE a.run_id=$1 AND a.fingerprint_key_id=$3 AND a.scan_status='completed' AND a.status_code IS NOT NULL
+ AND `+predicate+` LIMIT 2) c`, sourceID, keys, s.cfg.TargetFingerprintKeyID)
+		if err != nil {
+			return err
+		}
+		matches := make(map[string][]visibilityTargetCandidate, len(keys))
+		for rows.Next() {
+			var key string
+			var fingerprint []byte
+			var candidate visibilityTargetCandidate
+			if err := rows.Scan(&key, &candidate.id, &fingerprint, &candidate.keyID); err != nil {
+				rows.Close()
+				return err
+			}
+			candidate.fingerprint = hex.EncodeToString(fingerprint)
+			matches[key] = append(matches[key], candidate)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, request := range requests {
+			binding := &bindings[request.record]
+			for _, candidate := range matches[request.fingerprint] {
+				if canonical {
+					binding.canonical = appendVisibilityCandidate(binding.canonical, candidate)
+				} else {
+					binding.exact = appendVisibilityCandidate(binding.exact, candidate)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func appendVisibilityCandidate(items []visibilityTargetCandidate, candidate visibilityTargetCandidate) []visibilityTargetCandidate {
+	for _, item := range items {
+		if item.id == candidate.id {
+			return items
+		}
+	}
+	// Two distinct IDs prove ambiguity; retaining the rest cannot change the result.
+	if len(items) < 2 {
+		return append(items, candidate)
+	}
+	return items
 }
 
 func chooseVisibilityMatch(exact, canonical []visibilityTargetCandidate) (visibilityTargetCandidate, string) {

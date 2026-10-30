@@ -328,3 +328,37 @@ func TestSearchInsightsTenThousandRowsAreNotTruncated(t *testing.T) {
 		t.Fatal("10001st row was silently truncated")
 	}
 }
+
+func TestLandingSummaryUsesPreviousObservedDayAndKeepsSegmentsSeparate(t *testing.T) {
+	_, s, cfg := searchFixture(t)
+	base := "/api/audits/" + cfg.RunID
+	csv := searchHeader +
+		"2026-10-01,history,https://example.com/products/a,US,desktop,100,0,3\n" +
+		"2026-10-03,history,https://example.com/products/b,US,desktop,200,0,3\n" +
+		"2026-10-05,history,https://example.com/products/a,US,desktop,50,0,3\n" +
+		"2026-10-04,history,https://example.com/products/b,PL,mobile,80,0,3\n"
+	w := extensionAPI(t, s, "POST", base+"/search-imports", map[string]any{"id": newWebRunID(), "csv": csv})
+	if w.Code != 201 {
+		t.Fatalf("import: %d %s", w.Code, w.Body.String())
+	}
+	w = extensionAPI(t, s, "GET", base+"/landing-pages", nil)
+	if w.Code != 200 {
+		t.Fatalf("summary: %d %s", w.Code, w.Body.String())
+	}
+	var result struct{ Items []map[string]any }
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("segments: %v", result.Items)
+	}
+	for _, row := range result.Items {
+		if row["device"] == "desktop" {
+			if row["day"] != "2026-10-05" || row["previous_day"] != "2026-10-03" || row["previous_url"] != "https://example.com/products/b" || row["changed"] != true {
+				t.Fatalf("previous observed day lost: %v", row)
+			}
+		} else if row["previous_day"] != nil || row["previous_url"] != nil || row["changed"] != nil {
+			t.Fatalf("invented previous observation across segments: %v", row)
+		}
+	}
+}

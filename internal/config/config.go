@@ -22,7 +22,7 @@ const (
 	DefaultRobotsAttemptTimeout      = 3 * time.Second
 	DefaultRobotsTotalTimeout        = 10 * time.Second
 	DefaultDBConnectTimeout          = 5 * time.Second
-	DefaultDBMigrationTimeout        = 30 * time.Second
+	DefaultDBMigrationTimeout        = 5 * time.Minute
 	DefaultDBFetchTimeout            = 5 * time.Second
 	DefaultDBWriteTimeout            = 3 * time.Second
 	DefaultStaleRecoveryBatchTimeout = 15 * time.Second

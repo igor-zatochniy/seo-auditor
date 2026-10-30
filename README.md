@@ -10,9 +10,9 @@
 
 ### Додатковий захист локального запуску
 
-Compose додає IPv4/IPv6 egress firewall окремо від Go SSRF-validation та не публікує порт PostgreSQL за замовчуванням. Windows launcher обмежує ACL `.env`. Є зашифрований Windows backup та явна retention-команда із dry run; автоматичного видалення наявних даних немає. Поточна версія потребує схеми **46** і backup перед оновленням; binary та версія схеми мають відповідати одне одному. [Налаштування, перевірки й межі захисту](docs/security.md).
+Compose додає IPv4/IPv6 egress firewall окремо від Go SSRF-validation та не публікує порт PostgreSQL за замовчуванням. Windows launcher обмежує ACL `.env`. Є зашифрований Windows backup та явна retention-команда із dry run; автоматичного видалення наявних даних немає. Поточна версія потребує схеми **47** і backup перед оновленням; binary та версія схеми мають відповідати одне одному. [Налаштування, перевірки й межі захисту](docs/security.md).
 
-Основний локальний runtime: **Docker Compose**. Поточний binary потребує схеми PostgreSQL **46**; перед оновленням наявної БД створіть backup.
+Основний локальний runtime: **Docker Compose**. Поточний binary потребує схеми PostgreSQL **47**; перед оновленням наявної БД створіть backup.
 
 ## Планові аудити та моніторинг змін
 
@@ -162,6 +162,8 @@ docker compose -f docker-compose.yml -f docker-compose.render.yml up -d --build 
 
 Chromium має окремі 768 MiB RAM / 1 CPU та internal Docker network, без доступу до PostgreSQL, секретів parser, Docker socket і без опублікованого CDP-порту. Недоступний локальний proxy, DNS-обмеження та заборона non-proxied WebRTC доповнюють ізоляцію. Кожен дозволений HTTP GET фактично виконує Go через наявні DNS/private-IP validation, robots.txt, per-host limiter та retry. Прямого browser egress немає. `ALLOW_PRIVATE_TARGETS=true` є явним послабленням для тестових стендів, як і в HTML-only режимі. Не підключайте browser до зовнішньої/DB-мережі й не публікуйте CDP; image використовує `--no-sandbox`, тому контейнерна та мережева ізоляція обов'язкові.
 
+Нативний Chromium запускається з `--log-level=3 --disable-features=LogJsConsoleMessages`: консоль недовіреної сторінки не повинна дублюватися в Docker stderr і заповнювати логи її вмістом. CDP-обробка помилок та ліміти повідомлень залишаються окремими; це не вимикає JavaScript або console API самої сторінки.
+
 Міграція **`017_javascript_rendering.sql`** додає `audit_runs.render_javascript` і nullable JSONB `audit_results.rendering`. Старі результати залишаються без вигаданих rendered-даних; resume зберігає режим запуску. Обидва знімки й delta записуються в одній транзакції з SEO-результатом і terminal target state. Збій Chromium не видаляє початковий результат; статус rendering перевіряється окремо від підсумкового SEO-статусу запуску. Повні HTML/скрипти не зберігаються: лише обмежені метрики, вибірка тексту та різниця. URL-параметри маскуються, UI використовує `textContent`, HTML-експорт екранує дані. Деталі завантажуються окремим захищеним `GET /api/audits/{id}/results/{target_id}/rendering`, щоб пагінація не завантажувала сотні DOM-знімків.
 
 Перед оновленням чинного volume зробіть backup. Down міграції видаляє лише нові rendering-поля, отже історія порівнянь буде втрачена; для її повернення потрібне відновлення backup. Початкові SEO-результати не видаляються.
@@ -179,7 +181,7 @@ docker compose -p render-tests -f docker-compose.render-test.yml down
 
 Тестовий CDP-тунель доступний лише на loopback і не призначений для звичайного runtime. CI окремо запускає ці browser/integration checks і Trivy для browser image. Без `RENDER_TEST_BROWSER_URL` браузерні тести явно пропускаються, а звичайні Go-тести не потребують Chromium.
 
-CI також перевіряє підключення з контейнера через DNS-ім'я `browser`, а не лише через localhost-тунель. Trivy gate використовує `--ignore-unfixed`: він блокує HIGH/CRITICAL із доступним виправленням, але не означає відсутності всіх відомих CVE. Для оцінки залишкового ризику Chromium потрібен також повний scan без цього прапорця. JavaScript-режим залишається опційним і вимкненим за замовчуванням.
+CI також перевіряє підключення з контейнера через DNS-ім'я `browser`, а не лише через localhost-тунель. Browser image pinned за digest; його збірка перевіряє фактичний Chromium **157.0.8103.27**, що містить FileAPI-виправлення CVE-2026-118331. Trivy gate використовує `--ignore-unfixed`: він блокує HIGH/CRITICAL із доступним виправленням, але не означає відсутності всіх відомих CVE. Bundled Chromium може не входити до package inventory Trivy, тому перевірка версії та upstream security-випусків потрібна окремо від OS scan. JavaScript-режим залишається опційним і вимкненим за замовчуванням.
 
 ## Готовність до GEO: локальна версія
 
@@ -515,7 +517,7 @@ Docker Compose читає локальний `.env`; Windows launcher створ
 | `ROBOTS_ATTEMPT_TIMEOUT` | `3s` | Таймаут однієї спроби отримати `robots.txt`. |
 | `ROBOTS_TOTAL_TIMEOUT` | `10s` | Загальний таймаут для перевірки `robots.txt` разом із retry/backoff. |
 | `DB_CONNECT_TIMEOUT` | `5s` | Таймаут підключення до PostgreSQL. |
-| `DB_MIGRATION_TIMEOUT` | `30s` | Таймаут application-level PostgreSQL migrations і очікування migration lock. |
+| `DB_MIGRATION_TIMEOUT` | `5m` | Таймаут application-level PostgreSQL migrations і очікування migration lock; для великих історичних БД може знадобитися більше часу. |
 | `DB_FETCH_TIMEOUT` | `5s` | Таймаут читання стабільного набору URL. |
 | `DB_WRITE_TIMEOUT` | `3s` | Таймаут запису одного результату. |
 | `STALE_RECOVERY_BATCH_TIMEOUT` | `15s` | Окремий timeout одного ідемпотентного batch під час відновлення великого stale run. |

@@ -411,6 +411,7 @@ func insightOffset(r *http.Request) (int, error) {
 
 // A leader is defined by impressions, not by average position. Ties and zero
 // impressions intentionally have no leader; missing dates are never zero-filled.
+// LEAD reads the previous observed day without rescanning a materialized self-join.
 const landingSummarySQL = `WITH ranked AS (
  SELECT s.*,dense_rank() OVER(PARTITION BY query_key,country,device,day ORDER BY impressions DESC) rank,
  SUM(impressions) OVER(PARTITION BY query_key,country,device,day) total
@@ -419,15 +420,19 @@ const landingSummarySQL = `WITH ranked AS (
  SELECT query_key,country,device,day,MIN(query) query,MIN(safe_url) url,MIN(encode(fingerprint,'hex')) fingerprint,
  COUNT(*) leaders,MAX(impressions) impressions,MAX(total) total
  FROM ranked WHERE rank=1 GROUP BY query_key,country,device,day
-), numbered AS (SELECT *,row_number() OVER(PARTITION BY query_key,country,device ORDER BY day DESC) n FROM daily)
+), numbered AS (SELECT *,row_number() OVER history n,
+ lead(day) OVER history previous_day,lead(url) OVER history previous_url,
+ lead(leaders) OVER history previous_leaders,lead(total) OVER history previous_total,
+ lead(fingerprint) OVER history previous_fingerprint
+ FROM daily WINDOW history AS (PARTITION BY query_key,country,device ORDER BY day DESC))
  SELECT jsonb_build_object('query',a.query,'query_key',a.query_key,'country',a.country,'device',a.device,'day',a.day,
  'current_url',CASE WHEN a.leaders=1 AND a.total>0 THEN a.url END,
  'current_fingerprint',CASE WHEN a.leaders=1 AND a.total>0 THEN a.fingerprint END,
- 'previous_day',b.day,'previous_url',CASE WHEN b.leaders=1 AND b.total>0 THEN b.url END,
- 'changed',CASE WHEN a.leaders=1 AND b.leaders=1 AND a.total>0 AND b.total>0 THEN a.fingerprint<>b.fingerprint END,
+ 'previous_day',a.previous_day,'previous_url',CASE WHEN a.previous_leaders=1 AND a.previous_total>0 THEN a.previous_url END,
+ 'changed',CASE WHEN a.leaders=1 AND a.previous_leaders=1 AND a.total>0 AND a.previous_total>0 THEN a.fingerprint<>a.previous_fingerprint END,
  'impressions',a.total,'leader_share',CASE WHEN a.leaders=1 AND a.total>0 THEN a.impressions/a.total END,
  'tied',a.leaders>1 AND a.total>0)
- FROM numbered a LEFT JOIN numbered b ON b.query_key=a.query_key AND b.country=a.country AND b.device=a.device AND b.n=2
+ FROM numbered a
  WHERE a.n=1 ORDER BY a.query_key COLLATE "C",a.country,a.device LIMIT 51 OFFSET $5`
 
 func (s *webServer) insightRead(w http.ResponseWriter, r *http.Request) (pgx.Tx, string, string, bool) {

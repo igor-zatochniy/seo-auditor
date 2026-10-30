@@ -48,7 +48,7 @@ API `GET /api/audits/{id}/cdn-diagnostics?origin=https://example.com&import_id=U
 
 ## Upgrade та перевірка
 
-Міграція `046_page_types_and_cdn_evidence.sql` додає окремі таблиці класифікації та nullable CDN-поля, розширює формат імпорту. Старі застосовані SQL-файли не змінюються. Поточний binary потребує схеми 46; backup перед оновленням обов'язковий. Down видаляє нові налаштування/edge-поля, зберігаючи базові старі SEO/GEO й bot imports/events. CDN-імпорти після rollback не можна повторно створювати старим binary; для повного повернення даних використовуйте backup.
+Міграція `046_page_types_and_cdn_evidence.sql` додає окремі таблиці класифікації та nullable CDN-поля, розширює формат імпорту. Старі застосовані SQL-файли не змінюються. Поточний binary потребує схеми 47; backup перед оновленням обов'язковий. Down міграції 046 видаляє нові налаштування/edge-поля, зберігаючи базові старі SEO/GEO й bot imports/events. CDN-імпорти після rollback не можна повторно створювати старим binary; для повного повернення даних використовуйте backup.
 
 ```powershell
 go test -race -count=1 ./...

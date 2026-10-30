@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 var configEnvironmentVariables = []string{
@@ -143,6 +144,9 @@ func TestLoadConfigUsesSafeDefaultsAndConfiguredLogLevel(t *testing.T) {
 	}
 	if cfg.DBConnectTimeout != DefaultDBConnectTimeout || cfg.DBMigrationTimeout != DefaultDBMigrationTimeout {
 		t.Fatalf("unexpected DB timeout defaults: connect=%s migration=%s", cfg.DBConnectTimeout, cfg.DBMigrationTimeout)
+	}
+	if cfg.DBMigrationTimeout != 5*time.Minute {
+		t.Fatalf("large-index migration default regressed: %s", cfg.DBMigrationTimeout)
 	}
 	if cfg.StaleRecoveryBatchTimeout != DefaultStaleRecoveryBatchTimeout {
 		t.Fatalf("unexpected stale recovery batch timeout: %s", cfg.StaleRecoveryBatchTimeout)
