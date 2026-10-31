@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS builder
 
 WORKDIR /src
 
@@ -14,7 +14,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     GOMAXPROCS=2 GOMEMLIMIT=256MiB CGO_ENABLED=0 GOOS=linux \
     go build -p=1 -tags timetzdata -trimpath -ldflags="-s -w" -o /out/seo-auditor .
 
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 RUN apk add --no-cache --upgrade \
         libcrypto3=3.5.9-r0 \
