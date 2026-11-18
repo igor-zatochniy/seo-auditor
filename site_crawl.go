@@ -34,6 +34,7 @@ type siteCrawl struct {
 	DiscoverRendered    bool
 	SitemapState        string
 	CompetitorSelection *competitorDiscovery
+	sitemapCandidates   []siteCandidate
 }
 
 func normalizeSiteURL(raw string, allowPrivate bool) (string, string, error) {
@@ -161,7 +162,7 @@ func loadSiteCrawl(ctx context.Context, pool *pgxpool.Pool, cfg Config) (*siteCr
 }
 
 // A frontier advances only after its results and newly discovered targets commit.
-func claimSiteTargetBatch(ctx context.Context, pool *pgxpool.Pool, cfg Config, limit int) ([]targetURLRecord, error) {
+func claimSiteTargetBatch(ctx context.Context, pool *pgxpool.Pool, cfg Config, limit int, sites ...*siteCrawl) ([]targetURLRecord, error) {
 	for {
 		var depth *int
 		err := withDBReadRetry(ctx, cfg, "site_frontier", func(qctx context.Context) error {
@@ -173,6 +174,12 @@ func claimSiteTargetBatch(ctx context.Context, pool *pgxpool.Pool, cfg Config, l
 			return nil, err
 		}
 		if depth == nil {
+			if len(sites) > 0 && len(sites[0].sitemapCandidates) > 0 {
+				if err := promoteSiteSitemapBatch(ctx, pool, cfg, sites[0]); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			return nil, nil
 		}
 		batch, err := claimTargetURLBatch(ctx, pool, cfg, limit, *depth)

@@ -1059,11 +1059,14 @@ func TestAbandonStaleAuditRunsContinuesInterruptedTargetRecovery(t *testing.T) {
 
 	// Setup не перевіряє recovery deadline і може виконуватися після великих fixtures.
 	recoveryWriteTimeout := cfg.DBWriteTimeout
-	cfg.DBWriteTimeout = 3 * time.Second
+	recoveryFetchTimeout := cfg.DBFetchTimeout
+	cfg.DBWriteTimeout = DefaultDBWriteTimeout
+	cfg.DBFetchTimeout = DefaultDBFetchTimeout
 	if err := createAuditRun(ctx, pool, &cfg); err != nil {
 		t.Fatalf("create interrupted stale audit run: %v", err)
 	}
 	cfg.DBWriteTimeout = recoveryWriteTimeout
+	cfg.DBFetchTimeout = recoveryFetchTimeout
 	if _, err := pool.Exec(
 		ctx,
 		`INSERT INTO audit_run_targets (
@@ -1474,7 +1477,7 @@ func TestResumeWaitsForLockedResumableTarget(t *testing.T) {
 		RunID:                runID,
 		WorkerInstanceID:     "resume-lock-old-owner",
 		TargetFingerprintKey: []byte("local-development-only-fingerprint-key"),
-		DBFetchTimeout:       time.Second,
+		DBFetchTimeout:       DefaultDBFetchTimeout,
 		DBWriteTimeout:       2 * time.Second,
 		URLBatchSize:         10,
 		DBMaxRetries:         0,

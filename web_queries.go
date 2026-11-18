@@ -19,7 +19,18 @@ import (
 const parsedPagePredicate = "r.scan_status = 'completed' AND r.status_code = 200"
 const noindexPredicate = "(COALESCE(r.meta_robots, '') || ',' || COALESCE(r.x_robots_tag, '')) ~* '(^|[[:space:],:;])(noindex|none)($|[[:space:],;])'"
 
+// Fingerprints are NOT NULL; the materialized set is scoped to one run and reused across rows.
+const uncheckedInternalTargetPredicate = `e.to_fingerprint NOT IN (SELECT fingerprint FROM known_http_targets)`
+
+const soft404HeadingPattern = `^[[:space:][:punct:]]*(404|(404[[:space:][:punct:]]*)?(page not found|сторінку не знайдено|сторінка не знайдена|страница не найдена|página no encontrada|pagina no encontrada|nie znaleziono strony|pagină negăsită))[[:space:][:punct:]]*$`
+
+const soft404Predicate = parsedPagePredicate + ` AND (COALESCE(r.title,'') ~* '` + soft404HeadingPattern + `' OR COALESCE(r.h1,'') ~* '` + soft404HeadingPattern + `')`
+
+var htmlReportFields = strings.Fields(`title title_char_count title_width_px title_status description description_char_count description_width_px description_status description_mobile_status serp_width_model serp_width_approximate h1 h1_count h2_to_h6_status canonical_url is_self_canonical meta_robots og_title og_description og_image twitter_card internal_links_count external_links_count links_count total_images images_missing_alt has_json_ld structured_data has_viewport word_count`)
+
 var resultFilters = map[string]string{
+	"possible_soft_404":    soft404Predicate,
+	"unchecked_internal":   `sc.graph_ready AND EXISTS(SELECT 1 FROM audit_site_edges e WHERE e.run_id=$1 AND e.from_target_id=r.target_id AND e.is_internal AND e.kind='link' AND ` + uncheckedInternalTargetPredicate + `)`,
 	"jsonld_issues":        "jsonb_array_length(COALESCE(r.structured_data->'issues','[]'::JSONB)) > 0",
 	"rendering_issues":     "r.rendering->>'status' IN ('failed','partial')",
 	"main_content_js_risk": "r.rendering->'main_content_dependency'->>'status' IN ('high','warning')",
@@ -91,8 +102,26 @@ func parseResultQuery(v url.Values) (resultQuery, error) {
 }
 
 func reportSelectSQL(includeRendering ...bool) string {
+	return reportSelectSQLWithConfidence(nil, includeRendering...)
+}
+
+func reportSelectSQLWithConfidence(knownPartial *bool, includeRendering ...bool) string {
 	columns := make([]string, 0, len(reportFields))
 	for _, field := range reportFields {
+		switch field.Key {
+		case "html_parsed":
+			columns = append(columns, "COALESCE(("+parsedPagePredicate+"),FALSE) AS html_parsed")
+			continue
+		case "soft_404_status":
+			columns = append(columns, "CASE WHEN NOT COALESCE(("+parsedPagePredicate+"),FALSE) THEN 'not_checked' WHEN "+soft404Predicate+" THEN 'possible' ELSE 'not_detected' END AS soft_404_status")
+			continue
+		case "unchecked_internal_links":
+			columns = append(columns, `CASE WHEN sc.graph_ready THEN (SELECT COUNT(DISTINCT e.to_fingerprint) FROM audit_site_edges e WHERE e.run_id=$1 AND e.from_target_id=r.target_id AND e.is_internal AND e.kind='link' AND `+uncheckedInternalTargetPredicate+`) END AS unchecked_internal_links`)
+			continue
+		case "crawl_depth_provisional":
+			columns = append(columns, "gc.partial AS crawl_depth_provisional")
+			continue
+		}
 		if field.Key == "rendering" && len(includeRendering) > 0 && !includeRendering[0] {
 			columns = append(columns, "NULL::JSONB AS rendering")
 			continue
@@ -121,7 +150,11 @@ func reportSelectSQL(includeRendering ...bool) string {
 		}
 		columns = append(columns, prefix+field.Key)
 	}
-	return "SELECT " + strings.Join(columns, ",") + " FROM audit_results r JOIN audit_runs run ON run.id=r.run_id JOIN audit_run_targets t USING (run_id, target_id) LEFT JOIN audit_site_nodes n USING (run_id,target_id) LEFT JOIN audit_site_crawls sc ON sc.run_id=r.run_id"
+	confidenceSQL := siteGraphPartialSQL
+	if knownPartial != nil {
+		confidenceSQL = strconv.FormatBool(*knownPartial)
+	}
+	return `WITH known_http_targets AS MATERIALIZED (SELECT dst.url_fingerprint AS fingerprint FROM audit_site_nodes dst JOIN audit_results dr ON dr.run_id=$1 AND dr.target_id=dst.target_id WHERE dst.run_id=$1 AND dr.status_code IS NOT NULL), graph_confidence AS MATERIALIZED (SELECT s.run_id, (` + confidenceSQL + `) AS partial FROM audit_site_crawls s JOIN audit_runs ar ON ar.id=s.run_id WHERE s.run_id=$1) SELECT ` + strings.Join(columns, ",") + " FROM audit_results r JOIN audit_runs run ON run.id=r.run_id JOIN audit_run_targets t USING (run_id, target_id) LEFT JOIN audit_site_nodes n USING (run_id,target_id) LEFT JOIN audit_site_crawls sc ON sc.run_id=r.run_id LEFT JOIN graph_confidence gc ON gc.run_id=r.run_id"
 }
 
 func scanReportRecord(rows pgx.Rows) (reportRecord, error) {
@@ -140,6 +173,14 @@ func scanReportRecord(rows pgx.Rows) (reportRecord, error) {
 
 // Defense in depth for imported data, including URLs embedded in metadata.
 func sanitizeReportRecord(record reportRecord) reportRecord {
+	if outcome, exists := record["robots_outcome"]; exists && outcome != robotsOutcomeAllowed && outcome != robotsOutcomeDisallowed {
+		record["robots_allowed"] = nil
+	}
+	if parsed, exists := record["html_parsed"].(bool); exists && !parsed {
+		for _, key := range htmlReportFields {
+			record[key] = nil
+		}
+	}
 	if v, ok := record["geo_signals"].(map[string]any); ok {
 		sanitizeDiagnosticRecord(v)
 	}

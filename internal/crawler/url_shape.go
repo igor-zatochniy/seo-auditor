@@ -3,6 +3,7 @@ package crawler
 import (
 	"encoding/json"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -10,12 +11,13 @@ import (
 
 // Shape зберігає лише форму URL, не значення query-параметрів.
 type URLShape struct {
-	Version  string   `json:"version"`
-	Family   string   `json:"family"`
-	Keys     []string `json:"keys"`
-	HasQuery bool     `json:"has_query"`
-	Page     *int64   `json:"page_bucket,omitempty"`
-	Complete bool     `json:"complete"`
+	ResourceHint bool     `json:"resource_hint,omitempty"`
+	Version      string   `json:"version"`
+	Family       string   `json:"family"`
+	Keys         []string `json:"keys"`
+	HasQuery     bool     `json:"has_query"`
+	Page         *int64   `json:"page_bucket,omitempty"`
+	Complete     bool     `json:"complete"`
 }
 
 func DescribeURL(raw string) URLShape {
@@ -85,4 +87,13 @@ func DescribeURL(raw string) URLShape {
 		s.Complete = false
 	}
 	return s
+}
+
+// An extension is a discovery hint, not proof of the response Content-Type.
+func HasResourceExtension(urlPath string) bool {
+	switch strings.ToLower(path.Ext(urlPath)) {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".ico", ".bmp", ".tif", ".tiff", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".7z", ".gz", ".mp3", ".mp4", ".webm", ".mov", ".wav", ".ogg", ".woff", ".woff2", ".ttf", ".eot", ".css", ".js", ".mjs", ".map":
+		return true
+	}
+	return false
 }

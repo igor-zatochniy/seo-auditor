@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 	"github.com/jackc/pgx/v5"
+	"net/url"
 )
 
 const maxInventoryURLs = 50000
@@ -18,7 +19,11 @@ type inventoryRecord struct {
 }
 
 func inventoryURL(cfg Config, raw string, sources, deferred int32) inventoryRecord {
-	return inventoryRecord{Fingerprint: fingerprintURL(cfg.TargetFingerprintKey, raw), URL: redactURL(raw), Sources: sources, Deferred: deferred, Shape: crawler.DescribeURL(raw)}
+	shape := crawler.DescribeURL(raw)
+	if u, err := url.Parse(raw); err == nil {
+		shape.ResourceHint = crawler.HasResourceExtension(u.Path)
+	}
+	return inventoryRecord{Fingerprint: fingerprintURL(cfg.TargetFingerprintKey, raw), URL: redactURL(raw), Sources: sources, Deferred: deferred, Shape: shape}
 }
 
 // Ліміт захищений row lock; відомі URL оновлюються навіть після його досягнення.
@@ -100,7 +105,7 @@ func storeInventory(ctx context.Context, tx pgx.Tx, runID string, records []inve
     SELECT $1,v.fp,v.url,v.source,v.reason,v.important,v.shape::JSONB FROM unnest($2::BYTEA[],$3::TEXT[],$4::INT[],$5::INT[],$6::BOOLEAN[],$7::TEXT[]) v(fp,url,source,reason,important,shape)
     ON CONFLICT(run_id,fingerprint) DO UPDATE SET sources=audit_crawl_inventory.sources|EXCLUDED.sources,
     deferred=audit_crawl_inventory.deferred|EXCLUDED.deferred,important=audit_crawl_inventory.important OR EXCLUDED.important,
-    url_shape=CASE WHEN COALESCE((audit_crawl_inventory.url_shape->>'complete')::BOOLEAN,FALSE) THEN audit_crawl_inventory.url_shape ELSE EXCLUDED.url_shape END`, runID, fps, urls, sources, reasons, important, shapes)
+    url_shape=CASE WHEN COALESCE((audit_crawl_inventory.url_shape->>'complete')::BOOLEAN,FALSE) AND (EXCLUDED.url_shape->>'resource_hint' IS DISTINCT FROM 'true' OR audit_crawl_inventory.url_shape->>'resource_hint'='true') THEN audit_crawl_inventory.url_shape ELSE EXCLUDED.url_shape END`, runID, fps, urls, sources, reasons, important, shapes)
 			if e != nil {
 				return e
 			}

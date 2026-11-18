@@ -20,6 +20,7 @@ import (
 
 const maxSitemapFiles = 16
 const maxSitemapBytes = 2 << 20
+const maxSitemapCandidateBytes = 8 << 20
 
 func robotsSitemapLocations(body string) []string {
 	var locations []string
@@ -235,11 +236,23 @@ func fetchSitemap(ctx context.Context, client, robotsClient *http.Client, cache 
 }
 
 func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config, site *siteCrawl, client, robotsClient *http.Client, cache *robotsPolicyCache) error {
-	if !site.UseSitemaps || site.SitemapState != "pending" {
+	if !site.UseSitemaps {
 		return nil
 	}
 	if site.CompetitorSelection != nil {
+		if site.SitemapState != "pending" {
+			return nil
+		}
 		return initializeCompetitorSitemaps(ctx, pool, cfg, site, client, robotsClient, cache)
+	}
+	if site.SitemapState != "pending" {
+		var total int
+		if err := pool.QueryRow(ctx, `SELECT total_urls FROM audit_runs WHERE id=$1`, cfg.RunID).Scan(&total); err != nil {
+			return err
+		}
+		if total >= site.MaxPages {
+			return nil
+		}
 	}
 	parentCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -249,6 +262,7 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 	queue = append(queue, site.Origin+"/sitemap.xml")
 	seen := make(map[string]bool)
 	seeds := make(map[string]bool)
+	seedBytes := 0
 	state, warning := "done", ""
 	if robotsErr != nil {
 		state = "partial"
@@ -256,7 +270,7 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 		queue = nil
 	}
 	limited := false
-	for len(queue) > 0 && len(seen) < maxSitemapFiles && len(seeds) < site.MaxPages {
+	for len(queue) > 0 && len(seen) < maxSitemapFiles {
 		raw := queue[0]
 		queue = queue[1:]
 		normalized, origin, err := normalizeSiteURL(raw, cfg.AllowPrivateTargets)
@@ -330,11 +344,18 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 			if err != nil || origin != site.Origin {
 				continue
 			}
+			if seeds[normalized] {
+				continue
+			}
 			if len(seeds) >= site.MaxPages {
+				continue
+			}
+			if seedBytes+len(normalized) > maxSitemapCandidateBytes {
 				limited = true
-				break
+				continue
 			}
 			seeds[normalized] = true
+			seedBytes += len(normalized)
 		}
 	}
 	if len(queue) > 0 {
@@ -342,32 +363,12 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 	}
 	if limited {
 		state = "partial"
-		warning = "Досягнуто ліміт sitemap або кількості сторінок"
+		warning = "Досягнуто ліміт читання sitemap або пам'яті кандидатів; перелік може бути неповним"
 	}
 	ctx = parentCtx
-	// Order is deterministic, including after an interrupted discovery phase.
-	candidates := sortedSitemapCandidates(seeds)
-	for len(candidates) > 0 {
-		batch := candidates[:min(len(candidates), 100)]
-		candidates = candidates[len(batch):]
-		if err := withDBMutationRetry(ctx, cfg, "capture_sitemap_targets", func(qctx context.Context) error {
-			tx, err := pool.Begin(qctx)
-			if err != nil {
-				return err
-			}
-			defer rollbackSiteTransaction(tx, cfg)
-			if err = lockSiteOwner(qctx, tx, cfg); err != nil {
-				return err
-			}
-			if err = addSiteTargets(qctx, tx, cfg, site, batch); err != nil {
-				return err
-			}
-			return tx.Commit(qctx)
-		}); err != nil {
-			return err
-		}
-	}
-	return withDBMutationRetry(ctx, cfg, "complete_sitemap_discovery", func(qctx context.Context) error {
+	// HTML links (including pagination) get the budget first. Raw seed URLs remain transient.
+	site.sitemapCandidates = sortedSitemapCandidates(seeds)
+	err := withDBMutationRetry(ctx, cfg, "complete_sitemap_discovery", func(qctx context.Context) error {
 		tag, err := pool.Exec(qctx, `UPDATE audit_site_crawls s SET sitemap_state=$2,discovery_warning=$3,limit_reached=limit_reached OR $4
 			WHERE run_id=$1 AND EXISTS(SELECT 1 FROM audit_runs r WHERE r.id=s.run_id AND r.status='running' AND r.worker_instance_id=$5 AND r.owner_generation=$6)`, cfg.RunID, state, warning, limited, effectiveWorkerInstanceID(cfg), effectiveOwnerGeneration(cfg))
 		if err == nil && tag.RowsAffected() != 1 {
@@ -375,6 +376,81 @@ func initializeSiteSitemaps(ctx context.Context, pool *pgxpool.Pool, cfg Config,
 		}
 		return err
 	})
+	if err == nil {
+		site.SitemapState = state
+	}
+	return err
+}
+
+func promoteSiteSitemapBatch(ctx context.Context, pool *pgxpool.Pool, cfg Config, site *siteCrawl) error {
+	lookahead := site.sitemapCandidates[:min(len(site.sitemapCandidates), 100)]
+	count := 0
+	full := false
+	err := withDBMutationRetry(ctx, cfg, "promote_sitemap_targets", func(qctx context.Context) error {
+		tx, err := pool.Begin(qctx)
+		if err != nil {
+			return err
+		}
+		defer rollbackSiteTransaction(tx, cfg)
+		if err = lockSiteOwner(qctx, tx, cfg); err != nil {
+			return err
+		}
+		fingerprints := make([][]byte, 0, len(lookahead))
+		for _, c := range lookahead {
+			fingerprints = append(fingerprints, fingerprintURL(cfg.TargetFingerprintKey, c.url))
+		}
+		rows, err := tx.Query(qctx, `SELECT url_fingerprint FROM audit_site_nodes WHERE run_id=$1 AND url_fingerprint=ANY($2::bytea[])`, cfg.RunID, fingerprints)
+		if err != nil {
+			return err
+		}
+		known := map[string]bool{}
+		for rows.Next() {
+			var fp []byte
+			if err = rows.Scan(&fp); err != nil {
+				rows.Close()
+				return err
+			}
+			known[string(fp)] = true
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		batch := make([]siteCandidate, 0, max(1, min(cfg.Workers, 32)))
+		count = 0
+		for i, c := range lookahead {
+			count = i + 1
+			if !known[string(fingerprints[i])] {
+				batch = append(batch, c)
+				if len(batch) >= max(1, min(cfg.Workers, 32)) {
+					break
+				}
+			}
+		}
+		if len(batch) > 0 {
+			if err = addSiteTargets(qctx, tx, cfg, site, batch); err != nil {
+				return err
+			}
+		}
+		if err = tx.QueryRow(qctx, `SELECT total_urls >= $2 FROM audit_runs WHERE id=$1`, cfg.RunID, site.MaxPages).Scan(&full); err != nil {
+			return err
+		}
+		if full {
+			if _, err = tx.Exec(qctx, `UPDATE audit_site_crawls s SET limit_reached=limit_reached OR EXISTS(SELECT 1 FROM audit_crawl_inventory i WHERE i.run_id=s.run_id AND ((i.sources&2)>0 OR i.url_shape->>'resource_hint' IS DISTINCT FROM 'true') AND NOT EXISTS(SELECT 1 FROM audit_site_nodes n WHERE n.run_id=i.run_id AND n.url_fingerprint=i.fingerprint)) WHERE s.run_id=$1`, cfg.RunID); err != nil {
+				return err
+			}
+		}
+		return tx.Commit(qctx)
+	})
+	if err == nil {
+		if full {
+			site.sitemapCandidates = nil
+		} else {
+			site.sitemapCandidates = site.sitemapCandidates[count:]
+		}
+	}
+	return err
 }
 
 func sortedSitemapCandidates(seeds map[string]bool) []siteCandidate {

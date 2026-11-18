@@ -63,6 +63,24 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 	if err != nil {
 		return err
 	}
+	sitemapURLs := make(map[string]bool)
+	rows, err = tx.Query(ctx, `SELECT fingerprint FROM audit_crawl_inventory WHERE run_id=$1 AND fingerprint=ANY($2::bytea[]) AND (sources&2)>0`, cfg.RunID, fingerprints)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var fp []byte
+		if err = rows.Scan(&fp); err != nil {
+			rows.Close()
+			return err
+		}
+		sitemapURLs[string(fp)] = true
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
 	var targets, identities [][]any
 	var changedIDs []int64
 	var depths []int32
@@ -75,6 +93,7 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 			continue
 		}
 		fp := fingerprintURL(cfg.TargetFingerprintKey, normalized)
+		inSitemap := candidate.sitemap || sitemapURLs[string(fp)]
 		source := int32(1)
 		if candidate.sitemap {
 			source = 2
@@ -86,10 +105,11 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 		if total >= site.MaxPages {
 			reason |= 2
 		}
-		inventory = append(inventory, inventoryURL(cfg, normalized, source, reason))
+		item := inventoryURL(cfg, normalized, source, reason)
+		inventory = append(inventory, item)
 		if n, ok := nodes[string(fp)]; ok {
 			depth := min(n.depth, candidate.depth)
-			inSitemap := n.sitemap || candidate.sitemap
+			inSitemap = n.sitemap || inSitemap
 			if depth != n.depth || inSitemap != n.sitemap {
 				changedIDs = append(changedIDs, n.id)
 				depths = append(depths, int32(depth))
@@ -99,15 +119,18 @@ func addSiteTargets(ctx context.Context, tx pgx.Tx, cfg Config, site *siteCrawl,
 			}
 			continue
 		}
+		if item.Shape.ResourceHint && !inSitemap {
+			continue
+		}
 		if candidate.depth%sitemapFrontierBase > site.MaxDepth || total >= site.MaxPages {
 			limited = true
 			continue
 		}
 		maxID++
 		total++
-		nodes[string(fp)] = node{id: maxID, depth: candidate.depth, sitemap: candidate.sitemap}
+		nodes[string(fp)] = node{id: maxID, depth: candidate.depth, sitemap: inSitemap}
 		targets = append(targets, []any{cfg.RunID, maxID, normalized})
-		identities = append(identities, []any{cfg.RunID, maxID, fp, redactURL(normalized), candidate.depth, candidate.sitemap})
+		identities = append(identities, []any{cfg.RunID, maxID, fp, redactURL(normalized), candidate.depth, inSitemap})
 	}
 	if err := storeInventory(ctx, tx, cfg.RunID, inventory); err != nil {
 		return err

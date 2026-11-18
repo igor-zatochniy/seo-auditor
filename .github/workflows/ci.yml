@@ -127,7 +127,7 @@ jobs:
       - name: Verify PostgreSQL version
         run: >-
           docker run --rm seo-auditor-postgres:ci sh -ec
-          'test "$(postgres --version)" = "postgres (PostgreSQL) 16.15"'
+          'test "$(postgres --version)" = "postgres (PostgreSQL) 16.16"'
 
       - name: Scan PostgreSQL Docker image
         run: >-

@@ -75,9 +75,9 @@ const coverageSQL = `WITH known AS (
  FROM audit_crawl_bot_evidence e JOIN audit_crawl_source_imports s ON s.id=e.source_id WHERE s.run_id=$1 GROUP BY e.fingerprint), data AS (
  SELECT k.*,n.target_id,r.status_code,r.scan_status,r.error_code,r.robots_outcome,
  COALESCE(n.internal_inlinks_count,links.inlinks,0) inlinks,COALESCE(b.visits,0) bot_visits,COALESCE(b.matched,0) matched_range_visits,b.first_seen,b.last_seen,
- CASE WHEN r.scan_status='blocked_by_robots' THEN 'robots' WHEN r.scan_status='failed' OR r.status_code>=400 THEN 'error'
+ CASE WHEN r.scan_status='blocked_by_robots' THEN 'robots' WHEN r.error_code='unsupported_content_type' THEN 'unsupported_type' WHEN r.scan_status='failed' OR r.status_code>=400 THEN 'error'
  WHEN r.target_id IS NOT NULL THEN 'scanned' WHEN t.status IN ('pending','running') THEN 'pending'
- WHEN n.target_id IS NOT NULL THEN 'missing_result' WHEN (k.deferred&1)>0 THEN 'depth_limit' WHEN (k.deferred&2)>0 THEN 'page_limit'
+ WHEN n.target_id IS NOT NULL THEN 'missing_result' WHEN (k.sources&2)=0 AND k.url_shape->>'resource_hint'='true' THEN 'resource_hint' WHEN (k.deferred&1)>0 THEN 'depth_limit' WHEN (k.deferred&2)>0 THEN 'page_limit'
  WHEN (k.deferred&4)>0 THEN 'nofollow' WHEN (k.sources&2)>0 AND c.limit_reached THEN 'page_limit' ELSE 'not_discovered' END state,
  (k.sources&14)>0 AND k.fingerprint<>(SELECT url_fingerprint FROM audit_site_nodes WHERE run_id=$1 AND target_id=1) AND COALESCE(n.internal_inlinks_count,links.inlinks,0)=0 orphan_candidate,
  r.geo_signals->'search'->>'google_indexing' indexing
@@ -103,7 +103,7 @@ func (s *webServer) crawlCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 	filter := r.URL.Query().Get("filter")
 	switch filter {
-	case "", "missing", "orphan", "important", "error":
+	case "", "missing", "orphan", "important", "error", "resources":
 	default:
 		writeWebError(w, 400, "invalid_filter", "Некоректний фільтр")
 		return
@@ -112,6 +112,7 @@ func (s *webServer) crawlCoverage(w http.ResponseWriter, r *http.Request) {
 	e := s.pool.QueryRow(r.Context(), coverageSQL+`SELECT jsonb_build_object('known',COUNT(*),'scanned',COUNT(*) FILTER(WHERE state='scanned'),
  'missing',COUNT(*) FILTER(WHERE state NOT IN ('scanned','pending')),'orphan_candidates',COUNT(*) FILTER(WHERE orphan_candidate),
  'sitemap',COUNT(*) FILTER(WHERE (sources&2)>0),'gsc',COUNT(*) FILTER(WHERE (sources&4)>0),'bots',COUNT(*) FILTER(WHERE (sources&8)>0),
+ 'resource_hints',COUNT(*) FILTER(WHERE state='resource_hint'),'unsupported_type',COUNT(*) FILTER(WHERE state='unsupported_type'),
  'important_recheck',COUNT(*) FILTER(WHERE important AND state<>'scanned')) FROM data`, id).Scan(&summary)
 	if e != nil {
 		webDBError(w, e)
@@ -132,7 +133,7 @@ func (s *webServer) crawlCoverage(w http.ResponseWriter, r *http.Request) {
  'state',state,'important',important,'orphan_candidate',orphan_candidate,'inlinks',inlinks,'http',status_code,'scan_status',scan_status,'error',error_code,
  'indexing',indexing,'bot_visits',bot_visits,'matched_range_visits',matched_range_visits,'first_seen',first_seen,'last_seen',last_seen)
  FROM data WHERE fingerprint>$2 AND ($3='' OR $3='missing' AND state NOT IN ('scanned','pending') OR $3='orphan' AND orphan_candidate
- OR $3='important' AND important OR $3='error' AND state IN ('robots','error','missing_result')) ORDER BY fingerprint LIMIT 51`, id, after, filter)
+ OR $3='important' AND important OR $3='error' AND state IN ('robots','error','missing_result') OR $3='resources' AND state IN ('resource_hint','unsupported_type')) ORDER BY fingerprint LIMIT 51`, id, after, filter)
 	if e != nil {
 		webDBError(w, e)
 		return
@@ -147,7 +148,15 @@ func (s *webServer) crawlCoverage(w http.ResponseWriter, r *http.Request) {
 		next = items[49]["cursor"].(string)
 		items = items[:50]
 	}
-	writeWebJSON(w, 200, map[string]any{"summary": summary, "meta": meta, "items": items, "next": next})
+	coverage, e := loadReportCoverage(r.Context(), s.pool, id)
+	if e != nil {
+		webDBError(w, e)
+		return
+	}
+	if coverage != nil {
+		meta["partial"] = coverage.Partial
+	}
+	writeWebJSON(w, 200, map[string]any{"summary": summary, "meta": meta, "coverage": coverage, "items": items, "next": next})
 }
 
 func diagnosticRows(rows pgx.Rows) ([]map[string]any, error) {

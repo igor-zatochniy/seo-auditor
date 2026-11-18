@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -33,12 +34,28 @@ func (s *webServer) internationalReport(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), `SELECT a.target_id,a.safe_url,a.status_code,encode(a.target_fingerprint,'hex'),a.international,sm.evidence
-	FROM audit_results a LEFT JOIN audit_sitemap_hreflang sm ON sm.run_id=a.run_id AND sm.page_fingerprint=a.target_fingerprint
-	WHERE a.run_id=$1 AND a.target_id>$2 ORDER BY a.target_id LIMIT 51`, id, after)
+	pages, more, err := loadInternationalPages(r.Context(), tx, id, after)
 	if err != nil {
 		webDBError(w, err)
 		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		webDBError(w, err)
+		return
+	}
+	next := int64(0)
+	if more {
+		next = pages[len(pages)-1].TargetID
+	}
+	writeWebJSON(w, 200, map[string]any{"pages": pages, "next": next, "more": more, "basis": "response_html", "run_id": id})
+}
+
+func loadInternationalPages(ctx context.Context, q reportQuerier, id string, after int64) ([]international.Page, bool, error) {
+	rows, err := q.Query(ctx, `SELECT a.target_id,a.safe_url,a.status_code,encode(a.target_fingerprint,'hex'),a.international,sm.evidence
+	FROM audit_results a LEFT JOIN audit_sitemap_hreflang sm ON sm.run_id=a.run_id AND sm.page_fingerprint=a.target_fingerprint
+	WHERE a.run_id=$1 AND a.target_id>$2 ORDER BY a.target_id LIMIT 51`, id, after)
+	if err != nil {
+		return nil, false, err
 	}
 	pages := make([]international.Page, 0, 50)
 	ids := []int64{}
@@ -53,21 +70,18 @@ func (s *webServer) internationalReport(w http.ResponseWriter, r *http.Request) 
 		var h, m []byte
 		if err = rows.Scan(&p.TargetID, &p.URL, &p.HTTP, &p.Fingerprint, &h, &m); err != nil {
 			rows.Close()
-			webDBError(w, err)
-			return
+			return nil, false, err
 		}
 		if len(h) > 0 {
 			if err = json.Unmarshal(h, &p.HTML); err != nil {
 				rows.Close()
-				webDBError(w, err)
-				return
+				return nil, false, err
 			}
 		}
 		if len(m) > 0 {
 			if err = json.Unmarshal(m, &p.Sitemap); err != nil {
 				rows.Close()
-				webDBError(w, err)
-				return
+				return nil, false, err
 			}
 		}
 		p.URL = redactURL(p.URL)
@@ -79,10 +93,9 @@ func (s *webServer) internationalReport(w http.ResponseWriter, r *http.Request) 
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		webDBError(w, err)
-		return
+		return nil, false, err
 	}
-	rows, err = tx.Query(r.Context(), `SELECT src.target_id,a.value->>'fingerprint',d.status_code,COALESCE(d.scan_status,''),
+	rows, err = q.Query(ctx, `SELECT src.target_id,a.value->>'fingerprint',d.status_code,COALESCE(d.scan_status,''),
 	CASE WHEN d.status_code<>200 OR d.scan_status<>'completed' THEN NULL
 	WHEN EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(d.international->'links','[]')||COALESCE(ds.evidence->'links','[]')) back
 	 WHERE back->>'fingerprint'=encode(src.target_fingerprint,'hex') AND (back->>'valid_url')::BOOLEAN AND (back->>'absolute')::BOOLEAN AND (back->>'language_valid')::BOOLEAN) THEN TRUE
@@ -97,8 +110,7 @@ func (s *webServer) internationalReport(w http.ResponseWriter, r *http.Request) 
 	LEFT JOIN audit_sitemap_hreflang ds ON ds.run_id=d.run_id AND ds.page_fingerprint=d.target_fingerprint
 	WHERE src.run_id=$1 AND src.target_id=ANY($2::BIGINT[]) AND COALESCE(a.value->>'fingerprint','')<>''`, id, ids)
 	if err != nil {
-		webDBError(w, err)
-		return
+		return nil, false, err
 	}
 	for rows.Next() {
 		var target int64
@@ -106,27 +118,17 @@ func (s *webServer) internationalReport(w http.ResponseWriter, r *http.Request) 
 		var o international.Observation
 		if err = rows.Scan(&target, &fp, &o.HTTP, &o.Status, &o.Reciprocal, &o.CanonicalSelf, &o.CanonicalFingerprint); err != nil {
 			rows.Close()
-			webDBError(w, err)
-			return
+			return nil, false, err
 		}
 		pages[positions[target]].Observations[fp] = o
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		webDBError(w, err)
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		webDBError(w, err)
-		return
+		return nil, false, err
 	}
 	for i := range pages {
 		international.Diagnose(&pages[i])
 	}
-	next := int64(0)
-	if more {
-		next = pages[len(pages)-1].TargetID
-	}
-	writeWebJSON(w, 200, map[string]any{"pages": pages, "next": next, "more": more, "basis": "response_html", "run_id": id})
+	return pages, more, nil
 }

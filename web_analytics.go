@@ -29,8 +29,12 @@ var reportAggregateGroups = []aggregateGroup{
 	{"H1", []aggregateMetric{parsedCount("Відсутній", "r.h1_count=0"), parsedCount("Один", "r.h1_count=1"), parsedCount("Декілька", "r.h1_count>1")}},
 	{"Canonical", []aggregateMetric{parsedCount("Відсутній", "COALESCE(r.canonical_url,'')=''"), parsedCount("Self", "r.is_self_canonical"), parsedCount("Non-self", "COALESCE(r.canonical_url,'')<>'' AND NOT r.is_self_canonical")}},
 	{"Robots / індексація", []aggregateMetric{countWhere("Дозволено", "r.robots_outcome='allowed'"), countWhere("Заборонено", "r.robots_outcome='disallowed'"), countWhere("Noindex / none (будь-який scope)", noindexPredicate)}},
-	{"Технічні сигнали", []aggregateMetric{parsedCount("JSON-LD є", "r.has_json_ld"), parsedCount("JSON-LD немає", "NOT r.has_json_ld"), parsedCount("Viewport є", "r.has_viewport"), parsedCount("Viewport немає", "NOT r.has_viewport")}},
-	{"Зображення", []aggregateMetric{parsedCount("Сторінки без alt", "r.images_missing_alt>0"), {"Без alt", "COALESCE(SUM(r.images_missing_alt),0)::DOUBLE PRECISION"}, {"Усього", "COALESCE(SUM(r.total_images),0)::DOUBLE PRECISION"}}},
+	{"Технічні сигнали", []aggregateMetric{parsedCount("JSON-LD є", "r.has_json_ld"), parsedCount("JSON-LD немає", "NOT r.has_json_ld"), parsedCount("Viewport є", "r.has_viewport"), parsedCount("Viewport немає", "NOT r.has_viewport"), countWhere("Можливий soft 404 (евристика)", soft404Predicate), countWhere("Непідтриманий Content-Type", "r.error_code='unsupported_content_type'")}},
+	{"Зображення", []aggregateMetric{
+		parsedCount("Сторінки без alt", "r.images_missing_alt>0"),
+		{"Без alt", "COALESCE(SUM(r.images_missing_alt) FILTER (WHERE " + parsedPagePredicate + "),0)::DOUBLE PRECISION"},
+		{"Усього", "COALESCE(SUM(r.total_images) FILTER (WHERE " + parsedPagePredicate + "),0)::DOUBLE PRECISION"},
+	}},
 	{"Час, ms", []aggregateMetric{{"Середній", "COALESCE(AVG(r.duration_ms),0)"}, {"Медіана", "COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.duration_ms),0)"}, {"p95", "COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY r.duration_ms),0)"}}},
 	{"Контент, слова", []aggregateMetric{{"Середнє", "COALESCE(AVG(r.word_count) FILTER (WHERE " + parsedPagePredicate + "),0)"}, {"Медіана", "COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY r.word_count) FILTER (WHERE " + parsedPagePredicate + "),0)"}, parsedCount("0–99", "r.word_count<100"), parsedCount("100–499", "r.word_count BETWEEN 100 AND 499"), parsedCount("500–1499", "r.word_count BETWEEN 500 AND 1499"), parsedCount("1500+", "r.word_count>=1500")}},
 }

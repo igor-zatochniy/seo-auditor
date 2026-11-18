@@ -4,11 +4,36 @@ import "github.com/igor-zatochniy/seo-auditor/internal/seo"
 
 // Зберігаємо HTML-посилання; однакові DOM-спостереження додають походження, не дубль.
 func siteDiscoveryLinks(data SEOData, enabled bool, allowPrivate bool) ([]seo.DiscoveredLink, bool) {
-	links := append([]seo.DiscoveredLink(nil), data.DiscoveredLinks...)
-	for i := range links {
-		links[i].Source = "html"
-	}
+	links := make([]seo.DiscoveredLink, 0, min(len(data.DiscoveredLinks), seo.MaxDiscoveredLinks))
 	truncated := data.LinksTruncated
+	indices := make(map[string]int)
+	appendLink := func(link seo.DiscoveredLink, source string) {
+		u, _, err := normalizeSiteURL(link.URL, allowPrivate)
+		if err != nil {
+			return
+		}
+		if i, exists := indices[u]; exists {
+			old := &links[i]
+			if old.Source != source {
+				old.Source = "both"
+			}
+			old.Nofollow = old.Nofollow && link.Nofollow
+			if old.Anchor == "" {
+				old.Anchor = link.Anchor
+			}
+			return
+		}
+		if len(links) >= seo.MaxDiscoveredLinks {
+			truncated = true
+			return
+		}
+		indices[u] = len(links)
+		link.URL, link.Source = u, source
+		links = append(links, link)
+	}
+	for _, link := range data.DiscoveredLinks {
+		appendLink(link, "html")
+	}
 	if !enabled {
 		return links, truncated
 	}
@@ -17,35 +42,8 @@ func siteDiscoveryLinks(data SEOData, enabled bool, allowPrivate bool) ([]seo.Di
 		return links, true
 	}
 	truncated = truncated || r.LinksTruncated || r.Status != "completed" || !r.Rendered.Complete
-	type identity struct {
-		url, anchor string
-		nofollow    bool
-	}
-	key := func(link seo.DiscoveredLink) identity {
-		u, _, err := normalizeSiteURL(link.URL, allowPrivate)
-		if err != nil {
-			u = link.URL
-		}
-		return identity{u, link.Anchor, link.Nofollow}
-	}
-	available := map[identity][]int{}
-	for i, link := range links {
-		k := key(link)
-		available[k] = append(available[k], i)
-	}
 	for _, link := range r.DiscoveredLinks {
-		k := key(link)
-		if indices := available[k]; len(indices) > 0 {
-			links[indices[0]].Source = "both"
-			available[k] = indices[1:]
-			continue
-		}
-		if len(links) >= seo.MaxDiscoveredLinks {
-			truncated = true
-			continue
-		}
-		link.Source = "rendered"
-		links = append(links, link)
+		appendLink(link, "rendered")
 	}
 	return links, truncated
 }

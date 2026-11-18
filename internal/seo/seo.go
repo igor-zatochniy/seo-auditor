@@ -321,6 +321,7 @@ type pageParser struct {
 	bodyWordCounter    wordCounter
 	collectLinks       bool
 	linkCollector      linkCollector
+	discoveredURLs     map[string]int
 }
 
 type documentPhase uint8
@@ -359,6 +360,7 @@ func (p *pageParser) handleStartTag(name []byte, attributes tagAttributes) {
 	if p.inertTemplateDepth > 0 {
 		return
 	}
+	p.textBoundary(name)
 	if bytes.Equal(name, []byte("html")) && p.shadowRootDepth == 0 && len(attributes.lang) <= 64 {
 		if tag, err := language.Parse(string(attributes.lang)); err == nil && tag != language.Und {
 			p.contentLanguage = tag.String()
@@ -643,6 +645,9 @@ func (p *pageParser) handleEndTag(name []byte) {
 	if p.inertTemplateDepth > 0 {
 		return
 	}
+	if !bytes.Equal(name, []byte("br")) && !bytes.Equal(name, []byte("hr")) {
+		p.textBoundary(name)
+	}
 	p.geo.end(name)
 	if p.comparison != nil && bytes.Equal(name, []byte("script")) {
 		p.comparison.jsonActive = false
@@ -671,12 +676,37 @@ func (p *pageParser) handleEndTag(name []byte) {
 	}
 }
 
+func (p *pageParser) textBoundary(name []byte) {
+	if p.ignoredTextDepth > 0 {
+		return
+	}
+	switch string(name) {
+	case "br", "p", "div", "section", "article", "main", "header", "footer", "aside", "nav", "h1", "h2", "h3", "h4", "h5", "h6", "li", "ul", "ol", "dl", "dt", "dd", "table", "tr", "td", "th", "blockquote", "pre", "hr":
+	default:
+		return
+	}
+	space := []byte(" ")
+	if p.collectFirstH1 {
+		p.firstH1.Write(space)
+	}
+	if p.linkCollector.active {
+		p.linkCollector.anchor.Write(space)
+	}
+	p.bodyWordCounter.Write(space)
+	if p.comparison != nil {
+		if p.comparisonH1Depth > 0 {
+			p.comparison.h1.Write(space)
+		}
+		p.comparison.text.Write(space)
+		p.comparison.sample.Write(space)
+	}
+}
+
 func (p *pageParser) finalize() {
 	p.data.GEO = p.geo.result()
 	p.data.StructuredData = p.geo.diagnostics.Result(p.data.URL)
 	p.data.ContentSignature = p.geo.contentSignature(p.data.GEO.ContentSource, p.contentLanguage)
 	p.finishLink()
-	p.resolveLinks()
 	p.data.MetaRobots, p.data.MetaRobotsTruncated, p.data.MetaRobotsOriginalLength =
 		p.metaRobots.Result(StorageRobotsTagMaxRunes)
 	p.data.Title, p.data.TitleTruncated, p.data.TitleOriginalLength = p.title.Result()

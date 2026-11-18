@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -25,6 +26,9 @@ type duplicateCluster struct {
 	Members    []duplicateMember `json:"members"`
 	MemberNext int64             `json:"member_next"`
 }
+
+// Automatic and browser exports share the same bounded in-memory detector budget.
+var duplicateAnalysisSlot = make(chan struct{}, 1)
 
 func duplicateCursor(r *http.Request, key string) (int64, error) {
 	if r.URL.Query().Get(key) == "" {
@@ -69,57 +73,7 @@ func (s *webServer) duplicateReport(w http.ResponseWriter, r *http.Request) {
 		writeWebError(w, 409, "audit_not_finished", "Дочекайтеся завершення або відновлення аудиту")
 		return
 	}
-	detector := duplicates.NewDetector()
-	cursor := int64(math.MinInt64)
-	for {
-		rows, queryErr := tx.Query(r.Context(), `SELECT a.target_id,a.content_signature,
-		 COALESCE(a.international->>'canonical_fingerprint',''),a.fingerprint_key_id,
-		 CASE WHEN length(a.title)<=500 AND NOT a.title_truncated THEN COALESCE(a.title,'') ELSE '' END,
-		 CASE WHEN length(a.h1)<=1000 AND NOT a.h1_truncated THEN COALESCE(a.h1,'') ELSE '' END,
-		 (COALESCE(a.geo_signals->'schema_types','[]') ? 'Product'),
-		 EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(a.international->'links','[]') || COALESCE(sm.evidence->'links','[]')) e
-		 WHERE e->>'language'<>'x-default' AND e->>'language_valid'='true' AND e->>'valid_url'='true'),
-		 a.canonical_url_truncated OR (COALESCE(a.canonical_url,'')<>'' AND COALESCE(a.international->>'canonical_fingerprint','')='')
-		 FROM audit_results a LEFT JOIN audit_sitemap_hreflang sm ON sm.run_id=a.run_id AND sm.page_fingerprint=a.target_fingerprint
-		 WHERE a.run_id=$1 AND a.target_id>$2 AND a.status_code=200 AND a.scan_status='completed'
-		 ORDER BY a.target_id LIMIT 256`, id, cursor)
-		if queryErr != nil {
-			webDBError(w, queryErr)
-			return
-		}
-		count := 0
-		for rows.Next() {
-			var d duplicates.Document
-			var raw []byte
-			if err = rows.Scan(&d.TargetID, &raw, &d.Canonical, &d.KeyID, &d.TitleKey, &d.H1Key, &d.Product, &d.Hreflang, &d.CanonicalLost); err != nil {
-				rows.Close()
-				webDBError(w, err)
-				return
-			}
-			if len(raw) > 0 {
-				if err = json.Unmarshal(raw, &d.Signature); err != nil {
-					rows.Close()
-					webDBError(w, err)
-					return
-				}
-			}
-			d.TitleKey = duplicates.HeadingKey(d.TitleKey)
-			d.H1Key = duplicates.HeadingKey(d.H1Key)
-			detector.Add(d)
-			cursor = d.TargetID
-			count++
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			webDBError(w, err)
-			return
-		}
-		if count < 256 {
-			break
-		}
-	}
-	summary, clusters, err := detector.Analyze(r.Context())
+	summary, clusters, err := loadDuplicateAnalysis(r.Context(), tx, id)
 	if err != nil {
 		webDBError(w, err)
 		return
@@ -195,4 +149,58 @@ func (s *webServer) duplicateReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeWebJSON(w, 200, map[string]any{"run_id": id, "basis": "response_html", "summary": summary, "clusters": selected, "next": next})
+}
+
+func loadDuplicateAnalysis(ctx context.Context, q reportQuerier, id string) (duplicates.Summary, []duplicates.Cluster, error) {
+	select {
+	case duplicateAnalysisSlot <- struct{}{}:
+		defer func() { <-duplicateAnalysisSlot }()
+	case <-ctx.Done():
+		return duplicates.Summary{}, nil, ctx.Err()
+	}
+	detector := duplicates.NewDetector()
+	cursor := int64(math.MinInt64)
+	for {
+		rows, err := q.Query(ctx, `SELECT a.target_id,a.content_signature,
+		 COALESCE(a.international->>'canonical_fingerprint',''),a.fingerprint_key_id,
+		 CASE WHEN length(a.title)<=500 AND NOT a.title_truncated THEN COALESCE(a.title,'') ELSE '' END,
+		 CASE WHEN length(a.h1)<=1000 AND NOT a.h1_truncated THEN COALESCE(a.h1,'') ELSE '' END,
+		 (COALESCE(a.geo_signals->'schema_types','[]') ? 'Product'),
+		 EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(a.international->'links','[]') || COALESCE(sm.evidence->'links','[]')) e
+		 WHERE e->>'language'<>'x-default' AND e->>'language_valid'='true' AND e->>'valid_url'='true'),
+		 a.canonical_url_truncated OR (COALESCE(a.canonical_url,'')<>'' AND COALESCE(a.international->>'canonical_fingerprint','')='')
+		 FROM audit_results a LEFT JOIN audit_sitemap_hreflang sm ON sm.run_id=a.run_id AND sm.page_fingerprint=a.target_fingerprint
+		 WHERE a.run_id=$1 AND a.target_id>$2 AND a.status_code=200 AND a.scan_status='completed'
+		 ORDER BY a.target_id LIMIT 256`, id, cursor)
+		if err != nil {
+			return duplicates.Summary{}, nil, err
+		}
+		count := 0
+		for rows.Next() {
+			var d duplicates.Document
+			var raw []byte
+			if err = rows.Scan(&d.TargetID, &raw, &d.Canonical, &d.KeyID, &d.TitleKey, &d.H1Key, &d.Product, &d.Hreflang, &d.CanonicalLost); err != nil {
+				rows.Close()
+				return duplicates.Summary{}, nil, err
+			}
+			if len(raw) > 0 {
+				if err = json.Unmarshal(raw, &d.Signature); err != nil {
+					rows.Close()
+					return duplicates.Summary{}, nil, err
+				}
+			}
+			d.TitleKey, d.H1Key = duplicates.HeadingKey(d.TitleKey), duplicates.HeadingKey(d.H1Key)
+			detector.Add(d)
+			cursor = d.TargetID
+			count++
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return duplicates.Summary{}, nil, err
+		}
+		if count < 256 {
+			return detector.Analyze(ctx)
+		}
+	}
 }

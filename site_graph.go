@@ -213,7 +213,8 @@ func finalizeSiteGraph(ctx context.Context, pool *pgxpool.Pool, cfg Config) erro
 			}
 			tag, err := tx.Exec(qctx, `UPDATE audit_site_nodes n SET crawl_depth=NULLIF(v.depth,-1),internal_inlinks_count=v.incoming,
 				internal_outlinks_count=v.outgoing,broken_internal_links=v.broken,redirecting_internal_links=v.redirects,
-				orphan_candidate=(n.target_id<>1 AND n.in_sitemap AND v.depth=-1 AND v.incoming=0)
+				in_sitemap=n.in_sitemap OR EXISTS(SELECT 1 FROM audit_crawl_inventory i WHERE i.run_id=n.run_id AND i.fingerprint=n.url_fingerprint AND (i.sources&2)>0),
+				orphan_candidate=(n.target_id<>1 AND (n.in_sitemap OR EXISTS(SELECT 1 FROM audit_crawl_inventory i WHERE i.run_id=n.run_id AND i.fingerprint=n.url_fingerprint AND (i.sources&2)>0)) AND v.depth=-1 AND v.incoming=0)
 				FROM unnest($2::BIGINT[],$3::INT[],$4::INT[],$5::INT[],$6::INT[],$7::INT[]) v(id,depth,incoming,outgoing,broken,redirects)
 				WHERE n.run_id=$1 AND n.target_id=v.id`, cfg.RunID, batch, values, incoming, outgoing, broken, redirects)
 			if err != nil {

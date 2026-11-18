@@ -16,6 +16,9 @@
   let fields = [], columns = defaults.slice(), rows = [], cursors = [""], next = "", historyNext = "", historyCursor = "", pollTimer, refreshCount = 0, lastStatus = "", resultRequest = 0;
   const notice = message => { $("notice").textContent = message; $("notice").hidden = !message; };
   const text = value => value == null || value === "" ? "—" : typeof value === "boolean" ? (value ? "Так" : "Ні") : typeof value === "object" ? "Докладніше у звіті сторінки" : String(value);
+	const htmlFields = new Set("title title_char_count title_width_px title_status description description_char_count description_width_px description_status description_mobile_status serp_width_model serp_width_approximate h1 h1_count h2_to_h6_status canonical_url is_self_canonical meta_robots og_title og_description og_image twitter_card internal_links_count external_links_count links_count total_images images_missing_alt has_json_ld structured_data has_viewport word_count".split(" "));
+	const fieldText = (record, key) => record.html_parsed === false && htmlFields.has(key) || key === "robots_allowed" && record[key] == null ? "Не перевірено" : key === "soft_404_status" ? ({possible:"Можливий soft 404 — перевірте вручну",not_detected:"Сигнал не виявлено",not_checked:"Не перевірено"}[record[key]] || text(record[key])) : key === "crawl_depth" && record[key] != null && record.crawl_depth_provisional ? `${record[key]} · попередня оцінка` : text(record[key]);
+	Object.assign(filters, {possible_soft_404:"Можливий soft 404",unchecked_internal:"Є неперевірені внутрішні цілі"});
   const el = (tag, value, cls) => { const node = document.createElement(tag); if(value != null) node.textContent = value; if(cls) node.className = cls; return node; };
   const statusBadge = status => el("span", labels[status] || status, "badge " + (status === "completed" ? "success" : status === "failed" ? "error" : ["redirect","blocked_by_robots","completed_with_errors","abandoned"].includes(status) ? "warning" : ""));
   const metricStatusKeys = new Set(["title_status", "description_status", "description_mobile_status"]);
@@ -37,7 +40,7 @@
     const list = $("history-list"); list.replaceChildren(); historyNext = data.next;
     for(const run of data.runs) {
       const link = el("a",null,"history-row"); link.href = "/audits/"+run.id;
-      for(const [label,value] of [["Початок",formatDate(run.started_at)],["Аудит",run.id.slice(0,8)],["Статус",run.status],["URL",run.total],["Успішно",run.successful],["Помилки",run.failed]]) {
+      for(const [label,value] of [["Початок",formatDate(run.started_at)],["Аудит",run.id.slice(0,8)],["Статус",run.status],["URL",run.total],["Завдання без збою",run.successful],["Збої виконання",run.failed]]) {
         const cell = el("span"); cell.append(el("small",label)); cell.append(label === "Статус" ? statusBadge(value) : el("span",value));
         if(label === "Початок") cell.append(el("small",elapsed(run.started_at,run.finished_at)));
         link.append(cell);
@@ -64,7 +67,7 @@
   function renderSummary(p, analytics) {
     const run = p.run; const summary = $("summary"); summary.replaceChildren();
     const outcomes = analytics?.groups.find(g=>g.label==="Результати")?.buckets || [];
-    for(const [name,value] of [["Усього URL",run.total],["Оброблено",p.counts.completed+p.counts.failed],["Успішно",p.counts.completed],["Помилки",p.counts.failed],["Редиректи",outcomes[1]?.value ?? "—"],["Robots blocked",outcomes[2]?.value ?? "—"]]) {
+    for(const [name,value] of [["Вибрано URL",run.total],["Оброблено завдань",p.counts.completed+p.counts.failed],["Завдання без збою (не лише 200)",p.counts.completed],["Збої виконання",p.counts.failed],["Редиректи",outcomes[1]?.value ?? "—"],["Robots blocked",outcomes[2]?.value ?? "—"]]) {
       const item=el("div",null,"summary-item"); item.append(el("span",name,"summary-label"),el("strong",value,"summary-value")); summary.append(item);
     }
   }
@@ -116,7 +119,7 @@
     const body=$("results-table").querySelector("tbody"); body.replaceChildren();
     for(const record of rows) {
       const row=el("tr"); row.tabIndex=0;
-      for(const field of selected) { const td=el("td"); td.append(field.key==="rendering_status" ? window.seoRendering.badge(record[field.key]) : field.key==="rendering" ? el("span",["completed","partial","failed"].includes(record.rendering_status) ? "HTML → DOM" : "—") : field.key==="scan_status" ? statusBadge(record[field.key]) : metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : el("span",text(record[field.key]),"cell-text")); row.append(td); }
+      for(const field of selected) { const td=el("td"); td.append(field.key==="rendering_status" ? window.seoRendering.badge(record[field.key]) : field.key==="rendering" ? el("span",["completed","partial","failed"].includes(record.rendering_status) ? "HTML → DOM" : "—") : field.key==="scan_status" ? statusBadge(record[field.key]) : metricStatusKeys.has(field.key) && record.html_parsed !== false ? metricBadge(record[field.key]) : el("span",fieldText(record,field.key),"cell-text")); row.append(td); }
       row.addEventListener("click",()=>details(record)); row.addEventListener("keydown",e=>{if(e.key==="Enter") details(record);}); body.append(row);
     }
     if(!rows.length) { const row=el("tr"),td=el("td","Результатів за цим фільтром немає","empty"); td.colSpan=Math.max(1,selected.length); row.append(td); body.append(row); }
@@ -126,8 +129,8 @@
 	const serial=++detailRequest;
     $("detail-url").textContent=text(record.safe_url); const content=$("detail-content"); content.replaceChildren();
     let group="",list;
-    for(const field of fields) { if(field.key==="rendering"||field.key==="rendering_status"||field.key==="geo_signals"||field.key==="structured_data")continue; if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) ? metricBadge(record[field.key]) : document.createTextNode(text(record[field.key]))); list.append(el("dt",field.label),value); }
-	content.append(window.seoStructuredData.details(record.structured_data));
+    for(const field of fields) { if(field.key==="rendering"||field.key==="rendering_status"||field.key==="geo_signals"||field.key==="structured_data")continue; if(group!==field.group) { group=field.group; list=el("dl"); content.append(el("h3",group),list); } const value=el("dd"); value.append(metricStatusKeys.has(field.key) && record.html_parsed !== false ? metricBadge(record[field.key]) : document.createTextNode(fieldText(record,field.key))); list.append(el("dt",field.label),value); }
+	if(record.html_parsed !== false) content.append(window.seoStructuredData.details(record.structured_data));
 	content.append(window.seoCrux.details(runID,record));
 	const recrawl=el("button","Перевірити сторінку повторно");recrawl.type="button";recrawl.onclick=async()=>{recrawl.disabled=true;try{const body={};if(record.safe_url?.includes("?")){const original=window.prompt("Оригінальний URL сторінки","");if(!original)return;body.url=original;}const run=await api(`/api/audits/${runID}/results/${record.target_id}/recrawl`,body);location.assign("/audits/"+run.id);}catch(error){notice(error.message);}finally{recrawl.disabled=false;}};content.append(recrawl);
 	content.append(window.seoDiagnostics.details(record.geo_signals));
@@ -154,12 +157,13 @@
     if(serial!==graphRequest||!data.site)return;
     const s=data.site;
     $("graph-root").textContent=s.root;
-    $("graph-status").textContent=s.ready?"Граф збережено":"Збір графа";
+    $("graph-status").textContent=s.ready?(s.coverage?.graph_partial?"Частковий граф збережено":"Метрики графа обчислено"):"Збір графа";
     $("graph-summary").replaceChildren();
-    for(const [name,value] of [["Сторінки",s.nodes],["Посилання",s.edges],["Orphan candidates",s.ready?s.orphans:"—"],["Понад 3 кліки",s.ready?s.deep:"—"],["Поза набором",s.unresolved],["Sitemap",s.sitemap_state]]) {
+    for(const [name,value] of [["Сторінки",s.nodes],["Посилання",s.edges],["Без відомих inlinks (кандидати)",s.ready?s.orphans:"—"],["Понад 3 кліки за відомими шляхами",s.ready?s.deep:"—"],["Цілі без перевіреного HTTP",s.unresolved],["Sitemap",s.sitemap_state]]) {
       const item=el("span",name+" ");item.append(el("strong",value));$("graph-summary").append(item);
     }
-    $("graph-warning").textContent=[s.warning,s.limited?"Досягнуто ліміт обходу.":"",s.truncated?`Неповний набір посилань: ${s.truncated} сторінок.`:"",s.unresolved?"Частина внутрішніх адрес не має результату.":"",s.discover_rendered_links?"HTML + DOM":"HTML"].filter(Boolean).join(" ");
+    const coverage=s.coverage;
+    $("graph-warning").textContent=[s.warning,s.limited?"Досягнуто ліміт обходу.":"",s.truncated?`Неповний набір посилань: ${s.truncated} сторінок.`:"",s.unresolved?"Нуль знайдених редиректів не виключає редиректів серед неперевірених цілей.":"",coverage?.sitemap_known?`HTTP перевірено для ${coverage.sitemap_checked} із ${coverage.sitemap_known} відомих URL sitemap (${coverage.sitemap_percent.toFixed(1)}%).`:"",coverage?.graph_partial?"Глибина попередня; вхідні посилання не знайдені лише серед перевірених сторінок. Completed означає завершення вибраних завдань, а не повний обхід сайту.":"",s.discover_rendered_links?"HTML + DOM":"HTML"].filter(Boolean).join(" ");
     const body=$("graph-table").querySelector("tbody");body.replaceChildren();
     for(const edge of data.edges) {
       const row=el("tr");

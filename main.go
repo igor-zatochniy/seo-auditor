@@ -423,7 +423,7 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 			results,
 			func(ctx context.Context, limit int) ([]targetURLRecord, error) {
 				if site != nil {
-					return claimSiteTargetBatch(ctx, dbPool, cfg, limit)
+					return claimSiteTargetBatch(ctx, dbPool, cfg, limit, site)
 				}
 				return claimTargetURLBatch(ctx, dbPool, cfg, limit)
 			},
@@ -494,7 +494,7 @@ func executeCapturedAuditRun(signalCtx context.Context, dbPool *pgxpool.Pool, cf
 	if heartbeatFailure {
 		runCompletion.Status = auditRunStatusFailed
 		logger.Error(
-			"Запуск завершується через послідовні помилки heartbeat",
+			"Запуск завершується через помилку lifecycle (heartbeat або persistence)",
 			"error",
 			context.Cause(workCtx),
 			"unprocessed_targets",

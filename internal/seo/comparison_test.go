@@ -38,6 +38,15 @@ func TestRenderComparisonAllMetrics(t *testing.T) {
 	}
 }
 
+func TestBreakSeparatorsDoNotCreateFalseRenderedDelta(t *testing.T) {
+	raw := comparisonPage(t, `<body><h1>облік<br/>та управління</h1><p>one</p><p>two</p></body>`)
+	dom := comparisonPage(t, `<body><h1>облік<br>та управління</h1><p>one</p><p>two</p></body>`)
+	d := Compare(Snapshot(raw), Snapshot(dom))
+	if raw.H1 != "облік та управління" || raw.WordCount != 5 || d.H1 || d.Text {
+		t.Fatalf("raw=%q words=%d delta=%+v", raw.H1, raw.WordCount, d)
+	}
+}
+
 func TestComparisonPreservesOriginalSEOMetrics(t *testing.T) {
 	body := `<html><head><title>Stable</title><meta name="description" content="same"><script type="application/ld+json">{"x":1}</script></head><body><h1>Heading</h1>some words <a href="/a">A</a><img><template><h1>Inert</h1></template></body></html>`
 	response := func() *http.Response {

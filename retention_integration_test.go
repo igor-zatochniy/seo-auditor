@@ -47,6 +47,11 @@ func TestRetentionDryRunPreservesActiveAndLatestHistory(t *testing.T) {
 	 VALUES($1,1,'https://competitor.example/','competitor.example',false,$2,$3,'ready')`, set, runs[1], newWebRunID()); err != nil {
 		t.Fatal(err)
 	}
+	unrelatedReport := newWebRunID()
+	if _, err := pool.Exec(ctx, `INSERT INTO geo_reports(id,source_run_id,request_hash,domain,model,query_count,page_count,matched_count,ambiguous_count)
+	 VALUES($1,$2,decode(repeat('00',32),'hex'),'example.com','fixture',1,1,0,0)`, unrelatedReport, runs[2]); err != nil {
+		t.Fatal(err)
+	}
 	opts := retentionOptions{KeepDays: 90, MaxRuns: 100}
 	summary, err := applyDataRetention(ctx, pool, opts)
 	if err != nil || !summary.DryRun || summary.DeletedRuns != 0 {
@@ -64,10 +69,13 @@ func TestRetentionDryRunPreservesActiveAndLatestHistory(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM audit_runs WHERE id=$1)`, runs[0]).Scan(&exists); err != nil || exists {
 		t.Fatal("expired parent audit was not removed", exists, err)
 	}
-	for _, table := range []string{"geo_reports", "geo_query_results", "geo_competitor_sets", "geo_competitor_jobs"} {
-		if err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil || count != 0 {
-			t.Fatal("dependent history did not cascade", table, count, err)
+	for _, scope := range []struct{ table, column, id string }{{"geo_reports", "id", report}, {"geo_query_results", "report_id", report}, {"geo_competitor_sets", "id", set}, {"geo_competitor_jobs", "set_id", set}} {
+		if err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM `+scope.table+` WHERE `+scope.column+`=$1`, scope.id).Scan(&count); err != nil || count != 0 {
+			t.Fatal("dependent history did not cascade", scope.table, count, err)
 		}
+	}
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM geo_reports WHERE id=$1)`, unrelatedReport).Scan(&exists); err != nil || !exists {
+		t.Fatal("unrelated GEO history removed", err)
 	}
 	for _, id := range runs[2:] {
 		if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM audit_runs WHERE id=$1)`, id).Scan(&exists); err != nil || !exists {

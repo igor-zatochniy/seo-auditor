@@ -125,7 +125,7 @@ const reportHeaderHTML = `<!doctype html>
   <section class="summary" aria-label="Підсумок аудиту">
     <div class="metric"><span class="metric-label">Статус</span><span class="pill {{.StatusTone}}">{{.Status}}</span></div>
     <div class="metric"><span class="metric-label">URL у запуску</span><span class="metric-value">{{.TotalURLs}}</span></div>
-    <div class="metric"><span class="metric-label">Успішно</span><span class="metric-value">{{.SuccessfulURLs}}</span></div>
+    <div class="metric"><span class="metric-label">Завдання без помилки виконання (не лише HTTP 200)</span><span class="metric-value">{{.SuccessfulURLs}}</span></div>
     <div class="metric"><span class="metric-label">З помилками</span><span class="metric-value">{{.FailedURLs}}</span></div>
   </section>
   <dl class="run-meta">
@@ -136,6 +136,7 @@ const reportHeaderHTML = `<!doctype html>
   <section aria-label="Технічні сигнали">
     {{range .Analytics.Groups}}{{$group := .}}<details><summary>{{.Label}}</summary><dl>{{range .Buckets}}<dt>{{.Label}}</dt><dd>{{printf "%.1f" .Value}} <progress max="{{$group.Maximum}}" value="{{.Value}}" aria-label="{{.Label}}"></progress></dd>{{end}}</dl></details>{{end}}
   </section>
+  {{template "report-diagnostics" .Diagnostics}}
   <div class="table-shell">
     <table>
       <thead>
@@ -157,7 +158,7 @@ const reportHeaderHTML = `<!doctype html>
       <tbody>
 `
 
-const reportRowHTML = `        <tr>
+const reportRowHTML = `        <tr id="target-{{.TargetID}}">
           <td class="url">{{.URL}}{{if .Details}}<details><summary>Повні метрики</summary><dl>{{range .Details}}<dt>{{.Group}} / {{.Label}}</dt><dd>{{.Value}}</dd>{{end}}</dl></details>{{end}}</td>
           <td class="compact">{{.HTTPCode}}</td>
           <td class="compact"><span class="pill {{.StatusTone}}">{{.Status}}</span></td>
@@ -165,9 +166,9 @@ const reportRowHTML = `        <tr>
           <td class="text-cell">{{.Description}}</td>
           <td class="text-cell">{{.H1}}</td>
           <td class="compact">{{.Links}}</td>
-          <td class="compact">{{.ImagesMissingAlt}}</td>
+          <td class="compact">{{if .HTMLParsed}}{{.ImagesMissingAlt}}{{else}}Не перевірено{{end}}</td>
           <td class="text-cell">{{.Robots}}</td>
-          <td class="compact">{{.WordCount}}</td>
+          <td class="compact">{{if .HTMLParsed}}{{.WordCount}}{{else}}Не перевірено{{end}}</td>
           <td class="compact">{{.Duration}}</td>
           <td class="error">{{.Error}}</td>
         </tr>

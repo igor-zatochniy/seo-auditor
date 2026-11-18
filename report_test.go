@@ -242,7 +242,7 @@ func TestNewAuditReportRowBuildsVisibleStatusFields(t *testing.T) {
 	if row.HTTPCode != "503" || row.StatusTone != "tone-warning" || row.Duration != "1.25 s" {
 		t.Fatalf("unexpected report row status: %#v", row)
 	}
-	if !strings.Contains(row.Links, "Усього: 5") ||
+	if row.HTMLParsed || row.Links != "Не перевірено" ||
 		!strings.Contains(row.Robots, "Результат: дозволено") ||
 		!strings.Contains(row.Robots, "X-Robots-Tag: nofollow") {
 		t.Fatalf("unexpected report row details: %#v", row)

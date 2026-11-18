@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,6 +35,7 @@ type auditReportPaths struct {
 }
 
 type auditReportSummary struct {
+	Diagnostics    reportDiagnostics
 	Analytics      webAnalytics
 	RunID          string
 	Status         string
@@ -47,6 +49,8 @@ type auditReportSummary struct {
 }
 
 type auditReportRow struct {
+	TargetID         int64
+	HTMLParsed       bool
 	Details          []reportDetail
 	URL              string
 	HTTPCode         string
@@ -66,10 +70,16 @@ type auditReportRow struct {
 type reportRowIterator func() (auditReportRow, bool, error)
 
 var (
-	reportHeaderTemplate = template.Must(template.New("report-header").Parse(reportHeaderHTML))
+	reportHeaderTemplate = newReportHeaderTemplate()
 	reportRowTemplate    = template.Must(template.New("report-row").Parse(reportRowHTML))
 	reportFooterTemplate = template.Must(template.New("report-footer").Parse(reportFooterHTML))
 )
+
+func newReportHeaderTemplate() *template.Template {
+	t := template.Must(template.New("report-header").Parse(reportHeaderHTML))
+	template.Must(t.AddParseTree("report-diagnostics", reportDiagnosticsTemplate.Tree))
+	return t
+}
 
 func publishAuditReport(dbPool *pgxpool.Pool, cfg Config) {
 	publishAuditReportContext(context.Background(), dbPool, cfg, true)
@@ -173,127 +183,49 @@ func exportAuditReport(
 	reportDir string,
 	generatedAt time.Time,
 ) (auditReportPaths, error) {
-	summary, err := loadAuditReportSummary(ctx, dbPool, runID, generatedAt)
+	tx, err := dbPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return auditReportPaths{}, err
 	}
-	summary.Analytics, err = loadWebAnalytics(ctx, dbPool, runID)
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	summary, err := loadAuditReportSummary(ctx, tx, runID, generatedAt)
+	if err != nil {
+		return auditReportPaths{}, err
+	}
+	summary.Analytics, err = loadWebAnalytics(ctx, tx, runID)
 	if err != nil {
 		return auditReportPaths{}, err
 	}
 
-	rows, err := dbPool.Query(
-		ctx,
-		`SELECT safe_url,
-		        status_code,
-		        scan_status,
-		        COALESCE(title, ''),
-		        COALESCE(description, ''),
-		        COALESCE(h1, ''),
-		        COALESCE(internal_links_count, 0),
-		        COALESCE(external_links_count, 0),
-		        COALESCE(links_count, 0),
-		        COALESCE(images_missing_alt, 0),
-		        COALESCE(meta_robots, ''),
-		        COALESCE(x_robots_tag, ''),
-		        COALESCE(robots_allowed, FALSE),
-		        COALESCE(robots_outcome, 'not_checked'),
-		        COALESCE(word_count, 0),
-		        COALESCE(duration_ms, 0),
-		        COALESCE(error_code, ''),
-		        COALESCE(error_message, ''),
-		        (SELECT row_to_json(p) FROM (`+reportSelectSQL()+` WHERE r.run_id = outer_result.run_id AND r.target_id = outer_result.target_id) p)
-		 FROM audit_results outer_result
-		 WHERE run_id = $1
-		 ORDER BY target_id`,
-		runID,
-	)
+	summary.Diagnostics, err = loadReportDiagnostics(ctx, tx, runID)
 	if err != nil {
-		return auditReportPaths{}, fmt.Errorf("query audit report results for run %s: %w", runID, err)
+		return auditReportPaths{}, err
 	}
-	defer rows.Close()
-
+	after := int64(math.MinInt64)
+	partial := summary.Diagnostics.Coverage != nil && summary.Diagnostics.Coverage.GraphPartial
+	var batch []reportRecord
+	more := true
 	next := func() (auditReportRow, bool, error) {
-		if !rows.Next() {
-			if err := rows.Err(); err != nil {
+		if len(batch) == 0 {
+			if !more {
+				return auditReportRow{}, false, nil
+			}
+			batch, more, err = loadReportRecordBatch(ctx, tx, runID, after, partial)
+			if err != nil || len(batch) == 0 {
 				return auditReportRow{}, false, err
 			}
-			return auditReportRow{}, false, nil
 		}
-
-		var (
-			safeURL          string
-			statusCode       sql.NullInt32
-			scanStatus       string
-			title            string
-			description      string
-			h1               string
-			internalLinks    int
-			externalLinks    int
-			totalLinks       int
-			imagesMissingAlt int
-			metaRobots       string
-			xRobotsTag       string
-			robotsAllowed    bool
-			robotsOutcome    string
-			wordCount        int
-			durationMS       int64
-			errorCode        string
-			errorMessage     string
-			detailsJSON      []byte
-		)
-		if err := rows.Scan(
-			&safeURL,
-			&statusCode,
-			&scanStatus,
-			&title,
-			&description,
-			&h1,
-			&internalLinks,
-			&externalLinks,
-			&totalLinks,
-			&imagesMissingAlt,
-			&metaRobots,
-			&xRobotsTag,
-			&robotsAllowed,
-			&robotsOutcome,
-			&wordCount,
-			&durationMS,
-			&errorCode,
-			&errorMessage,
-			&detailsJSON,
-		); err != nil {
-			return auditReportRow{}, false, fmt.Errorf("scan audit report result: %w", err)
-		}
-
-		row := newAuditReportRow(
-			safeURL,
-			statusCode,
-			scanStatus,
-			title,
-			description,
-			h1,
-			internalLinks,
-			externalLinks,
-			totalLinks,
-			imagesMissingAlt,
-			metaRobots,
-			xRobotsTag,
-			robotsAllowed,
-			robotsOutcome,
-			wordCount,
-			durationMS,
-			errorCode,
-			errorMessage,
-		)
-		var record reportRecord
-		decoder := json.NewDecoder(bytes.NewReader(detailsJSON))
-		decoder.UseNumber()
-		if err := decoder.Decode(&record); err != nil {
+		record := batch[0]
+		batch = batch[1:]
+		after, err = record["target_id"].(json.Number).Int64()
+		if err != nil {
 			return auditReportRow{}, false, err
 		}
-		row.Details = recordDetails(sanitizeReportRecord(record))
-		return row, true, nil
+		return auditReportRowFromRecord(record, after), true, nil
 	}
 
 	paths, err := writeAuditReportFiles(reportDir, summary, next, generatedAt)
@@ -305,7 +237,7 @@ func exportAuditReport(
 
 func loadAuditReportSummary(
 	ctx context.Context,
-	dbPool *pgxpool.Pool,
+	dbPool reportQuerier,
 	runID string,
 	generatedAt time.Time,
 ) (auditReportSummary, error) {
@@ -344,6 +276,16 @@ func loadAuditReportSummary(
 	}, nil
 }
 
+func auditReportRowFromRecord(r reportRecord, targetID int64) auditReportRow {
+	text := func(key string) string { return reportValue(r[key]) }
+	number := func(key string) int { n, _ := strconv.Atoi(text(key)); return n }
+	status := sql.NullInt32{Int32: int32(number("status_code")), Valid: r["status_code"] != nil}
+	row := newAuditReportRow(text("safe_url"), status, text("scan_status"), text("title"), text("description"), text("h1"), number("internal_links_count"), number("external_links_count"), number("links_count"), number("images_missing_alt"), text("meta_robots"), text("x_robots_tag"), r["robots_allowed"] == true, text("robots_outcome"), number("word_count"), int64(number("duration_ms")), text("error_code"), text("error_message"))
+	row.TargetID = targetID
+	row.Details = recordDetails(r)
+	return row
+}
+
 func newAuditReportRow(
 	safeURL string,
 	statusCode sql.NullInt32,
@@ -372,9 +314,12 @@ func newAuditReportRow(
 		httpCode = strconv.FormatInt(int64(statusCode.Int32), 10)
 	}
 
-	accessLabel := "заборонено"
-	if robotsAllowed {
-		accessLabel = "дозволено"
+	accessLabel := "не перевірено"
+	if robotsOutcome == robotsOutcomeAllowed || robotsOutcome == robotsOutcomeDisallowed {
+		accessLabel = "заборонено"
+		if robotsAllowed {
+			accessLabel = "дозволено"
+		}
 	}
 	robotsParts := []string{
 		fmt.Sprintf("Результат: %s", reportRobotsOutcomeLabel(robotsOutcome)),
@@ -398,8 +343,14 @@ func newAuditReportRow(
 	if len(errorParts) > 0 {
 		errorText = strings.Join(errorParts, ": ")
 	}
+	parsed := scanStatus == scanStatusCompleted && statusCode.Valid && statusCode.Int32 == 200
+	links := fmt.Sprintf("Внутрішні: %d\nЗовнішні: %d\nУсього: %d", internalLinks, externalLinks, totalLinks)
+	if !parsed {
+		title, description, h1, links = "Не перевірено", "Не перевірено", "Не перевірено", "Не перевірено"
+	}
 
 	return auditReportRow{
+		HTMLParsed:       parsed,
 		URL:              displayReportValue(safeURL),
 		HTTPCode:         httpCode,
 		Status:           reportStatusLabel(scanStatus),
@@ -407,7 +358,7 @@ func newAuditReportRow(
 		Title:            displayReportValue(title),
 		Description:      displayReportValue(description),
 		H1:               displayReportValue(h1),
-		Links:            fmt.Sprintf("Внутрішні: %d\nЗовнішні: %d\nУсього: %d", internalLinks, externalLinks, totalLinks),
+		Links:            links,
 		ImagesMissingAlt: imagesMissingAlt,
 		Robots:           strings.Join(robotsParts, "\n"),
 		WordCount:        wordCount,

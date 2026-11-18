@@ -67,7 +67,7 @@ func TestGEOCleanMainContentDoesNotChangeDocumentMetrics(t *testing.T) {
 
 func TestGEOStructureLimitDoesNotBreakSEO(t *testing.T) {
 	data := parseGEOTest(t, `<body><h1>Title</h1>`+strings.Repeat("<div>", 200)+`<p>Real answer words</p><img src="x"><a href="/page">Link</a>`+strings.Repeat("</div>", 200))
-	if !data.GEO.ContentIncomplete || data.H1 != "Title" || data.H1Count != 1 || data.TotalImages != 1 || data.ImagesMissingAlt != 1 || data.InternalLinksCount != 1 || data.WordCount != 3 {
+	if !data.GEO.ContentIncomplete || data.H1 != "Title" || data.H1Count != 1 || data.TotalImages != 1 || data.ImagesMissingAlt != 1 || data.InternalLinksCount != 1 || data.WordCount != 5 {
 		t.Fatalf("GEO пошкодив SEO: %+v", data)
 	}
 }

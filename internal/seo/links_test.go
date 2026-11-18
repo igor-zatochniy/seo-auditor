@@ -1,6 +1,7 @@
 package seo
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -21,7 +22,10 @@ func TestLinkDiscoveryUsesBaseAndIgnoresInertContent(t *testing.T) {
 }
 
 func TestLinkDiscoveryIsBoundedAndOptIn(t *testing.T) {
-	body := "<body>" + strings.Repeat(`<a href="/next">Next</a>`, MaxDiscoveredLinks+20)
+	body := "<body>"
+	for i := 0; i < MaxDiscoveredLinks+20; i++ {
+		body += fmt.Sprintf(`<a href="/next/%d">Next</a>`, i)
+	}
 	for _, collect := range []bool{false, true} {
 		resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/html"}}, Body: io.NopCloser(strings.NewReader(body))}
 		d, err := parsePage(resp, "https://example.com/", 1<<20, 1<<20, collect)
@@ -37,5 +41,22 @@ func TestLinkDiscoveryIsBoundedAndOptIn(t *testing.T) {
 		if d.InternalLinksCount != MaxDiscoveredLinks+20 {
 			t.Fatal("link metric changed")
 		}
+	}
+}
+
+func TestDiscoveryDeduplicatesBeforeApplyingBudget(t *testing.T) {
+	body := `<head><base href="https://EXAMPLE.com:443/"></head><body>` +
+		strings.Repeat(`<a href="/project#image" rel="nofollow"><img src="x"></a><a href="https://example.com/project#title">Project</a><a href="/project">More</a>`, 150) +
+		`<a href="/projects?start=40">Next page</a><h1>облік<br>та <b>управління</b></h1><p>one</p><p>two</p>`
+	resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/html; charset=utf-8"}}, Body: io.NopCloser(strings.NewReader(body))}
+	d, err := ParsePageWithLinks(resp, "https://example.com/", 1<<20, 1<<20)
+	if err != nil || len(d.DiscoveredLinks) != 2 || d.LinksTruncated {
+		t.Fatalf("links=%+v truncated=%v err=%v", d.DiscoveredLinks, d.LinksTruncated, err)
+	}
+	if d.DiscoveredLinks[0].URL != "https://example.com/project" || d.DiscoveredLinks[0].Nofollow || d.DiscoveredLinks[0].Anchor != "Project" || d.DiscoveredLinks[1].URL != "https://example.com/projects?start=40" {
+		t.Fatalf("links=%+v", d.DiscoveredLinks)
+	}
+	if d.InternalLinksCount != 451 || d.H1 != "облік та управління" {
+		t.Fatalf("raw metrics changed: links=%d h1=%q", d.InternalLinksCount, d.H1)
 	}
 }

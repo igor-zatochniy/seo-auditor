@@ -3,6 +3,8 @@ package seo
 import (
 	"net/url"
 	"strings"
+
+	"github.com/igor-zatochniy/seo-auditor/internal/crawler"
 )
 
 const MaxDiscoveredLinks = 256
@@ -27,12 +29,42 @@ func (p *pageParser) startLink(a tagAttributes) {
 	if !p.collectLinks {
 		return
 	}
-	if len(p.data.DiscoveredLinks) >= MaxDiscoveredLinks || len(a.href) > MaxDiscoveredURLBytes {
+	if len(a.href) > MaxDiscoveredURLBytes {
 		p.data.LinksTruncated = true
 		return
 	}
 	href := strings.TrimSpace(string(a.href))
 	if href == "" || strings.HasPrefix(href, "#") {
+		return
+	}
+	parsed, err := url.Parse(href)
+	if err != nil || p.documentBaseURL == nil {
+		return
+	}
+	resolved := p.documentBaseURL.ResolveReference(parsed)
+	resolved.Scheme = strings.ToLower(resolved.Scheme)
+	if resolved.User != nil || (resolved.Scheme != "http" && resolved.Scheme != "https") {
+		return
+	}
+	authority, err := crawler.NormalizeAuthority(resolved)
+	if err != nil {
+		return
+	}
+	resolved.Host = authority
+	resolved.Fragment, resolved.RawFragment = "", ""
+	if resolved.Path == "" {
+		resolved.Path = "/"
+	}
+	href = resolved.String()
+	if len(href) > MaxDiscoveredURLBytes {
+		p.data.LinksTruncated = true
+		return
+	}
+	if p.discoveredURLs == nil {
+		p.discoveredURLs = make(map[string]int)
+	}
+	if _, duplicate := p.discoveredURLs[href]; !duplicate && len(p.data.DiscoveredLinks) >= MaxDiscoveredLinks {
+		p.data.LinksTruncated = true
 		return
 	}
 	p.linkCollector = linkCollector{active: true, href: href,
@@ -45,32 +77,15 @@ func (p *pageParser) finishLink() {
 		return
 	}
 	anchor, _, _ := c.anchor.Result()
-	p.data.DiscoveredLinks = append(p.data.DiscoveredLinks, DiscoveredLink{URL: c.href, Anchor: anchor, Nofollow: c.nofollow})
+	if i, duplicate := p.discoveredURLs[c.href]; duplicate {
+		link := &p.data.DiscoveredLinks[i]
+		link.Nofollow = link.Nofollow && c.nofollow
+		if link.Anchor == "" {
+			link.Anchor = anchor
+		}
+	} else {
+		p.discoveredURLs[c.href] = len(p.data.DiscoveredLinks)
+		p.data.DiscoveredLinks = append(p.data.DiscoveredLinks, DiscoveredLink{URL: c.href, Anchor: anchor, Nofollow: c.nofollow})
+	}
 	c.active = false
-}
-
-func (p *pageParser) resolveLinks() {
-	if p.documentBaseURL == nil {
-		p.data.DiscoveredLinks = nil
-		return
-	}
-	links := p.data.DiscoveredLinks[:0]
-	for _, link := range p.data.DiscoveredLinks {
-		parsed, err := url.Parse(link.URL)
-		if err != nil {
-			continue
-		}
-		resolved := p.documentBaseURL.ResolveReference(parsed)
-		resolved.Fragment, resolved.RawFragment = "", ""
-		if resolved.User != nil || (resolved.Scheme != "http" && resolved.Scheme != "https") {
-			continue
-		}
-		link.URL = resolved.String()
-		if len(link.URL) > MaxDiscoveredURLBytes {
-			p.data.LinksTruncated = true
-			continue
-		}
-		links = append(links, link)
-	}
-	p.data.DiscoveredLinks = links
 }

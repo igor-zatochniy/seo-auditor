@@ -1,6 +1,11 @@
-FROM postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+FROM postgres:16.16-alpine@sha256:81e77a4833487b8132fe4b00bedd39dc3f74b8641e387f19312a48f7de218c2e
 
 RUN apk add --no-cache --upgrade \
+        musl=1.2.6-r3 \
+        musl-utils=1.2.6-r3 \
+        zlib=1.4-r0 \
+        krb5-libs=1.22.3-r0 \
+        libxslt=1.1.43-r4 \
         libcrypto3=3.5.9-r0 \
         libssl3=3.5.9-r0 \
         libuuid=2.42.3-r1 && \
